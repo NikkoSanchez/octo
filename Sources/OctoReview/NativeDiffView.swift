@@ -1,0 +1,221 @@
+import AppKit
+import SwiftUI
+import OctoCore
+
+/// One native text system owns selection and scrolling. SwiftUI never renders a row per line.
+public struct NativeDiffView: NSViewRepresentable {
+    public var theme: AppTheme
+    public var focusRequest: Int
+    public var snapshot: ReviewSnapshot
+    public var onSelection: (CodeAttachment?) -> Void
+    public var onAskAgent: (CodeAttachment) -> Void
+    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
+        self.theme = theme; self.focusRequest = focusRequest; self.snapshot = snapshot; self.onSelection = onSelection; self.onAskAgent = onAskAgent
+    }
+    public func makeCoordinator() -> Coordinator { Coordinator(self) }
+    public func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
+        let text = ReviewTextView(usingTextLayoutManager: true)
+        text.isEditable = false; text.isSelectable = true; text.isRichText = false
+        text.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        text.backgroundColor = .textBackgroundColor; text.drawsBackground = true
+        text.textContainerInset = NSSize(width: 36, height: 12)
+        text.isHorizontallyResizable = true; text.isVerticallyResizable = true
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = false
+        text.textContainer?.containerSize = NSSize(width: 100_000, height: CGFloat.greatestFiniteMagnitude)
+        text.delegate = context.coordinator
+        text.setAccessibilityLabel("Code changes. Hover a line to attach it with the plus button, or select code and choose Ask Agent.")
+        text.askAgent = { [weak coordinator = context.coordinator] in coordinator?.ask() }
+        text.attachRange = { [weak coordinator = context.coordinator] range in coordinator?.attach(range) }
+        scroll.documentView = text
+        text.observeScrolling()
+        context.coordinator.textView = text
+        updateNSView(scroll, context: context)
+        return scroll
+    }
+    public func updateNSView(_ scroll: NSScrollView, context: Context) {
+        let coordinator = context.coordinator; coordinator.parent = self
+        guard let text = coordinator.textView else { return }
+        if coordinator.focusRequest != focusRequest {
+            coordinator.focusRequest = focusRequest
+            DispatchQueue.main.async { text.window?.makeFirstResponder(text) }
+        }
+        let changedSnapshot = coordinator.document?.snapshot.id != snapshot.id
+        guard changedSnapshot || coordinator.theme != theme else { return }
+        let selection = text.selectedRange()
+        let document = ReviewDocument(snapshot: snapshot); coordinator.document = document; coordinator.theme = theme
+        text.reviewDocument = document
+        text.theme = theme
+        text.backgroundColor = Self.color(theme.palette?.base, fallback: .textBackgroundColor)
+        text.insertionPointColor = Self.color(theme.palette?.rosewater, fallback: .labelColor)
+        let selectionColor = theme.palette.map { Self.color($0.overlay2, fallback: .selectedTextBackgroundColor).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor
+        text.selectedTextAttributes = [.backgroundColor: selectionColor, .foregroundColor: Self.color(theme.palette?.text, fallback: .selectedTextColor)]
+        text.textStorage?.setAttributedString(Self.render(document, theme: theme))
+        if changedSnapshot { text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollToBeginningOfDocument(nil) }
+        else { text.setSelectedRange(selection) }
+    }
+    static func color(_ hex: String?, fallback: NSColor) -> NSColor {
+        guard let hex, let value = UInt32(hex, radix: 16) else { return fallback }
+        return NSColor(srgbRed: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255, alpha: 1)
+    }
+    static func render(_ document: ReviewDocument, theme: AppTheme) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 3
+        let result = NSMutableAttributedString(string: document.text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+            .foregroundColor: color(theme.palette?.text, fallback: .labelColor), .paragraphStyle: paragraph
+        ])
+        for segment in document.segments {
+            let full = (document.text as NSString).lineRange(for: segment.contentRange)
+            let background: NSColor?
+            switch segment.line.kind {
+            case .addition: background = color(theme.palette?.green, fallback: .systemGreen).withAlphaComponent(0.20)
+            case .deletion: background = color(theme.palette?.red, fallback: .systemRed).withAlphaComponent(0.20)
+            case .header: background = color(theme.palette?.surface, fallback: .quaternaryLabelColor).withAlphaComponent(0.25)
+            case .context: background = nil
+            }
+            if let background { result.addAttribute(.backgroundColor, value: background, range: full) }
+            let gutter = NSRange(location: full.location, length: max(0, segment.contentRange.location - full.location))
+            result.addAttribute(.foregroundColor, value: color(theme.palette?.overlay1, fallback: .secondaryLabelColor), range: gutter)
+            if segment.line.kind == .header {
+                let line = segment.line.text
+                let hex = line.hasPrefix("@@") ? theme.palette?.peach : line.hasPrefix("diff ") ? theme.palette?.blue : (line.hasPrefix("---") || line.hasPrefix("+++")) ? theme.palette?.pink : theme.palette?.overlay2
+                result.addAttribute(.foregroundColor, value: color(hex, fallback: .secondaryLabelColor), range: segment.contentRange)
+            }
+        }
+        ReviewSyntax.apply(to: result, document: document, theme: theme)
+        return result
+    }
+    public final class Coordinator: NSObject, NSTextViewDelegate {
+        var theme: AppTheme?
+        var focusRequest = 0
+        var parent: NativeDiffView
+        var document: ReviewDocument?
+        weak var textView: ReviewTextView?
+        init(_ parent: NativeDiffView) { self.parent = parent }
+        public func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView else { return }
+            parent.onSelection(document?.attachment(for: textView.selectedRange()))
+            textView.updateHover()
+        }
+        func ask() {
+            guard let textView, let attachment = document?.attachment(for: textView.selectedRange()) else { return }
+            parent.onAskAgent(attachment)
+        }
+        func attach(_ range: NSRange) {
+            guard let attachment = document?.attachment(for: range) else { return }
+            textView?.setSelectedRange(range)
+            parent.onAskAgent(attachment)
+        }
+    }
+}
+final class ReviewTextView: NSTextView {
+    var theme: AppTheme = .system {
+        didSet {
+            attachButton.contentTintColor = NativeDiffView.color(theme.palette?.base, fallback: .white)
+            attachButton.layer?.backgroundColor = NativeDiffView.color(theme.palette?.accent, fallback: .controlAccentColor).cgColor
+            needsDisplay = true
+        }
+    }
+    var askAgent: (() -> Void)?
+    var attachRange: ((NSRange) -> Void)?
+    var reviewDocument: ReviewDocument? { didSet { clearHover() } }
+    private var hoverTracking: NSTrackingArea?
+    private var hoverPoint: NSPoint?
+    private var hoveredRange: NSRange?
+    private var hoveredLineRect: NSRect?
+    private lazy var attachButton: NSButton = {
+        let button = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Attach code to draft")!, target: self, action: #selector(attachHoveredLine))
+        button.isBordered = false
+        button.bezelStyle = .smallSquare
+        button.contentTintColor = .white
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        button.layer?.cornerRadius = 4
+        button.isHidden = true
+        addSubview(button)
+        return button
+    }()
+
+    func observeScrolling() {
+        guard let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged), name: NSView.boundsDidChangeNotification, object: clip)
+    }
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area); hoverTracking = area
+    }
+    override func mouseEntered(with event: NSEvent) { trackHover(event) }
+    override func mouseMoved(with event: NSEvent) { super.mouseMoved(with: event); trackHover(event) }
+    override func mouseDown(with event: NSEvent) {
+        hoverPoint = convert(event.locationInWindow, from: nil)
+        super.mouseDown(with: event)
+        updateHover()
+    }
+    override func mouseExited(with event: NSEvent) { hoverPoint = nil; clearHover() }
+    private func trackHover(_ event: NSEvent) {
+        hoverPoint = convert(event.locationInWindow, from: nil)
+        updateHover()
+    }
+    @objc private func viewportChanged() { clearHover() }
+
+    func updateHover() {
+        guard let point = hoverPoint, let document = reviewDocument,
+              let layout = textLayoutManager, let content = layout.textContentManager else { clearHover(); return }
+        guard visibleRect.contains(point) else { clearHover(); return }
+        // Each unwrapped source line is one TextKit 2 paragraph. Resolve vertically so
+        // hovering trailing whitespace or the action gutter still targets the same line.
+        let offset = characterIndexForInsertion(at: CGPoint(x: textContainerOrigin.x + 6, y: point.y))
+        guard let location = content.location(content.documentRange.location, offsetBy: offset),
+              let fragment = layout.textLayoutFragment(for: location) else { clearHover(); return }
+        let frame = fragment.layoutFragmentFrame.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        guard point.y >= frame.minY, point.y < frame.maxY else { clearHover(); return }
+        guard let range = document.attachmentRange(forLineAtUTF16Offset: offset, selection: selectedRange()) else { clearHover(); return }
+        hoveredRange = range
+        hoveredLineRect = NSRect(x: visibleRect.minX, y: frame.minY, width: visibleRect.width, height: frame.height)
+        let size: CGFloat = min(20, frame.height)
+        attachButton.frame = NSRect(x: visibleRect.minX + 6, y: frame.minY, width: size, height: size)
+        let selected = range == selectedRange()
+        attachButton.toolTip = selected ? "Attach selection to draft" : "Attach line to draft"
+        attachButton.setAccessibilityLabel(selected ? "Attach selection to draft" : "Attach line to draft")
+        attachButton.isHidden = false
+        needsDisplay = true
+    }
+
+    private func clearHover() {
+        hoveredRange = nil; hoveredLineRect = nil
+        attachButton.isHidden = true
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if let hoveredLineRect {
+            NativeDiffView.color(theme.palette?.text, fallback: .labelColor).withAlphaComponent(0.10).setFill()
+            hoveredLineRect.intersection(dirtyRect).fill()
+        }
+    }
+    @objc private func attachHoveredLine() {
+        guard let hoveredRange else { return }
+        attachRange?(hoveredRange)
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        if selectedRange().length > 0 {
+            let item = NSMenuItem(title: "Ask Agent About Selection", action: #selector(ask), keyEquivalent: "")
+            item.target = self; menu.insertItem(.separator(), at: 0); menu.insertItem(item, at: 0)
+        }
+        return menu
+    }
+    @objc private func ask() { askAgent?() }
+}

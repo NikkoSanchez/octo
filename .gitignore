@@ -1,0 +1,28 @@
+.build/
+.swiftpm/
+.DS_Store
+build/
+*.xcuserstate
+xcuserdata/
+
+# Local credentials, signing material, and environment overrides
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+.claude/settings.local.json
+
+# Local workspace exports and diagnostic output
+workspace.json
+workspace-*.json
+*.log
+/audit-output/
+
+__pycache__/
+*.pyc
+.octo-workspace-*

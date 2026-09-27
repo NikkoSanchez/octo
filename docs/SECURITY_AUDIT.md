@@ -20,9 +20,9 @@ The archive remains plaintext. Owner-only permissions prevent ordinary cross-acc
 | Complete protocol lines could bypass frame cap | Every complete, fragmented and final frame checked before decoding; background I/O waits for MainActor delivery instead of accumulating unbounded queued output | Complete, fragmented, EOF, Unicode and existing protocol fixture tests |
 | Untracked previews had weaker containment | Both preview paths walk directory descriptors using `openat`/`O_NOFOLLOW`, reject symlink components and non-regular files, and bound reads to 2 MB even if a file grows | Both preview paths tested against traversal and ancestor links, plus file-type checks |
 | Personal checkout path in docs | Removed | Source privacy scan |
-| Personal Git author email | Use the account's GitHub noreply identity in this repository's local Git configuration; global identity remains independent | Inspect initial commit author and committer before publication |
+| Personal Git author email | The initial local commit uses the account's GitHub noreply identity; setup configures it on new checkouts when authenticated `gh` is available and no local email is set; global identity remains independent | Inspect initial commit author and committer before publication |
 | Accidental archive/credential commit | Ignore rules, staged-blob pre-commit check, history-aware pre-push check and CI check; archive detection examines JSON structure regardless of filename | Four Python tests, including an archive deleted in a later commit |
-| Mutable CI action and implicit token access | Checkout pinned to `11bd71901bbe5b1630ceea73d27597364c9af683` (v4.2.2); `contents: read`; `persist-credentials: false`; job timeout | Pinned reference verified through GitHub API; workflow inspected |
+| Mutable CI action and implicit token access | Checkout pinned to `11d5960a326750d5838078e36cf38b85af677262` (current v4 reference, verified 2026-09-26); `contents: read`; `persist-credentials: false`; job timeout | Pinned reference verified through GitHub API; workflow inspected |
 
 Default storage permissions on the development Mac were tightened without reading or editing conversation contents. A previously running app may still contain the old code: restart it after ending any active agent/terminal work to use the hardened persistence implementation.
 
@@ -49,7 +49,7 @@ This is not an independent binary/source reproducibility audit, a comprehensive 
 ## Validation and remaining limits
 
 - 37 Swift tests passed after hardening, plus four privacy-check tests. No paid model calls.
-- `Scripts/build-app.sh` passed with the hardened process/terminal changes.
+- `Scripts/build-app.sh` and strict code-signature verification passed with the hardened process/terminal changes. `make setup` also built successfully from a clean, single-branch local clone.
 - Native UI automation initially reported “Computer Use was not approved to use Octo.” An isolated app launched with a disposable archive, but this alone does not verify terminal UI behavior. Final verification is recorded in STATUS.md.
 - All provider protocol policies remain unchanged: Codex app-server v2 requests `workspace-write`/`on-request`; Claude requests its default permission mode. Unsupported permission expansion is declined. Protocol framing and lifecycle were tested with local fake providers.
 - Process groups cover ordinary descendants. Deliberately detached sessions are not contained; lifecycle cleanup is not a security sandbox. Long-lived agent sessions have frame/queue bounds but no total conversation-size limit. Whole-archive persistence and screenshot growth remain known scalability limits.

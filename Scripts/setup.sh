@@ -38,6 +38,22 @@ if [[ -z "$hooks" || "$hooks" == .githooks ]]; then
 else
   printf 'Keeping existing Git hooks at %s. Run python3 Scripts/check-private-data.py before committing.\n' "$hooks"
 fi
+# Commit identity is per checkout. Never copy credentials or modify global Git settings.
+if [[ -z "$(git config --local --get user.email || true)" ]]; then
+  identity=""
+  if command -v gh >/dev/null 2>&1; then
+    identity="$(gh api user --jq '"\(.id) \(.login)"' 2>/dev/null || true)"
+  fi
+  if [[ "$identity" =~ ^([0-9]+)[[:space:]]([A-Za-z0-9-]+)$ ]]; then
+    account_id="${BASH_REMATCH[1]}"
+    account_login="${BASH_REMATCH[2]}"
+    git config --local user.email "$account_id+$account_login@users.noreply.github.com"
+    if [[ -z "$(git config --local --get user.name || true)" ]]; then git config --local user.name "$account_login"; fi
+    echo 'Configured this checkout to use your GitHub noreply commit identity.'
+  else
+    echo "Before committing, set this checkout's Git user.email to your GitHub noreply address. Global identity was not changed."
+  fi
+fi
 python3 Scripts/check-private-data.py --worktree
 ./Scripts/build-app.sh
 printf '\nReady. Launch with: open build/Octo.app\n'

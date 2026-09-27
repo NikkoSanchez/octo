@@ -17,7 +17,7 @@ make setup
 open build/Octo.app
 ```
 
-`make setup` checks prerequisites, installs this checkout's privacy Git hooks (without replacing existing custom hooks), scans source files, and builds the native app. It downloads the pinned build dependencies; it does not install agent CLIs, copy credentials, import conversations, or alter Neovim configuration. `make doctor` checks prerequisites without building. `make test` runs the Swift tests. `make run` rebuilds and launches the app.
+`make setup` checks prerequisites, installs this checkout's privacy Git hooks (without replacing existing custom hooks), uses your authenticated `gh` account to set a local noreply commit identity when one is not already configured, scans source files, and builds the native app. It downloads the pinned build dependencies; it does not install agent CLIs, copy credentials, import conversations, or alter Neovim configuration. `make doctor` checks prerequisites without building. `make test` runs the Swift tests. `make run` rebuilds and launches the app.
 
 Install and authenticate the provider you want on this Mac, then add your local projects in Octo. For Codex, the desktop app's bundled CLI is discovered automatically, or select an installed CLI in Settings → Agents. Claude and Neovim are optional; the terminal works without Neovim. LazyVim uses your own existing Neovim configuration.
 
@@ -73,7 +73,7 @@ For development, `OCTO_WORKSPACE_PATH` selects an isolated local archive. Storag
 
 The supplied Git hooks reject known secret formats and Octo archive JSON regardless of its filename. The pre-push check examines history, so deleting a private file in a later commit does not make it safe to push. Run `make privacy` before staging; CI repeats the staged-file check. These checks are safeguards, not a substitute for reviewing uploads. A corrupt or newer workspace file is preserved and disables saving for that launch. Drafts and terminal sessions remain local to the running app.
 
-See [security findings and remediation](docs/SECURITY_AUDIT.md). Before your first commit on another Mac, choose your GitHub noreply email in that repository's local Git configuration if you want to keep your personal email out of commit metadata.
+See [security findings and remediation](docs/SECURITY_AUDIT.md). Setup configures a GitHub noreply identity when `gh` is authenticated and no repository-local email exists. Existing local identities are preserved; review them before committing. If `gh` is unavailable, setup prints a reminder to configure a noreply email manually. Global Git identity is never changed.
 
 ## Dependencies and attribution
 

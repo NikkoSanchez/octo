@@ -11,7 +11,7 @@ import OctoCore
     public init() {}
     public func send(prompt: String, sessionID: String?, directory: String, settings: AgentSettings = AgentSettings(), images: [ImageAttachment] = []) async throws {
         guard images.isEmpty else { throw ProcessFailure.exited("Screenshot attachments are not supported by the Claude adapter yet. Use Codex to send images.") }
-        guard settings == AgentSettings() else { throw ProcessFailure.exited("Model and reasoning overrides are not supported by the Claude adapter yet.") }
+        guard settings == AgentSettings() else { throw ProcessFailure.exited("Model, reasoning and permission overrides are not supported by the Claude adapter yet.") }
         guard transport?.running != true else { throw ProcessFailure.exited("This thread already has a running turn.") }
         guard let executable = Executables.find("claude") else { throw ProcessFailure.missing("claude") }
         let process = JSONLineProcess(); transport = process; receivedResult = false; streamed = false

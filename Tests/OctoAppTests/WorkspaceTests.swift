@@ -6,6 +6,55 @@ import OctoAgents
 @testable import OctoApp
 
 @MainActor final class WorkspaceTests: XCTestCase {
+    func testPermissionsPersistAndRunningOrWrongThreadCannotChangeThem() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        let store = AppStore(storage: storage)
+        let thread = WorkspaceThread(workingDirectory: directory.path)
+        let project = WorkspaceProject(name: "Test", rootPath: directory.path, threads: [thread])
+        store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id)
+        store.selectPermissions(.readOnly, threadID: thread.id)
+        store.running.insert(thread.id)
+        store.selectPermissions(.fullAccess, threadID: thread.id)
+        XCTAssertEqual(store.thread?.agentSettings.permissionMode, .readOnly)
+        store.running.remove(thread.id)
+        store.selectPermissions(.fullAccess, threadID: UUID())
+        XCTAssertEqual(store.thread?.agentSettings.permissionMode, .readOnly)
+        store.saveNow()
+        XCTAssertEqual(try storage.load().projects[0].threads[0].agentSettings.permissionMode, .readOnly)
+        store.changeHarness(.claude)
+        store.selectPermissions(.fullAccess, threadID: thread.id)
+        XCTAssertNil(store.thread?.agentSettings.permissionMode)
+        store.shutdown()
+    }
+
+    func testReasoningEventsStaySeparateFromAnswersAndGroupWithoutHidingErrors() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        let store = AppStore(storage: storage)
+        let thread = WorkspaceThread(workingDirectory: directory.path)
+        let project = WorkspaceProject(name: "Test", rootPath: directory.path, threads: [thread])
+        store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id)
+        store.handle(.reasoningDelta("A"), threadID: thread.id)
+        store.handle(.reasoningDelta(" summary"), threadID: thread.id)
+        store.handle(.activity("Command"), threadID: thread.id)
+        store.handle(.textDelta("Answer"), threadID: thread.id)
+        store.handle(.failed("Connection issue"), threadID: thread.id)
+        let groups = ChatMessageGroup.groups(store.thread!.messages)
+        XCTAssertEqual(groups.count, 3)
+        XCTAssertTrue(groups[0].isDetails)
+        XCTAssertEqual(groups[0].messages.map(\.text), ["A summary", "Command"])
+        XCTAssertFalse(groups[1].isDetails)
+        XCTAssertFalse(groups[2].isDetails)
+        store.saveNow()
+        XCTAssertEqual(try storage.load().projects[0].threads[0].messages, store.thread!.messages)
+        let oldSettings = try JSONDecoder().decode(AgentSettings.self, from: Data(#"{"model":"a","reasoningEffort":"high"}"#.utf8))
+        XCTAssertNil(oldSettings.permissionMode)
+        store.shutdown()
+    }
+
     func testCodeGutterAttachmentOnlyUpdatesDraft() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -33,8 +33,23 @@ public enum HarnessID: String, Codable, CaseIterable, Sendable {
 public struct AgentSettings: Codable, Equatable, Sendable {
     public var model: String?
     public var reasoningEffort: String?
-    public init(model: String? = nil, reasoningEffort: String? = nil) {
-        self.model = model; self.reasoningEffort = reasoningEffort
+    public var permissionMode: AgentPermissionMode?
+    public init(model: String? = nil, reasoningEffort: String? = nil, permissionMode: AgentPermissionMode? = nil) {
+        self.model = model; self.reasoningEffort = reasoningEffort; self.permissionMode = permissionMode
+    }
+}
+
+/// Product intent only. Each adapter owns its mapping and supported subset.
+public enum AgentPermissionMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case readOnly, ask, autoReview, fullAccess
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .readOnly: return "Read only"
+        case .ask: return "Ask for approval"
+        case .autoReview: return "Approve for me"
+        case .fullAccess: return "Full access"
+        }
     }
 }
 
@@ -79,7 +94,7 @@ public struct ImageAttachment: Identifiable, Codable, Equatable, Sendable {
 }
 
 public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
-    public enum Role: String, Codable, Sendable { case user, assistant, activity, error }
+    public enum Role: String, Codable, Sendable { case user, assistant, activity, reasoning, error }
     public var id: UUID
     public var role: Role
     public var text: String
@@ -98,6 +113,23 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     }
     public init(id: UUID = UUID(), role: Role, text: String, attachments: [CodeAttachment] = [], images: [ImageAttachment] = []) {
         self.id = id; self.role = role; self.text = text; self.attachments = attachments; self.images = images; self.createdAt = Date()
+    }
+}
+
+/// Contiguous details share one disclosure; user messages, answers and errors stay visible.
+public struct ChatMessageGroup: Identifiable {
+    public var id: UUID { messages[0].id }
+    public private(set) var messages: [ChatMessage]
+    public var isDetails: Bool { messages[0].role == .activity || messages[0].role == .reasoning }
+    public static func groups(_ messages: [ChatMessage]) -> [ChatMessageGroup] {
+        var groups: [ChatMessageGroup] = []
+        for message in messages {
+            let detail = message.role == .activity || message.role == .reasoning
+            if detail, groups.last?.isDetails == true {
+                groups[groups.count - 1].messages.append(message)
+            } else { groups.append(ChatMessageGroup(messages: [message])) }
+        }
+        return groups
     }
 }
 

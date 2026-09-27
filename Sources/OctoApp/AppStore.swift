@@ -16,6 +16,9 @@ import OctoTerminal
         HarnessRegistry.descriptors.map { descriptor in
             var descriptor = descriptor
             if descriptor.id == .codex { descriptor.executable = codexExecutable }
+            if descriptor.id == .codex && !CodexHarness.supportsAutoReview(version: codexVersion) {
+                descriptor.permissionOptions.removeAll { $0.mode == .autoReview }
+            }
             return descriptor
         }
     }
@@ -43,6 +46,9 @@ import OctoTerminal
     @Published var modelCatalogs: [String: [AgentModel]] = [:]
     @Published var modelErrors: [String: String] = [:]
     @Published var loadingModels = Set<String>()
+    @Published var usageSnapshots: [String: AgentUsage] = [:]
+    @Published var usageErrors: [String: String] = [:]
+    @Published var loadingUsage = Set<String>()
     @Published var error: String?
     @Published var drafts: [UUID: String] = [:]
     @Published var draftImages: [UUID: [ImageAttachment]] = [:]
@@ -173,6 +179,7 @@ import OctoTerminal
         else { preferences.removeObject(forKey: Self.codexPathKey) }
         codexConfigurationID = UUID(); codexVersion = "Checking version…"
         modelCatalogs.removeAll(); modelErrors.removeAll(); loadingModels.removeAll()
+        usageSnapshots.removeAll(); usageErrors.removeAll(); loadingUsage.removeAll()
     }
     func refreshCodexVersion() async {
         let configuration = codexConfigurationID
@@ -204,7 +211,28 @@ import OctoTerminal
         mutate(thread.id) {
             let previous = $0.agentSettings.reasoningEffort
             $0.agentSettings = AgentSettings(model: model.model, reasoningEffort:
-                model.supportedReasoningEfforts.contains { $0.reasoningEffort == previous } ? previous : model.defaultReasoningEffort)
+                model.supportedReasoningEfforts.contains { $0.reasoningEffort == previous } ? previous : model.defaultReasoningEffort,
+                permissionMode: $0.agentSettings.permissionMode)
+        }
+    }
+    func selectPermissions(_ mode: AgentPermissionMode, threadID: UUID) {
+        guard let thread, thread.id == threadID, !running.contains(thread.id),
+              harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) == true else { return }
+        mutate(thread.id) { $0.agentSettings.permissionMode = mode }
+    }
+    func usageKey(_ thread: WorkspaceThread) -> String { "\(thread.harness.rawValue):\(thread.workingDirectory)" }
+    func loadUsage(_ thread: WorkspaceThread) async {
+        let key = usageKey(thread), configuration = codexConfigurationID
+        guard !loadingUsage.contains(key) else { return }
+        loadingUsage.insert(key); usageErrors[key] = nil
+        defer { if configuration == codexConfigurationID { loadingUsage.remove(key) } }
+        do {
+            if thread.harness == .codex && codexExecutable == nil { throw ProcessFailure.missing("Codex executable") }
+            let usage = try await HarnessRegistry.usage(thread.harness, directory: thread.workingDirectory, codexExecutable: codexExecutable)
+            guard configuration == codexConfigurationID else { return }
+            usageSnapshots[key] = usage
+        } catch {
+            if configuration == codexConfigurationID { usageErrors[key] = "Usage unavailable: \(error.localizedDescription)" }
         }
     }
     func selectReasoning(_ effort: String) {
@@ -248,6 +276,10 @@ import OctoTerminal
     }
     func send() {
         guard let thread, !running.contains(thread.id) else { return }
+        if let mode = thread.agentSettings.permissionMode,
+           harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) != true {
+            error = "The saved permission mode is unavailable with this CLI. Choose a supported mode before sending."; return
+        }
         let images = draftImages[thread.id] ?? []
         if !images.isEmpty {
             guard thread.harness == .codex else { error = "Screenshot attachments currently require Codex. Remove them or switch providers."; return }
@@ -289,7 +321,7 @@ import OctoTerminal
         }
     }
     func stop(_ id: UUID) { Task { await harnesses[id]?.interrupt() } }
-    private func handle(_ event: AgentEvent, threadID: UUID) {
+    func handle(_ event: AgentEvent, threadID: UUID) {
         guard archive.projects.contains(where: { $0.threads.contains(where: { $0.id == threadID }) }) else { return }
         switch event {
         case .session(let remoteID): mutate(threadID) { $0.remoteSessionID = remoteID }
@@ -299,6 +331,24 @@ import OctoTerminal
         }
         case .message(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .assistant, text: text)) }
         case .activity(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .activity, text: text)) }
+        case .activityDelta(let text): mutate(threadID) {
+            if $0.messages.last?.role == .activity { $0.messages[$0.messages.count - 1].text += text }
+            else { $0.messages.append(ChatMessage(role: .activity, text: text)) }
+        }
+        case .reasoningDelta(let text): mutate(threadID) {
+            if $0.messages.last?.role == .reasoning { $0.messages[$0.messages.count - 1].text += text }
+            else { $0.messages.append(ChatMessage(role: .reasoning, text: text)) }
+        }
+        case .usage(let usage):
+            if let owner = archive.projects.flatMap(\.threads).first(where: { $0.id == threadID }) {
+                let key = usageKey(owner)
+                var buckets = usageSnapshots[key]?.buckets ?? []
+                for bucket in usage.buckets {
+                    buckets.removeAll { $0.id == bucket.id }; buckets.append(bucket)
+                }
+                var merged = usage; merged.buckets = buckets.sorted { $0.id < $1.id }
+                usageSnapshots[key] = merged
+            }
         case .failed(let text):
             running.remove(threadID); approvals[threadID] = []
             mutate(threadID) { $0.messages.append(ChatMessage(role: .error, text: text)) }

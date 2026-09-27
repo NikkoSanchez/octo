@@ -41,9 +41,10 @@ Install and authenticate the agent CLIs separately (`codex`, optionally `claude`
 6. Click a project's name or folder icon to collapse or expand it; the icon switches between closed and open folders. Right-click projects or threads to pin, rename, add, or remove them. Pins appear first within their existing hierarchy and survive relaunch. Removal keeps repository files on disk.
 7. Toggle the right review panel with the sidebar icon beside Terminal or ⌥⌘R. Reopening retains its file selection and split width. Chat content stays centered with an 840 pt maximum width.
 8. Open **Settings** at the bottom left or with ⌘, to choose macOS System, Catppuccin Latte, or Catppuccin Mocha and browse the keyboard reference. ⌘K searches chats, ⌘F finds messages in the current thread, ⌘P finds files, and ⇧⌘P opens the command palette. See [all shortcuts and terminal boundaries](docs/KEYBOARD.md).
-9. Use Refresh Changes after terminal edits. Changes also refresh when the app becomes active and after an agent finishes.
+9. Use **Permissions** below the composer to choose Read only, Ask for approval, Approve for me (supported Codex installations), or explicitly enable Full access. Choices apply to the next turn and persist per thread. **Usage** in the chat header shows provider-reported account limits and reset times. Expand **Reasoning & activity** to inspect provider summaries and tool progress; answers stay visible. Unsupported provider controls are identified in the UI.
+10. Use Refresh Changes after terminal edits. Changes also refresh when the app becomes active and after an agent finishes.
 
-Codex supports streaming, resume, stop, command/file approvals, and a workspace-write sandbox requested from the CLI. Claude uses its print/stream protocol and reports its narrower approval capabilities in the UI. No provider runs with blanket permission bypasses.
+Codex supports streaming, resume, stop, command/file approvals, and selectable permissions. The default remains workspace-write with on-request approval. Full access requires an explicit per-thread choice and confirmation; managed CLI policies remain authoritative. Claude uses its print/stream protocol and reports its narrower capabilities in the UI.
 
 ## Layout
 

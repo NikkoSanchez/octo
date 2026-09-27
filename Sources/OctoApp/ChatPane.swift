@@ -7,12 +7,19 @@ struct ChatPane: View {
     @ObservedObject var store: AppStore
     @Environment(\.octoTheme) private var theme
     @State private var matchIndex = 0
+    @State private var expandedDetails = Set<UUID>()
+    @State private var showingUsage = false
+    @State private var fullAccessThread: UUID?
     var body: some View {
         VStack(spacing: 0) {
             if let thread = store.thread {
                 HStack {
                     Image(systemName: "bubble.left.and.text.bubble.right"); Text(thread.harness.title).fontWeight(.medium)
-                    Spacer(); if store.running.contains(thread.id) { ProgressView().controlSize(.small) } else { Text("Local").foregroundStyle(theme.secondary) }
+                    Spacer()
+                    Button { showingUsage.toggle() } label: { Label("Usage", systemImage: "chart.bar") }
+                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Account usage limits")
+                        .popover(isPresented: $showingUsage, arrowEdge: .top) { usageView(thread).id(store.usageKey(thread)) }
+                    if store.running.contains(thread.id) { ProgressView().controlSize(.small) } else { Text("Local").foregroundStyle(theme.secondary) }
                 }.font(.system(size: 15)).padding(13)
                 Divider()
                 findBar.frame(height: store.findingThread ? 50 : 0).clipped()
@@ -26,10 +33,19 @@ struct ChatPane: View {
                                     Text("Start a conversation about this project. Select code in the review pane to attach precise context.").foregroundStyle(theme.secondary)
                                 }.padding(.top, 30)
                             }
-                            ForEach(thread.messages) { message in
-                                messageView(message, harness: thread.harness).id(message.id)
-                                    .padding(6)
-                                    .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                            ForEach(ChatMessageGroup.groups(thread.messages)) { group in
+                                if group.isDetails {
+                                    DisclosureGroup(isExpanded: Binding(get: {
+                                        expandedDetails.contains(group.id) || group.messages.contains { matchIDs.contains($0.id) }
+                                    }, set: { if $0 { expandedDetails.insert(group.id) } else { expandedDetails.remove(group.id) } })) {
+                                        ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
+                                    } label: {
+                                        Label("Reasoning & activity · \(group.messages.count)", systemImage: "sparkle")
+                                            .font(.system(size: 13)).foregroundStyle(theme.secondary)
+                                    }.padding(8).background(theme.panel, in: RoundedRectangle(cornerRadius: 7))
+                                } else {
+                                    ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
+                                }
                             }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
@@ -52,11 +68,25 @@ struct ChatPane: View {
                 }
                 composer(thread)
                     .task(id: "\(thread.harness.rawValue):\(thread.workingDirectory):\(store.codexConfigurationID)") {
-                        if thread.harness == .codex { await store.loadModels(directory: thread.workingDirectory) }
+                        if thread.harness == .codex {
+                            await store.refreshCodexVersion()
+                            await store.loadModels(directory: thread.workingDirectory)
+                        }
                     }
             } else { ContentUnavailableView("Start a thread", systemImage: "bubble.left", description: Text("Choose New Thread to work with an agent.")) }
         }.frame(maxWidth: 840, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .alert("Enable full access?", isPresented: Binding(get: { fullAccessThread != nil }, set: { if !$0 { fullAccessThread = nil } })) {
+                Button("Cancel", role: .cancel) { fullAccessThread = nil }
+                Button("Enable full access", role: .destructive) {
+                    if let id = fullAccessThread { store.selectPermissions(.fullAccess, threadID: id) }
+                    fullAccessThread = nil
+                }
+            } message: { Text("This thread's next turns can access files outside the project and the network without approval prompts. The CLI's managed policies still apply.") }
+    }
+    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
+        messageView(message, harness: harness).id(message.id).padding(6)
+            .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
     }
     private var matchIDs: [UUID] {
         guard store.findingThread, !store.threadQuery.isEmpty else { return [] }
@@ -81,18 +111,89 @@ struct ChatPane: View {
     }
     private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            if message.role != .activity {
+            if message.role != .activity && message.role != .reasoning {
                 Text(message.role == .user ? "You" : message.role == .error ? "Connection issue" : harness.title)
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.secondary)
             }
-            Text(message.text).font(message.role == .activity ? .system(size: 13, design: .monospaced) : .system(size: 15))
-                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity ? theme.secondary : theme.foreground)
+            Text(message.text).font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             imageStrip(message.images)
             ForEach(message.attachments) { attachment in
                 Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
             }
         }
+    }
+    private func permissionsMenu(_ thread: WorkspaceThread) -> some View {
+        let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
+        let selected = thread.agentSettings.permissionMode ?? descriptor?.defaultPermissionMode
+        return Menu {
+            if descriptor?.permissionOptions.isEmpty != false {
+                Text("Uses CLI defaults. Permission controls are unavailable in this adapter.")
+            } else {
+                Text("Permissions for the next turn")
+                ForEach(descriptor?.permissionOptions ?? []) { option in
+                    Button {
+                        if option.mode == .fullAccess { fullAccessThread = thread.id }
+                        else { store.selectPermissions(option.mode, threadID: thread.id) }
+                    } label: {
+                        VStack(alignment: .leading) {
+                            if option.mode == selected { Label(option.mode.title, systemImage: "checkmark") }
+                            else { Text(option.mode.title) }
+                            Text(option.detail).font(.caption)
+                        }
+                    }.help(option.detail)
+                }
+            }
+        } label: {
+            Label(selected?.title ?? "CLI permissions", systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
+                .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
+        }.menuStyle(.borderlessButton).fixedSize().padding(5).hoverFeedback()
+            .accessibilityLabel("Permissions: \(selected?.title ?? "CLI defaults")")
+            .disabled(store.running.contains(thread.id))
+    }
+    private func usageView(_ thread: WorkspaceThread) -> some View {
+        let key = store.usageKey(thread)
+        let supported = store.harnessDescriptors.first { $0.id == thread.harness }?.supportsUsageLimits == true
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("\(thread.harness.title) account usage").font(.headline)
+            Text("Shared across your account, including other chats and apps.").font(.caption).foregroundStyle(theme.secondary)
+            if !supported {
+                Text("Account limits and reset times are not exposed by this adapter.")
+            } else {
+                if let usage = store.usageSnapshots[key] {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            ForEach(usage.buckets) { bucket in
+                                Text(bucket.title).fontWeight(.medium)
+                                if bucket.windows.isEmpty { Text("No usage windows reported.").foregroundStyle(theme.secondary) }
+                                ForEach(bucket.windows) { window in
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        HStack {
+                                            Text(window.title)
+                                            Spacer()
+                                            if let remaining = window.remainingPercent { Text("\(remaining, specifier: "%.0f")% remaining") }
+                                            else { Text("Usage unavailable") }
+                                        }
+                                        if let remaining = window.remainingPercent { ProgressView(value: remaining, total: 100) }
+                                        if let reset = window.resetsAt {
+                                            Text("Resets \(reset.formatted(date: .abbreviated, time: .shortened))")
+                                                .foregroundStyle(theme.secondary)
+                                        } else { Text("Reset time unavailable").foregroundStyle(theme.secondary) }
+                                    }.font(.caption)
+                                }
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(height: min(280, CGFloat(usage.buckets.reduce(0) { $0 + max(1, $1.windows.count) }) * 100 + CGFloat(usage.buckets.count) * 25))
+                    Text("Last updated \(usage.fetchedAt.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(theme.secondary)
+                }
+                if let error = store.usageErrors[key] { Text(error).font(.caption).foregroundStyle(theme.secondary) }
+                HStack {
+                    Button("Refresh usage") { Task { await store.loadUsage(thread) } }.disabled(store.loadingUsage.contains(key))
+                    if store.loadingUsage.contains(key) { ProgressView().controlSize(.small) }
+                }
+            }
+        }.padding(18).frame(width: 350).task { if supported { await store.loadUsage(thread) } }
     }
     private func agentMenu(_ thread: WorkspaceThread) -> some View {
         let models = store.modelCatalogs[thread.workingDirectory] ?? []
@@ -188,6 +289,7 @@ struct ChatPane: View {
                 if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback() }
                 else { Button { store.send() } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback().disabled(!store.canSend(thread)) }
             }
+            permissionsMenu(thread)
             if thread.harness == .codex {
                 if let error = store.modelErrors[thread.workingDirectory] {
                     Text(error).font(.system(size: 12)).foregroundStyle(theme.secondary)

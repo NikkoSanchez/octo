@@ -6,6 +6,84 @@ import OctoAgents
 @testable import OctoApp
 
 @MainActor final class WorkspaceTests: XCTestCase {
+    func testNewThreadReusesDraftAndRemembersProviderChoicesAcrossProjectsAndRelaunch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        let store = AppStore(storage: storage)
+        defer { store.shutdown() }
+        let original = WorkspaceThread(workingDirectory: directory.path)
+        let project = WorkspaceProject(name: "First", rootPath: directory.path, threads: [original])
+        let second = WorkspaceProject(name: "Second", rootPath: directory.appendingPathComponent("second").path)
+        store.archive = WorkspaceArchive(projects: [project, second], selectedProjectID: project.id, selectedThreadID: original.id)
+        XCTAssertFalse(store.showingReview)
+        let model = try JSONDecoder().decode(AgentModel.self, from: Data(#"{"model":"test-model","displayName":"Test","description":"","hidden":false,"isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high","description":""}]}"#.utf8))
+        store.selectModel(model)
+        store.selectPermissions(.readOnly, threadID: original.id)
+        let expected = AgentSettings(model: "test-model", reasoningEffort: "high", permissionMode: .readOnly)
+        let snapshot = ReviewSnapshot(projectID: project.id, workingDirectory: directory.path, path: "sample.swift", scope: .working, baseRevision: "base", lines: [.init(id: 0, kind: .addition, text: "let a = 1", newLine: 1)])
+        let document = ReviewDocument(snapshot: snapshot)
+        let range = try XCTUnwrap(document.attachmentRange(forLineAtUTF16Offset: 0, selection: NSRange(location: 0, length: 0)))
+        let attachment = try XCTUnwrap(document.attachment(for: range))
+        store.attach(attachment)
+        store.drafts[original.id] = "Unsent work"
+        store.draftImages[original.id] = [ImageAttachment(pngData: Data([1]))]
+        for _ in 0..<3 { store.newThread() }
+        XCTAssertEqual(store.project?.threads.count, 1)
+        XCTAssertEqual(store.thread?.id, original.id)
+        XCTAssertEqual(store.drafts[original.id], "Unsent work")
+        XCTAssertEqual(store.draftImages[original.id]?.count, 1)
+        XCTAssertEqual(store.attachments[original.id], [attachment])
+        // A used thread creates a new composer; no provider call is needed.
+        store.archive.projects[0].threads[0].messages = [ChatMessage(role: .user, text: "Started")]
+        store.newThread()
+        XCTAssertNotEqual(store.thread?.id, original.id)
+        XCTAssertEqual(store.thread?.agentSettings, expected)
+        store.newThread(projectID: second.id)
+        XCTAssertEqual(store.thread?.workingDirectory, second.rootPath)
+        XCTAssertEqual(store.thread?.agentSettings, expected)
+        store.changeHarness(.claude)
+        XCTAssertEqual(store.thread?.agentSettings, AgentSettings())
+        store.changeHarness(.codex)
+        XCTAssertEqual(store.thread?.agentSettings, expected)
+        store.saveNow()
+        let reloaded = AppStore(storage: storage)
+        defer { reloaded.shutdown() }
+        reloaded.archive.projects[1].threads[0].remoteSessionID = "existing-session"
+        reloaded.newThread()
+        XCTAssertEqual(reloaded.project?.threads.count, 2, "A remote session is never reused as a draft")
+        XCTAssertEqual(reloaded.thread?.agentSettings, expected)
+        XCTAssertFalse(reloaded.showingReview)
+        let newID = try XCTUnwrap(reloaded.thread?.id)
+        reloaded.selectPermissions(.fullAccess, threadID: newID)
+        reloaded.archive.projects[1].threads[1].messages = [ChatMessage(role: .user, text: "Started")]
+        reloaded.newThread()
+        XCTAssertEqual(reloaded.thread?.agentSettings.permissionMode, .fullAccess)
+        reloaded.selectPermissions(.readOnly, threadID: reloaded.thread!.id)
+        reloaded.newThread(projectID: project.id)
+        XCTAssertEqual(reloaded.thread?.agentSettings.permissionMode, .readOnly, "An empty draft adopts the latest, narrower permissions")
+    }
+
+    func testOldArchiveDefaultsAndRunningThreadArePreserved() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        var thread = WorkspaceThread(workingDirectory: directory.path)
+        thread.agentSettings = AgentSettings(model: "saved-model", permissionMode: .ask)
+        let project = WorkspaceProject(name: "Legacy", rootPath: directory.path, threads: [thread])
+        try storage.save(WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id))
+        let store = AppStore(storage: storage)
+        defer { store.shutdown() }
+        store.running.insert(thread.id)
+        store.newThread()
+        XCTAssertEqual(store.project?.threads.count, 2)
+        XCTAssertEqual(store.thread?.agentSettings, thread.agentSettings)
+        XCTAssertEqual(store.archive.projects[0].threads[0], thread)
+        store.running.remove(thread.id)
+        store.newThread()
+        XCTAssertEqual(store.project?.threads.count, 2)
+    }
+
     func testPermissionsPersistAndRunningOrWrongThreadCannotChangeThem() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -111,7 +189,8 @@ import OctoAgents
         for _ in 0..<5 { store.pasteScreenshot(from: board, threadID: thread.id) }
         XCTAssertEqual(store.draftImages[thread.id]?.count, 4)
         store.newThread()
-        XCTAssertTrue(store.draftImages[store.thread!.id] == nil)
+        XCTAssertEqual(store.thread?.id, thread.id)
+        XCTAssertEqual(store.draftImages[thread.id]?.count, 4, "New Thread reopens the unfinished draft")
         store.deleteThread(thread.id, projectID: project.id)
         XCTAssertNil(store.draftImages[thread.id])
         store.shutdown()

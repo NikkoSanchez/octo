@@ -148,6 +148,9 @@ public struct WorkspaceArchive: Codable, Sendable {
             selectedThreadID = orderedProjects.first?.orderedThreads.first?.id
         }
     }
+    // Optional fields preserve decoding of archives created before draft defaults.
+    public var lastHarness: HarnessID?
+    public var rememberedAgentSettings: [String: AgentSettings]?
     public var schemaVersion = 1
     public var projects: [WorkspaceProject]
     public var selectedProjectID: UUID?

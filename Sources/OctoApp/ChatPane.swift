@@ -40,12 +40,20 @@ struct ChatPane: View {
                                     }, set: { if $0 { expandedDetails.insert(group.id) } else { expandedDetails.remove(group.id) } })) {
                                         ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
                                     } label: {
-                                        Label("Reasoning & activity · \(group.messages.count)", systemImage: "sparkle")
-                                            .font(.system(size: 13)).foregroundStyle(theme.secondary)
+                                        HStack(spacing: 7) {
+                                            if store.running.contains(thread.id), group.messages.last?.id == thread.messages.last?.id {
+                                                WorkingIndicator(symbol: "sparkle")
+                                            } else { Image(systemName: "sparkle") }
+                                            Text("Reasoning & activity · \(group.messages.count)")
+                                        }.font(.system(size: 13)).foregroundStyle(theme.secondary)
                                     }.padding(8).background(theme.panel, in: RoundedRectangle(cornerRadius: 7))
                                 } else {
                                     ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
                                 }
+                            }
+                            if store.running.contains(thread.id), thread.messages.last?.role != .reasoning, thread.messages.last?.role != .activity {
+                                HStack(spacing: 7) { WorkingIndicator(); Text("Working…") }
+                                    .font(.system(size: 13)).foregroundStyle(theme.secondary)
                             }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
@@ -82,7 +90,7 @@ struct ChatPane: View {
                     if let id = fullAccessThread { store.selectPermissions(.fullAccess, threadID: id) }
                     fullAccessThread = nil
                 }
-            } message: { Text("This thread's next turns can access files outside the project and the network without approval prompts. The CLI's managed policies still apply.") }
+            } message: { Text("This thread's next turns can access files outside the project and the network without approval prompts. This choice is also remembered for new threads until you change permissions. The CLI's managed policies still apply.") }
     }
     private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
         messageView(message, harness: harness).id(message.id).padding(6)
@@ -124,7 +132,7 @@ struct ChatPane: View {
             }
         }
     }
-    private func permissionsMenu(_ thread: WorkspaceThread) -> some View {
+    private func permissionsMenu(_ thread: WorkspaceThread, compact: Bool = false) -> some View {
         let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
         let selected = thread.agentSettings.permissionMode ?? descriptor?.defaultPermissionMode
         return Menu {
@@ -147,8 +155,10 @@ struct ChatPane: View {
             }
         } label: {
             Label(selected?.title ?? "CLI permissions", systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
+                .labelStyle(PermissionLabelStyle(compact: compact))
                 .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
-        }.menuStyle(.borderlessButton).fixedSize().padding(5).hoverFeedback()
+        }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
+            .help(selected?.title ?? "CLI permissions")
             .accessibilityLabel("Permissions: \(selected?.title ?? "CLI defaults")")
             .disabled(store.running.contains(thread.id))
     }
@@ -237,7 +247,7 @@ struct ChatPane: View {
         } label: {
             Text(summary).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
         }.menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 7).padding(.vertical, 5).hoverFeedback()
+            .padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
             .help("Provider, model, and reasoning").accessibilityLabel("Agent settings")
             .disabled(store.running.contains(thread.id))
     }
@@ -284,12 +294,15 @@ struct ChatPane: View {
                     .id(thread.id).frame(height: 76)
             }
             HStack(spacing: 10) {
-                agentMenu(thread).frame(maxWidth: 380, alignment: .leading)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread) }
+                        .fixedSize(horizontal: true, vertical: false)
+                    HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread, compact: true) }
+                }
                 Spacer(minLength: 0)
-                if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback() }
-                else { Button { store.send() } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback().disabled(!store.canSend(thread)) }
+                if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback().shortcutHint("stop") }
+                else { Button { store.send() } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback().disabled(!store.canSend(thread)).shortcutHint("send") }
             }
-            permissionsMenu(thread)
             if thread.harness == .codex {
                 if let error = store.modelErrors[thread.workingDirectory] {
                     Text(error).font(.system(size: 12)).foregroundStyle(theme.secondary)
@@ -370,5 +383,15 @@ final class ScreenshotTextView: NSTextView {
             onSend?(); return
         }
         super.keyDown(with: event)
+    }
+}
+
+private struct PermissionLabelStyle: LabelStyle {
+    var compact: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) {
+            configuration.icon
+            if !compact { configuration.title }
+        }
     }
 }

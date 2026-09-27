@@ -42,7 +42,7 @@ import OctoTerminal
     @Published var showingTerminal = false {
         didSet { if oldValue != showingTerminal { NativeWorkspaceFocus.clear() } }
     }
-    @Published var showingReview = true
+    @Published var showingReview = false
     @Published var modelCatalogs: [String: [AgentModel]] = [:]
     @Published var modelErrors: [String: String] = [:]
     @Published var loadingModels = Set<String>()
@@ -69,6 +69,10 @@ import OctoTerminal
         terminal.applyTheme(theme)
         codexExecutablePath = preferences.string(forKey: Self.codexPathKey)
         do { archive = try storage.load() } catch { self.error = "Could not load workspace: \(error.localizedDescription)\nThe existing file will not be overwritten."; canSave = false }
+        if archive.rememberedAgentSettings == nil, let thread {
+            archive.lastHarness = thread.harness
+            archive.rememberedAgentSettings = [thread.harness.rawValue: thread.agentSettings]
+        }
     }
     func saveSoon() {
         guard canSave else { return }
@@ -92,9 +96,8 @@ import OctoTerminal
         do {
             let root = try await git.repositoryRoot(url.path)
             if let existing = archive.projects.first(where: { $0.rootPath == root }) { selectProject(existing); return }
-            var project = WorkspaceProject(name: URL(fileURLWithPath: root).lastPathComponent, rootPath: root)
-            project.threads.append(WorkspaceThread(workingDirectory: root))
-            archive.projects.append(project); selectProject(project)
+            let project = WorkspaceProject(name: URL(fileURLWithPath: root).lastPathComponent, rootPath: root)
+            archive.projects.append(project); selectProject(project); newThread()
         } catch { self.error = "Could not add project: \(error.localizedDescription)" }
     }
     func selectProject(_ project: WorkspaceProject) {
@@ -110,12 +113,43 @@ import OctoTerminal
         terminal.ensureTab(projectID: project.id, directory: project.rootPath); showingTerminal = true; saveSoon()
     }
     func focusComposer() { showingTerminal = false; composerFocus += 1; NativeWorkspaceFocus.focus("OctoComposer") }
-    func newThread(harness: HarnessID = .codex) {
-        guard let p = archive.projects.firstIndex(where: { $0.id == archive.selectedProjectID }) else { return }
+    private func rememberedSettings(for harness: HarnessID) -> AgentSettings {
+        archive.rememberedAgentSettings?[harness.rawValue]
+            ?? (thread?.harness == harness ? thread?.agentSettings : nil) ?? AgentSettings()
+    }
+    private func rememberAgentChoices() {
+        guard let thread else { return }
+        archive.lastHarness = thread.harness
+        if archive.rememberedAgentSettings == nil { archive.rememberedAgentSettings = [:] }
+        archive.rememberedAgentSettings?[thread.harness.rawValue] = thread.agentSettings
+        saveSoon()
+    }
+    func newThread(harness requestedHarness: HarnessID? = nil, projectID: UUID? = nil) {
+        guard let p = archive.projects.firstIndex(where: { $0.id == (projectID ?? archive.selectedProjectID) }) else { return }
+        let harness = requestedHarness ?? archive.lastHarness ?? thread?.harness ?? .codex
+        let settings = rememberedSettings(for: harness)
         NativeWorkspaceFocus.clear()
-        let thread = WorkspaceThread(harness: harness, workingDirectory: archive.projects[p].rootPath)
+        // Reopen the project's unfinished composer, including text and attachments.
+        // Existing duplicate drafts remain intact; this action never creates more.
+        let candidates = archive.projects[p].threads.filter {
+            $0.messages.isEmpty && $0.remoteSessionID == nil && !running.contains($0.id)
+        }
+        let existing = candidates.first { $0.id == archive.selectedThreadID } ?? candidates.last
+        let id: UUID
+        if let existing {
+            id = existing.id
+            let hasDraft = !(drafts[id] ?? "").isEmpty || !(draftImages[id] ?? []).isEmpty || !(attachments[id] ?? []).isEmpty
+            if requestedHarness != nil || !hasDraft {
+                mutate(id) { $0.harness = harness; $0.agentSettings = settings }
+            }
+        } else {
+            var thread = WorkspaceThread(harness: harness, workingDirectory: archive.projects[p].rootPath)
+            thread.agentSettings = settings
+            archive.projects[p].threads.append(thread); id = thread.id
+        }
         archive.projects[p].isCollapsed = false
-        archive.projects[p].threads.append(thread); archive.selectedThreadID = thread.id; showingTerminal = false; composerFocus += 1; saveSoon()
+        archive.selectedProjectID = archive.projects[p].id
+        archive.selectedThreadID = id; showingTerminal = false; composerFocus += 1; saveSoon()
     }
     func toggleProjectPin(_ id: UUID) {
         guard let p = archive.projects.firstIndex(where: { $0.id == id }) else { return }
@@ -154,8 +188,14 @@ import OctoTerminal
     }
     func changeHarness(_ harness: HarnessID) {
         guard let thread, !running.contains(thread.id) else { return }
-        if thread.messages.isEmpty && thread.remoteSessionID == nil { mutate(thread.id) { $0.harness = harness; $0.agentSettings = AgentSettings() } }
+        if thread.harness == harness { return }
+        rememberAgentChoices()
+        if thread.messages.isEmpty && thread.remoteSessionID == nil {
+            let settings = rememberedSettings(for: harness)
+            mutate(thread.id) { $0.harness = harness; $0.agentSettings = settings }
+        }
         else { newThread(harness: harness) }
+        rememberAgentChoices()
     }
     func chooseCodexExecutable() {
         let panel = NSOpenPanel()
@@ -214,11 +254,13 @@ import OctoTerminal
                 model.supportedReasoningEfforts.contains { $0.reasoningEffort == previous } ? previous : model.defaultReasoningEffort,
                 permissionMode: $0.agentSettings.permissionMode)
         }
+        rememberAgentChoices()
     }
     func selectPermissions(_ mode: AgentPermissionMode, threadID: UUID) {
         guard let thread, thread.id == threadID, !running.contains(thread.id),
               harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) == true else { return }
         mutate(thread.id) { $0.agentSettings.permissionMode = mode }
+        rememberAgentChoices()
     }
     func usageKey(_ thread: WorkspaceThread) -> String { "\(thread.harness.rawValue):\(thread.workingDirectory)" }
     func loadUsage(_ thread: WorkspaceThread) async {
@@ -240,6 +282,7 @@ import OctoTerminal
               let model = modelCatalogs[thread.workingDirectory]?.first(where: { $0.model == thread.agentSettings.model }),
               model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == effort }) else { return }
         mutate(thread.id) { $0.agentSettings.reasoningEffort = effort }
+        rememberAgentChoices()
     }
     /// Returns true when the pasteboard contains an image, even if rejected, so it
     /// cannot silently fall through to a text/file-path paste.

@@ -4,6 +4,61 @@ import OctoCore
 @testable import OctoApp
 
 @MainActor final class KeyboardThemeTests: XCTestCase {
+    func testShortcutHintsWaitForHoldAndCancelOnReleaseOrShortcut() {
+        var pending: [DispatchWorkItem] = []
+        var delays: [TimeInterval] = []
+        var visible = false
+        let hold = ShortcutHintHold { delay, work in delays.append(delay); pending.append(work) }
+        hold.changed = { visible = $0 }
+
+        hold.update(commandDown: true, keyDown: false)
+        XCTAssertFalse(visible)
+        XCTAssertEqual(delays, [0.65])
+        hold.update(commandDown: false, keyDown: false)
+        pending.removeFirst().perform()
+        XCTAssertFalse(visible, "A tap must not reveal hints later")
+
+        hold.update(commandDown: true, keyDown: false)
+        hold.update(commandDown: true, keyDown: false)
+        XCTAssertEqual(pending.count, 1, "Other modifier changes must not restart the delay")
+        pending.removeFirst().perform()
+        XCTAssertTrue(visible)
+        hold.update(commandDown: true, keyDown: true)
+        XCTAssertFalse(visible)
+        hold.update(commandDown: true, keyDown: false)
+        XCTAssertTrue(pending.isEmpty, "A used shortcut suppresses hints until Command is released")
+
+        hold.update(commandDown: false, keyDown: false)
+        hold.update(commandDown: true, keyDown: false)
+        hold.update(commandDown: true, keyDown: true)
+        pending.removeFirst().perform()
+        XCTAssertFalse(visible)
+    }
+
+    func testShortcutHintsRecheckContextAndDiscardSupersededHolds() {
+        var pending: [DispatchWorkItem] = []
+        var visible = false
+        var allowed = true
+        let hold = ShortcutHintHold { _, work in pending.append(work) }
+        hold.changed = { visible = $0 }
+        hold.canReveal = { allowed }
+        hold.update(commandDown: true, keyDown: false)
+        hold.reset() // Focus loss, sheet presentation, or view teardown.
+        hold.update(commandDown: true, keyDown: false)
+        pending.removeFirst().perform()
+        XCTAssertFalse(visible, "An old callback must not reveal a new hold early")
+        allowed = false
+        pending.removeFirst().perform()
+        XCTAssertFalse(visible, "Context must still permit hints when the delay expires")
+        hold.reset()
+        allowed = true
+        hold.update(commandDown: true, keyDown: false)
+        pending.removeFirst().perform()
+        XCTAssertTrue(visible)
+        hold.reset()
+        XCTAssertFalse(visible)
+    }
+
     func testThemePersistenceAndUnknownPreferenceFallback() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "OctoThemeTests-\(UUID())"

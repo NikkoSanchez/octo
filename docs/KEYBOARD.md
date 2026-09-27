@@ -2,6 +2,8 @@
 
 Octo uses Command for application actions and leaves Control, Option-only keys, Escape, and Space/Vim leader sequences to the focused terminal or editor. The organization takes inspiration from [Omarchy's launcher and hotkeys](https://learn.omacom.io/books/2/pages/53) and [LazyVim's discoverable key groups](https://www.lazyvim.org/keymaps), while keeping macOS text editing conventions.
 
+Hold ⌘ for 650 ms to show small shortcut badges beside available controls, including Settings, the current project’s New Thread button, terminal/review actions, and Send/Stop. Badges above controls have a 6 pt gap; Settings keeps its badge inline on the right. Quick taps never show badges. Pressing a key while holding Command hides badges and suppresses them until Command is released and held again. Badges also disappear when Command is released, the workspace loses focus, or a sheet opens. They share the command catalog and respect terminal/disabled contexts.
+
 The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/↓, and press Return. It includes project switching, pinning, renaming, removal, provider/model/reasoning choices, draft attachment removal, review scope, and approval review. Destructive actions retain confirmation; approval review shows the request and requires an explicit Allow Once or Decline. Escape dismisses the palette and restores workspace focus.
 
 | Action | Shortcut |
@@ -10,7 +12,7 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | Search chats across projects (titles and message text) | ⌘K |
 | Find in current thread | ⌘F |
 | Next / previous matching message | ⌘G / ⇧⌘G |
-| New thread in current project | ⌘N |
+| New thread / reopen unstarted draft in current project | ⌘N |
 | Add project | ⇧⌘O |
 | Find project file | ⌘P |
 | Command palette | ⇧⌘P |

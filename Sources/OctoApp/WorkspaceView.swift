@@ -11,6 +11,7 @@ struct WorkspaceView: View {
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var palette: PaletteMode?
     @State private var reviewFocus = 0
+    @State private var showingShortcutHints = false
     @Environment(\.openSettings) private var openSettings
     @Environment(\.octoTheme) private var theme
     @Environment(\.scenePhase) private var phase
@@ -29,8 +30,9 @@ struct WorkspaceView: View {
             }.frame(minWidth: 740).background(theme.background)
         }
         .navigationSplitViewStyle(.balanced)
+        .environment(\.shortcutHints, showingShortcutHints ? Dictionary(uniqueKeysWithValues: commands.filter { $0.isAvailable(inTerminal: store.showingTerminal) && $0.key != nil }.map { ($0.id, $0.shortcut) }) : [:])
         .focusedSceneValue(\.workspaceCommands, WorkspaceCommandContext(commands: commands, terminalVisible: store.showingTerminal))
-        .background(WorkspaceKeyRouter(commands: commands, terminalVisible: store.showingTerminal).frame(width: 0, height: 0))
+        .background(WorkspaceKeyRouter(commands: commands, terminalVisible: store.showingTerminal, hintsChanged: { showingShortcutHints = $0 }).frame(width: 0, height: 0))
         .sheet(item: $palette, onDismiss: restoreFocus) { mode in
             CommandPalette(mode: mode, entries: paletteEntries(mode), dismiss: { palette = nil })
                 .modifier(ThemedContent(theme: store.theme))
@@ -65,13 +67,13 @@ struct WorkspaceView: View {
             Spacer()
             if store.project != nil && !store.showingTerminal {
                 Button { store.showingReview.toggle() } label: { Image(systemName: "sidebar.right") }
-                    .hoverFeedback()
+                    .hoverFeedback().shortcutHint("review")
                     .help(store.showingReview ? "Hide review panel" : "Show review panel")
                     .accessibilityLabel(store.showingReview ? "Hide review panel" : "Show review panel")
 
             }
-            if store.showingTerminal { Button("Back to Thread") { store.showingTerminal = false }.hoverFeedback() }
-            else if let project = store.project { Button { store.openTerminal(project) } label: { Label("Terminal", systemImage: "terminal") }.hoverFeedback() }
+            if store.showingTerminal { Button("Back to Thread") { store.showingTerminal = false }.hoverFeedback().shortcutHint("terminal") }
+            else if let project = store.project { Button { store.openTerminal(project) } label: { Label("Terminal", systemImage: "terminal") }.hoverFeedback().shortcutHint("terminal") }
         }.padding(.horizontal, 20).padding(.vertical, 13)
     }
     @ViewBuilder private var threadWorkspace: some View {
@@ -94,18 +96,20 @@ struct WorkspaceView: View {
                 HStack(spacing: 3) {
                     Button { review.browsingFiles = false } label: {
                         Text("Changes (\(review.files.count))").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(selected: !review.browsingFiles))
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: !review.browsingFiles))
+                        .shortcutHint("changes")
                         .accessibilityAddTraits(!review.browsingFiles ? .isSelected : [])
                     Button { review.browsingFiles = true } label: {
                         Text("Files").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(selected: review.browsingFiles))
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles))
+                        .shortcutHint("browseFiles")
                         .accessibilityAddTraits(review.browsingFiles ? .isSelected : [])
                 }.padding(3).background(theme.surface, in: RoundedRectangle(cornerRadius: 8))
                     .frame(maxWidth: 240)
                 .onChange(of: review.browsingFiles) { _, _ in Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
                 Spacer()
                 ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
-                Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().help("Refresh changes")
+                Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
             }.padding(12)
             Divider()
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
@@ -119,8 +123,8 @@ struct WorkspaceView: View {
                                 }
                                 else {
                                     Button { Task { await review.selectPath(node.id, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } } label: {
-                                        Label(node.name, systemImage: "doc.text").font(.system(size: 13)).lineLimit(1).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
-                                    }.buttonStyle(HoverButtonStyle(selected: review.selectedPath == node.id)).help(node.id)
+                                        Label(node.name, systemImage: "doc.text").font(.system(size: 13)).lineLimit(1).padding(.horizontal, 8).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
+                                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.selectedPath == node.id)).help(node.id)
                                         .listRowBackground(Color.clear)
                                 }
                             }
@@ -142,7 +146,7 @@ struct WorkspaceView: View {
                                 if review.browsingFiles { Text("File").font(.system(size: 13)).foregroundStyle(theme.secondary) }
                                 else { Picker("Scope", selection: $review.scope) { Text("Working").tag(DiffScope.working); Text("Staged").tag(DiffScope.staged) }.labelsHidden().frame(width: 110).hoverFeedback() }
                                 Spacer()
-                                Button("Open in LazyVim") { store.openInEditor(snapshot, selection: review.selection) }.font(.system(size: 13)).hoverFeedback()
+                                Button("Open in LazyVim") { store.openInEditor(snapshot, selection: review.selection) }.font(.system(size: 13)).hoverFeedback().shortcutHint("editor")
                             }.padding(9)
                             .onChange(of: review.scope) { _, _ in
                                 if !review.browsingFiles, let file = review.files.first(where: { $0.path == review.selectedPath }) { Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
@@ -156,7 +160,7 @@ struct WorkspaceView: View {
                             HStack {
                                 Text(review.selection.map { $0.label } ?? "Hover a line and click + to attach code").font(.system(size: 12)).foregroundStyle(theme.secondary).lineLimit(1)
                                 Spacer()
-                                Button("Ask Agent") { if let selection = review.selection { store.attach(selection) } }.hoverFeedback().disabled(review.selection == nil).controlSize(.small)
+                                Button("Ask Agent") { if let selection = review.selection { store.attach(selection) } }.hoverFeedback().disabled(review.selection == nil).controlSize(.small).shortcutHint("attach")
                             }.padding(10)
                         } else { ContentUnavailableView(!review.browsingFiles && review.files.isEmpty ? "No changes" : "Choose a file", systemImage: !review.browsingFiles && review.files.isEmpty ? "checkmark.circle" : "doc.text.magnifyingglass") }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -180,13 +184,13 @@ private struct TerminalPane: View {
                         HStack(spacing: 6) {
                     ForEach(terminal.tabs.filter { $0.projectID == project.id }) { tab in
                         HStack(spacing: 6) {
-                            Button { terminal.select(tab) } label: { Text(tab.label).lineLimit(1).padding(.horizontal, 8).frame(minHeight: 30).contentShape(Rectangle()) }.buttonStyle(HoverButtonStyle())
-                            Button { store.closingTerminal = tab.id } label: { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 24, height: 30) }.buttonStyle(HoverButtonStyle()).help("Close tab")
+                            Button { terminal.select(tab) } label: { Text(tab.label).lineLimit(1).padding(.horizontal, 8).frame(minHeight: 30).contentShape(Rectangle()) }.buttonStyle(HoverButtonStyle(padded: false))
+                            Button { store.closingTerminal = tab.id } label: { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 24, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("closeTerminal", active: terminal.selectedTabs[project.id] == tab.id).help("Close tab")
                         }.font(.system(size: 13)).padding(8).background(terminal.selectedTabs[project.id] == tab.id ? theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                     }
                         }
                     }
-                    Button { terminal.newTab(projectID: project.id, directory: project.rootPath) } label: { Image(systemName: "plus").frame(width: 28, height: 30) }.buttonStyle(HoverButtonStyle()).help("New terminal tab")
+                    Button { terminal.newTab(projectID: project.id, directory: project.rootPath) } label: { Image(systemName: "plus").frame(width: 28, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newTerminal").help("New terminal tab")
                 }
                 Spacer(); Text("Ghostty").font(.system(size: 12)).foregroundStyle(theme.secondary)
             }.padding(8)
@@ -214,7 +218,7 @@ private struct ProjectSidebar: View {
                     Text("Projects").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.secondary)
                     Spacer()
                     Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
-                        .buttonStyle(HoverButtonStyle()).help("Add Project")
+                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
                         .accessibilityLabel("Add Project")
                 }.padding(.leading, 8)
                 ForEach(store.archive.orderedProjects) { project in
@@ -229,34 +233,28 @@ private struct ProjectSidebar: View {
                                     Text(project.name).lineLimit(1).truncationMode(.middle)
                                     Spacer(minLength: 0)
                                     if project.isPinned { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(theme.secondary) }
-                                }.font(.system(size: 15, weight: .semibold))
+                                }.font(.system(size: 15, weight: .semibold)).padding(.horizontal, 10)
                                     .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(HoverButtonStyle(selected: store.project?.id == project.id && project.isCollapsed)).help(project.rootPath)
+                            }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && project.isCollapsed)).help(project.rootPath)
                                 .accessibilityLabel("\(project.isCollapsed ? "Expand" : "Collapse") \(project.name)")
                                 .accessibilityValue(project.isCollapsed ? "Collapsed" : "Expanded")
-                            Button { store.selectProject(project); store.newThread() } label: {
+                            Button { store.newThread(projectID: project.id) } label: {
                                 Image(systemName: "plus").frame(width: 26, height: 34)
-                            }.buttonStyle(HoverButtonStyle()).help("New thread in \(project.name)")
+                            }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newThread", active: store.project?.id == project.id).help("New thread in \(project.name)")
                                 .accessibilityLabel("New thread in \(project.name)")
                         }.contextMenu { projectMenu(project) }
                         if !project.isCollapsed {
                             ForEach(project.orderedThreads) { thread in
-                                Button { store.selectThread(thread, project: project) } label: {
-                                    HStack(spacing: 9) {
-                                        Image(systemName: store.running.contains(thread.id) ? "circle.dotted" : "bubble.left")
-                                            .foregroundStyle(store.running.contains(thread.id) ? theme.accent : .secondary)
-                                        Text(thread.title).lineLimit(1)
-                                        Spacer(minLength: 0)
-                                        if thread.isPinned { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(theme.secondary) }
-                                    }.font(.system(size: 14)).padding(.horizontal, 10)
-                                        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-                                }.buttonStyle(HoverButtonStyle(selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal))
-                                    .help(thread.title).contextMenu { threadMenu(thread, project: project) }
+                                SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
+                                                 selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
+                                                 select: { store.selectThread(thread, project: project) },
+                                                 togglePin: { store.toggleThreadPin(thread.id) })
+                                    .contextMenu { threadMenu(thread, project: project) }
                             }
                             Button { store.openTerminal(project) } label: {
                                 Label("Terminal", systemImage: "terminal").font(.system(size: 14))
                                     .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(HoverButtonStyle(selected: store.project?.id == project.id && store.showingTerminal))
+                            }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && store.showingTerminal))
                         }
                     }
                 }
@@ -266,8 +264,8 @@ private struct ProjectSidebar: View {
         .background(theme.panel)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer(); Text("⌘,").font(.system(size: 12)) } }
-                    .buttonStyle(HoverButtonStyle()).help("Settings (⌘,)")
+                SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer() } }
+                    .buttonStyle(HoverButtonStyle()).shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
             }
                 .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(14)
         }
@@ -315,7 +313,7 @@ private struct ProjectSidebar: View {
         }
     }
     @ViewBuilder private func projectMenu(_ project: WorkspaceProject) -> some View {
-        Button("New Thread") { store.selectProject(project); store.newThread() }
+        Button("New Thread") { store.newThread(projectID: project.id) }
         Button("Open Terminal") { store.openTerminal(project) }
         Divider()
         Button(project.isPinned ? "Unpin Project" : "Pin Project") { store.toggleProjectPin(project.id) }
@@ -330,10 +328,47 @@ private struct ProjectSidebar: View {
     @ViewBuilder private func threadMenu(_ thread: WorkspaceThread, project: WorkspaceProject) -> some View {
         Button(thread.isPinned ? "Unpin Thread" : "Pin Thread") { store.toggleThreadPin(thread.id) }
         Button("Rename…") { name = thread.title; renaming = SidebarTarget(projectID: project.id, threadID: thread.id) }
-        Button("New Thread in Project") { store.selectProject(project); store.newThread() }
+        Button("New Thread in Project") { store.newThread(projectID: project.id) }
         Divider()
         Button("Delete Thread…", role: .destructive) { removing = SidebarTarget(projectID: project.id, threadID: thread.id) }
             .disabled(store.running.contains(thread.id))
+    }
+}
+
+private struct SidebarThreadRow: View {
+    let thread: WorkspaceThread
+    let running: Bool
+    let selected: Bool
+    let select: () -> Void
+    let togglePin: () -> Void
+    @Environment(\.octoTheme) private var theme
+    @State private var hovering = false
+    @FocusState private var pinFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: select) {
+                HStack(spacing: 9) {
+                    if running { WorkingIndicator().frame(width: 16) }
+                    else { Image(systemName: "bubble.left").foregroundStyle(theme.secondary).frame(width: 16) }
+                    Text(thread.title).lineLimit(1)
+                    Spacer(minLength: 0)
+                }.font(.system(size: 14)).padding(.leading, 10).padding(.trailing, 6)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(HoverButtonStyle(padded: false)).help(thread.title)
+                .accessibilityLabel(thread.title).accessibilityValue(running ? "Working" : "Idle")
+            Button(action: togglePin) {
+                Image(systemName: thread.isPinned ? "pin.fill" : "pin")
+                    .font(.system(size: 12)).foregroundStyle(thread.isPinned ? theme.accent : theme.secondary)
+                    .frame(width: 28, height: 30)
+            }.buttonStyle(HoverButtonStyle(padded: false))
+                .focused($pinFocused)
+                .opacity(hovering || thread.isPinned || pinFocused ? 1 : 0)
+                .help(thread.isPinned ? "Unpin thread" : "Pin thread")
+                .accessibilityLabel("\(thread.isPinned ? "Unpin" : "Pin") \(thread.title)")
+                .padding(.trailing, 4)
+        }.background(selected ? theme.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle()).onHover { hovering = $0 }
     }
 }
 
@@ -372,18 +407,22 @@ private struct SidebarTarget {
 }
 
 struct HoverButtonStyle: ButtonStyle {
+    var padded = true
     var selected = false
     func makeBody(configuration: Configuration) -> some View {
-        HoverButton(configuration: configuration, selected: selected)
+        HoverButton(configuration: configuration, padded: padded, selected: selected)
     }
     private struct HoverButton: View {
         @Environment(\.octoTheme) private var theme
         let configuration: ButtonStyle.Configuration
+        let padded: Bool
         let selected: Bool
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
         var body: some View {
             configuration.label
+                .padding(.horizontal, padded ? 8 : 0).padding(.vertical, padded ? 6 : 0)
+                .contentShape(RoundedRectangle(cornerRadius: 6))
                 .background(selected ? theme.selection.opacity(enabled && (hovering || configuration.isPressed) ? 1.2 : 1) : Color.primary.opacity(enabled && (hovering || configuration.isPressed) ? 0.10 : 0), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(enabled && hovering ? 0.08 : 0)))
                 .opacity(enabled ? 1 : 0.45)
@@ -398,6 +437,7 @@ private struct HoverFeedback: ViewModifier {
     @Environment(\.isEnabled) private var enabled
     func body(content: Content) -> some View {
         content
+            .padding(4)
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.primary.opacity(enabled && hovering ? 0.08 : 0))

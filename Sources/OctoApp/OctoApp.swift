@@ -79,14 +79,14 @@ struct SettingsView: View {
     }
     private var shortcuts: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 24) {
                 Text("Keyboard first").font(.title2.bold())
                 Text("⌘⇧P opens every workspace command, including project and thread management, agent choices, and draft attachments. Type to filter; use ↑ / ↓ and Return to run. Escape closes the palette.").foregroundStyle(store.theme.secondary)
                 ForEach(Self.shortcutGroups, id: \.0) { group in
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 14) {
                         Text(group.0).font(.headline)
                         ForEach(group.1, id: \.0) { row in
-                            HStack { Text(row.0); Spacer(); Text(row.1).font(.system(.body, design: .monospaced)).foregroundStyle(store.theme.accent) }
+                            HStack(spacing: 24) { Text(row.0); Spacer(minLength: 20); Text(row.1).font(.system(.body, design: .monospaced)).foregroundStyle(store.theme.accent) }
                         }
                     }
                     Divider()

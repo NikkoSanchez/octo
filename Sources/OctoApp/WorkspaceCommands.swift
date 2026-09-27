@@ -74,22 +74,91 @@ struct WorkspaceCommandMenu: Commands {
 struct WorkspaceKeyRouter: NSViewRepresentable {
     var commands: [AppCommand]
     var terminalVisible: Bool
+    var hintsChanged: (Bool) -> Void
     func makeNSView(context: Context) -> KeyRoutingView { KeyRoutingView() }
     func updateNSView(_ view: KeyRoutingView, context: Context) {
-        view.commands = commands; view.terminalVisible = terminalVisible
+        view.commands = commands; view.terminalVisible = terminalVisible; view.hintsChanged = hintsChanged
     }
     static func dismantleNSView(_ view: KeyRoutingView, coordinator: ()) { view.stop() }
 }
+/// One reveal per uninterrupted Command hold. Shortcut use suppresses that hold.
+@MainActor final class ShortcutHintHold {
+    static let delay: TimeInterval = 0.65
+    private var commandDown = false
+    private var pendingReveal: DispatchWorkItem?
+    private var generation = 0
+    private let schedule: (TimeInterval, DispatchWorkItem) -> Void
+    var changed: (Bool) -> Void = { _ in }
+    var canReveal: () -> Bool = { true }
+
+    init(schedule: @escaping (TimeInterval, DispatchWorkItem) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }) { self.schedule = schedule }
+
+    func update(commandDown: Bool, keyDown: Bool) {
+        guard commandDown else { reset(); return }
+        let began = !self.commandDown
+        self.commandDown = true
+        if keyDown {
+            cancelReveal(); changed(false)
+        } else if began {
+            let token = generation
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.generation == token, self.commandDown, self.canReveal() else { return }
+                self.pendingReveal = nil
+                self.changed(true)
+            }
+            pendingReveal = work
+            schedule(Self.delay, work)
+        }
+    }
+
+    func reset() {
+        commandDown = false
+        cancelReveal(); changed(false)
+    }
+    private func cancelReveal() {
+        generation += 1
+        pendingReveal?.cancel(); pendingReveal = nil
+    }
+    deinit { pendingReveal?.cancel() }
+}
+
 final class KeyRoutingView: NSView {
     var commands: [AppCommand] = []
     var terminalVisible = false
+    var hintsChanged: ((Bool) -> Void)?
+    private var hintsVisible = false
+    private var resignObserver: NSObjectProtocol?
+    private var sheetObserver: NSObjectProtocol?
     private var monitor: Any?
+    private let hintHold = ShortcutHintHold()
+    private func showHints(_ visible: Bool) {
+        guard hintsVisible != visible else { return }
+        hintsVisible = visible; hintsChanged?(visible)
+    }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow(); stop()
         guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let window = self.window, event.window === window,
-                  window.isKeyWindow, window.attachedSheet == nil, NSApp.modalWindow == nil,
+        hintHold.changed = { [weak self] in self?.showHints($0) }
+        hintHold.canReveal = { [weak self] in
+            guard let window = self?.window else { return false }
+            return window.isKeyWindow && window.attachedSheet == nil && NSApp.modalWindow == nil && NSEvent.modifierFlags.contains(.command)
+        }
+        resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hintHold.reset() }
+        }
+        sheetObserver = NotificationCenter.default.addObserver(forName: NSWindow.willBeginSheetNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hintHold.reset() }
+        }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            guard let self, let window = self.window,
+                  (event.window === window || event.type == .flagsChanged),
+                  window.isKeyWindow, window.attachedSheet == nil, NSApp.modalWindow == nil else {
+                self?.hintHold.reset(); return event
+            }
+            self.hintHold.update(commandDown: event.modifierFlags.contains(.command), keyDown: event.type == .keyDown)
+            guard event.type == .keyDown,
                   let command = self.commands.first(where: { $0.matches(event) }),
                   (command.terminalAllowed || !self.terminalVisible),
                   (!command.terminalRequired || self.terminalVisible) else { return event }
@@ -98,8 +167,18 @@ final class KeyRoutingView: NSView {
             return nil
         }
     }
-    func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
-    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }; resignObserver = nil
+        if let sheetObserver { NotificationCenter.default.removeObserver(sheetObserver) }; sheetObserver = nil
+        hintHold.reset()
+        showHints(false)
+    }
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        if let sheetObserver { NotificationCenter.default.removeObserver(sheetObserver) }
+    }
 }
 
 enum PaletteMode: String, Identifiable { case chats, commands, files; var id: String { rawValue } }
@@ -226,4 +305,41 @@ struct SearchInputField: NSViewRepresentable {
         if let root = window.contentView, let target = find(root) { window.makeFirstResponder(target) }
     }
     static func clear() { NSApp?.keyWindow?.makeFirstResponder(nil) }
+}
+
+private struct ShortcutHintsKey: EnvironmentKey { static let defaultValue: [String: String] = [:] }
+extension EnvironmentValues {
+    var shortcutHints: [String: String] {
+        get { self[ShortcutHintsKey.self] }
+        set { self[ShortcutHintsKey.self] = newValue }
+    }
+}
+enum ShortcutHintPlacement { case above, inline }
+private struct ShortcutHint: ViewModifier {
+    @Environment(\.shortcutHints) private var hints
+    @Environment(\.octoTheme) private var theme
+    @Environment(\.isEnabled) private var enabled
+    let command: String
+    let active: Bool
+    let placement: ShortcutHintPlacement
+    func body(content: Content) -> some View {
+        content.overlay(alignment: placement == .inline ? .trailing : .topTrailing) {
+            if active, enabled, let shortcut = hints[command] {
+                Text(shortcut).font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.foreground).padding(.horizontal, 5).padding(.vertical, 3)
+                    .background(theme.panel, in: RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(theme.border))
+                    .fixedSize()
+                    // Align the badge's bottom above the control, leaving a real gap.
+                    .alignmentGuide(.top) { $0[.bottom] + 6 }
+                    .offset(x: placement == .inline ? -12 : 0)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
+    }
+}
+extension View {
+    func shortcutHint(_ command: String, active: Bool = true, placement: ShortcutHintPlacement = .above) -> some View {
+        modifier(ShortcutHint(command: command, active: active, placement: placement))
+    }
 }

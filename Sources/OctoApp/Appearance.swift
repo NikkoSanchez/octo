@@ -46,3 +46,17 @@ struct ThemedContent: ViewModifier {
             .background(theme.background)
     }
 }
+
+/// A shared, quiet activity pulse; Reduce Motion keeps the status visible and still.
+struct WorkingIndicator: View {
+    @Environment(\.octoTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var symbol = "circle.fill"
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: symbol == "circle.fill" ? 8 : 13))
+            .foregroundStyle(theme.accent)
+            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+            .accessibilityLabel("Working")
+    }
+}

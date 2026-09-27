@@ -5,6 +5,7 @@ import OctoAgents
 
 struct ChatPane: View {
     @ObservedObject var store: AppStore
+    var openFile: (URL) -> Void = { _ in }
     @Environment(\.octoTheme) private var theme
     @State private var matchIndex = 0
     @State private var expandedDetails = Set<UUID>()
@@ -16,8 +17,8 @@ struct ChatPane: View {
                 HStack {
                     Image(systemName: "bubble.left.and.text.bubble.right"); Text(thread.harness.title).fontWeight(.medium)
                     Spacer()
-                    Button { showingUsage.toggle() } label: { Label("Usage", systemImage: "chart.bar") }
-                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Account usage limits")
+                    Button { showingUsage.toggle() } label: { Image(systemName: "chart.bar") }
+                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Account usage limits").help("Account usage limits")
                         .popover(isPresented: $showingUsage, arrowEdge: .top) { usageView(thread).id(store.usageKey(thread)) }
                     if store.running.contains(thread.id) { ProgressView().controlSize(.small) } else { Text("Local").foregroundStyle(theme.secondary) }
                 }.font(.system(size: 15)).padding(13)
@@ -33,27 +34,9 @@ struct ChatPane: View {
                                     Text("Start a conversation about this project. Select code in the review pane to attach precise context.").foregroundStyle(theme.secondary)
                                 }.padding(.top, 30)
                             }
-                            ForEach(ChatMessageGroup.groups(thread.messages)) { group in
-                                if group.isDetails {
-                                    DisclosureGroup(isExpanded: Binding(get: {
-                                        expandedDetails.contains(group.id) || group.messages.contains { matchIDs.contains($0.id) }
-                                    }, set: { if $0 { expandedDetails.insert(group.id) } else { expandedDetails.remove(group.id) } })) {
-                                        ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
-                                    } label: {
-                                        HStack(spacing: 7) {
-                                            if store.running.contains(thread.id), group.messages.last?.id == thread.messages.last?.id {
-                                                WorkingIndicator(symbol: "sparkle")
-                                            } else { Image(systemName: "sparkle") }
-                                            Text("Reasoning & activity · \(group.messages.count)")
-                                        }.font(.system(size: 13)).foregroundStyle(theme.secondary)
-                                    }.padding(8).background(theme.panel, in: RoundedRectangle(cornerRadius: 7))
-                                } else {
-                                    ForEach(group.messages) { message in transcriptMessage(message, harness: thread.harness) }
-                                }
-                            }
-                            if store.running.contains(thread.id), thread.messages.last?.role != .reasoning, thread.messages.last?.role != .activity {
-                                HStack(spacing: 7) { WorkingIndicator(); Text("Working…") }
-                                    .font(.system(size: 13)).foregroundStyle(theme.secondary)
+                            ForEach(ChatTurn.turns(thread.messages)) { turn in
+                                turnView(turn, harness: thread.harness,
+                                         active: store.running.contains(thread.id) && turn.messages.last?.id == thread.messages.last?.id)
                             }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
@@ -73,6 +56,17 @@ struct ChatPane: View {
                         ScrollView { Text(approval.detail).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 130)
                         HStack { Button("Decline") { store.answer(approval, threadID: thread.id, allow: false) }.hoverFeedback(); Button("Allow Once") { store.answer(approval, threadID: thread.id, allow: true) }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback() }
                     }.padding(12).background(theme.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 8)).padding(12)
+                }
+                if !(store.interactions[thread.id] ?? []).isEmpty {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(store.interactions[thread.id] ?? []) { request in
+                                InteractionCard(request: request) { response in
+                                    store.respond(to: request, threadID: thread.id, response: response)
+                                }.id(request.id)
+                            }
+                        }.padding(12)
+                    }.frame(maxHeight: 340)
                 }
                 composer(thread)
                     .task(id: "\(thread.harness.rawValue):\(thread.workingDirectory):\(store.codexConfigurationID)") {
@@ -117,19 +111,87 @@ struct ChatPane: View {
         }.padding(12).background(theme.panel)
 
     }
+    private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let user = turn.user { transcriptMessage(user, harness: harness) }
+            if active || turn.user?.work != nil || !turn.details.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    if turn.details.isEmpty {
+                        workLabel(turn, active: active)
+                    } else {
+                        DisclosureGroup(isExpanded: Binding(get: {
+                            expandedDetails.contains(turn.id) || turn.details.contains { matchIDs.contains($0.id) }
+                        }, set: { if $0 { expandedDetails.insert(turn.id) } else { expandedDetails.remove(turn.id) } })) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(turn.details) { transcriptMessage($0, harness: harness) }
+                            }.padding(.top, 10)
+                        } label: { workLabel(turn, active: active) }
+                    }
+                    Divider().overlay(theme.border.opacity(0.25))
+                }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
+            }
+            ForEach(turn.responses) { transcriptMessage($0, harness: harness) }
+        }
+    }
+    @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
+        if active {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 7) {
+                    WorkingIndicator()
+                    Text("Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
+                        .monospacedDigit()
+                }
+            }
+        } else {
+            Text(turn.user?.work?.label ?? "Reasoning & activity · \(turn.details.count)")
+        }
+    }
+    private func timestamp(_ message: ChatMessage) -> some View {
+        let date = message.completedAt ?? message.createdAt
+        return Text(date, format: .dateTime.weekday(.wide).hour().minute())
+            .font(.system(size: 11)).foregroundStyle(theme.secondary)
+            .help(date.formatted(date: .complete, time: .standard))
+    }
     private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if message.role != .activity && message.role != .reasoning {
-                Text(message.role == .user ? "You" : message.role == .error ? "Connection issue" : harness.title)
-                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.secondary)
-            }
-            Text(message.text).font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
-                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
-                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            imageStrip(message.images)
-            ForEach(message.attachments) { attachment in
-                Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-            }
+        HStack(alignment: .top, spacing: 0) {
+            if message.role == .user { Spacer(minLength: 48) }
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if message.role == .error {
+                        Text("Agent notice").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.red)
+                    }
+                    if message.role == .assistant {
+                        MarkdownResponseView(source: message.text)
+                            .environment(\.openURL, OpenURLAction { url in
+                                if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return .systemAction }
+                                openFile(url)
+                                return .handled
+                            })
+                    } else {
+                        Text(verbatim: message.text)
+                            .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                            .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    imageStrip(message.images)
+                    ForEach(message.attachments) { attachment in
+                        Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
+                            .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+                .padding(message.role == .user ? 14 : 0)
+                .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
+                if message.role == .user || message.role == .assistant || message.role == .error {
+                    HStack(spacing: 10) {
+                        if message.role == .assistant {
+                            Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
+                                .buttonStyle(HoverButtonStyle()).help("Copy original response")
+                                .accessibilityLabel("Copy original response")
+                        }
+                        timestamp(message)
+                    }.foregroundStyle(theme.secondary)
+                }
+            }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
         }
     }
     private func permissionsMenu(_ thread: WorkspaceThread, compact: Bool = false) -> some View {
@@ -284,15 +346,10 @@ struct ChatPane: View {
                 }.font(.system(size: 15)).padding(7).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
             imageStrip(store.draftImages[thread.id] ?? [], threadID: thread.id)
-            ZStack(alignment: .topLeading) {
-                if (store.drafts[thread.id] ?? "").isEmpty {
-                    Text("Ask about this project…").font(.system(size: 15)).foregroundStyle(theme.subtle)
-                        .padding(.top, 5).padding(.leading, 5).allowsHitTesting(false)
-                }
-                ComposerTextView(focusRequest: store.composerFocus, theme: store.theme, text: Binding(get: { store.drafts[thread.id] ?? "" }, set: { store.drafts[thread.id] = $0 }),
-                                 onPasteImage: { store.pasteScreenshot(from: $0, threadID: thread.id) }, onSend: { store.send() })
-                    .id(thread.id).frame(height: 76)
-            }
+            DraftEditor(drafts: store.draftStore, threadID: thread.id, focusRequest: store.composerFocus, theme: store.theme,
+                        onChange: { store.drafts[thread.id] = $0 },
+                        onPasteImage: { store.pasteScreenshot(from: $0, threadID: thread.id) }, onSend: { store.send() })
+                .id(thread.id).frame(height: 110)
             HStack(spacing: 10) {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread) }
@@ -316,6 +373,29 @@ struct ChatPane: View {
     }
 }
 
+/// Only this small subtree observes each keystroke; the transcript, sidebar and
+/// terminal surfaces do not need to rebuild for ordinary draft edits.
+private struct DraftEditor: View {
+    @ObservedObject var drafts: DraftStore
+    let threadID: UUID
+    let focusRequest: Int
+    let theme: AppTheme
+    let onChange: (String) -> Void
+    let onPasteImage: (NSPasteboard) -> Bool
+    let onSend: () -> Void
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if (drafts.values[threadID] ?? "").isEmpty {
+                Text("Ask about this project…").font(.system(size: 15)).foregroundStyle(theme.subtle)
+                    .padding(.top, 5).padding(.leading, 5).allowsHitTesting(false)
+            }
+            ComposerTextView(focusRequest: focusRequest, theme: theme,
+                             text: Binding(get: { drafts.values[threadID] ?? "" }, set: onChange),
+                             onPasteImage: onPasteImage, onSend: onSend)
+        }
+    }
+}
+
 /// Native plain-text editing keeps standard selection, undo and paste behavior,
 /// while screenshot paste attaches an image instead of inserting rich text.
 struct ComposerTextView: NSViewRepresentable {
@@ -328,7 +408,9 @@ struct ComposerTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-        let editor = ScreenshotTextView()
+        scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
+        scroll.verticalScrollElasticity = .none; scroll.horizontalScrollElasticity = .none
+        let editor = ScreenshotTextView(frame: scroll.contentView.bounds)
         editor.identifier = NSUserInterfaceItemIdentifier("OctoComposer")
         editor.isRichText = false; editor.importsGraphics = false; editor.allowsUndo = true
         editor.drawsBackground = false; editor.font = .systemFont(ofSize: 15); editor.textColor = .labelColor
@@ -346,10 +428,19 @@ struct ComposerTextView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ScreenshotTextView else { return }
-        if editor.string != text { editor.string = text }
+        if editor.string != text, !editor.hasMarkedText() {
+            editor.string = text
+            editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            editor.scrollRangeToVisible(editor.selectedRange())
+        }
         editor.onPasteImage = onPasteImage; editor.onSend = onSend
-        editor.textColor = theme.textColor; editor.insertionPointColor = theme.cursorColor
-        editor.selectedTextAttributes = [.backgroundColor: theme.selectionColor, .foregroundColor: theme.textColor]
+        // Reapplying text attributes on every edit invalidates native layout and
+        // can move the scroll position while the insertion point is being drawn.
+        if context.coordinator.theme != theme {
+            context.coordinator.theme = theme
+            editor.textColor = theme.textColor; editor.insertionPointColor = theme.cursorColor
+            editor.selectedTextAttributes = [.backgroundColor: theme.selectionColor, .foregroundColor: theme.textColor]
+        }
         if context.coordinator.focusRequest != focusRequest {
             context.coordinator.focusRequest = focusRequest
             DispatchQueue.main.async { editor.window?.makeFirstResponder(editor) }
@@ -357,6 +448,7 @@ struct ComposerTextView: NSViewRepresentable {
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var focusRequest = 0
+        var theme: AppTheme?
         var parent: ComposerTextView
         init(_ parent: ComposerTextView) { self.parent = parent }
         func textDidChange(_ notification: Notification) {

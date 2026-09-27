@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import OctoCore
 
 @MainActor public final class CodexHarness: AgentHarness {
@@ -12,6 +13,21 @@ import OctoCore
     private var reasoningItems = Set<String>()
     private var commentaryItems = Set<String>()
     private var autoReviewVerified = false
+    private var extendedInteractions = false
+    private var connectionID = UUID()
+    private var turnEpoch = UUID()
+    private var acceptingRequests = false
+    private struct PendingInteraction {
+        let wireID: Any
+        let key: String
+        let connection: UUID
+        let epoch: UUID
+        let decoded: CodexInteraction
+    }
+    private var interactions: [UUID: PendingInteraction] = [:]
+    private var approvalKeys: [String: (id: String, epoch: UUID)] = [:]
+    private var seenRequests = Set<String>()
+    private var tools: [String: ToolActivity] = [:]
     private let executableOverride: URL?
     public init(executable: URL? = nil) {
         executableOverride = executable
@@ -19,25 +35,35 @@ import OctoCore
         rpc.onRequest = { [weak self] id, method, params in self?.serverRequest(id, method, params) }
         rpc.onDisconnect = { [weak self] detail in
             guard let self else { return }; self.initialized = false
-            if self.busy { self.busy = false; self.onEvent?(.failed(detail)) }
+            self.invalidateRequests(); self.endTools(); self.acceptingRequests = false
+            if self.busy { self.busy = false; self.onEvent?(.failed(CodexToolDetails.text(detail))) }
         }
     }
     public func send(prompt: String, sessionID: String?, directory: String, settings: AgentSettings = AgentSettings(), images: [ImageAttachment] = []) async throws {
         guard !busy else { throw ProcessFailure.exited("This thread already has a running turn.") }
         guard let executable = executableOverride ?? CodexExecutable.resolve() else { throw ProcessFailure.missing("codex") }
-        busy = true
+        busy = true; acceptingRequests = true; turnID = nil; turnEpoch = UUID()
+        let epoch = turnEpoch
         do {
         let mode = settings.permissionMode ?? .ask
         if mode == .autoReview && !autoReviewVerified {
             let version = try await CodexExecutable.version(of: executable)
+            try requireActive(epoch)
             guard Self.supportsAutoReview(version: version) else {
                 throw ProcessFailure.exited("Approve for me requires Codex CLI 0.158.0 or newer. Choose Ask for approval or select a supported CLI in Settings.")
             }
             autoReviewVerified = true
         }
         if !rpc.running {
+            connectionID = UUID(); seenRequests.removeAll(); tools.removeAll()
+            let version = (try? await CodexExecutable.version(of: executable)) ?? ""
+            try requireActive(epoch)
+            extendedInteractions = Self.supportsInteractionExtensions(version: version)
             try rpc.start(executable: executable, directory: directory)
-            _ = try await rpc.request("initialize", ["clientInfo": ["name": "octo", "title": "Octo", "version": "0.1.0"]])
+            var initialize: [String: Any] = ["clientInfo": ["name": "octo", "title": "Octo", "version": "0.1.0"]]
+            if extendedInteractions { initialize["capabilities"] = ["experimentalApi": true, "mcpServerOpenaiFormElicitation": true] }
+            _ = try await rpc.request("initialize", initialize)
+            try requireActive(epoch)
             try rpc.notify("initialized"); initialized = true; threadID = nil
         }
         guard initialized else { throw ProcessFailure.exited("Codex connection is not initialized.") }
@@ -47,10 +73,12 @@ import OctoCore
             if let sessionID { params["threadId"] = sessionID }
             if let model = settings.model { params["model"] = model }
             let result = try await rpc.request(sessionID == nil ? "thread/start" : "thread/resume", params)
+            try requireActive(epoch)
             guard let id = (result["thread"] as? [String: Any])?["id"] as? String else { throw ProcessFailure.exited("Codex returned no thread ID.") }
             threadID = id; onEvent?(.session(id))
         }
         guard let threadID else { return }
+        tools.removeAll()
         streamedItems.removeAll()
         reasoningItems.removeAll()
         commentaryItems.removeAll()
@@ -63,9 +91,17 @@ import OctoCore
             if let model = settings.model { params["model"] = model }
             if let effort = settings.reasoningEffort { params["effort"] = effort }
             let result = try await rpc.request("turn/start", params)
-            if busy { turnID = (result["turn"] as? [String: Any])?["id"] as? String }
-        } catch { busy = false; throw error }
+            if busy && turnEpoch == epoch { turnID = (result["turn"] as? [String: Any])?["id"] as? String }
+        } catch {
+            if turnEpoch == epoch { busy = false; acceptingRequests = false; invalidateRequests(); endTools() }
+            throw error
+        }
     }
+    private func requireActive(_ epoch: UUID) throws {
+        guard busy, acceptingRequests, turnEpoch == epoch else { throw ProcessFailure.exited("Turn startup was cancelled.") }
+    }
+    /// Conservative implementation baseline, separately declared from permission support.
+    public static func supportsInteractionExtensions(version: String) -> Bool { supportsAutoReview(version: version) }
     public static let permissionOptions: [AgentPermissionOption] = [
         .init(mode: .readOnly, detail: "Read files. File writes and network access stay blocked; no escalation requests."),
         .init(mode: .ask, detail: "Edit this workspace. Ask before leaving the sandbox or accessing the network."),
@@ -144,8 +180,17 @@ import OctoCore
     }
     private func notification(_ method: String, _ p: [String: Any]) {
         if let id = p["threadId"] as? String, let threadID, id != threadID { return }
+        if let id = p["turnId"] as? String, let turnID, id != turnID { return }
+        if method == "turn/completed", let id = (p["turn"] as? [String: Any])?["id"] as? String, let turnID, id != turnID { return }
+        if !busy && method != "account/rateLimits/updated" && method != "serverRequest/resolved" { return }
         switch method {
-        case "turn/started": turnID = (p["turn"] as? [String: Any])?["id"] as? String
+        case "item/mcpToolCall/progress":
+            guard p["threadId"] as? String == threadID, p["turnId"] as? String == turnID,
+                  let id = p["itemId"] as? String, var tool = tools[id], tool.state == .running else { return }
+            tool.detail = CodexToolDetails.text(p["message"] as? String ?? "")
+            if tools[id] != tool { tools[id] = tool; onEvent?(.toolActivity(tool)) }
+        case "turn/started":
+            if let id = (p["turn"] as? [String: Any])?["id"] as? String, turnID == nil || turnID == id { turnID = id }
         case "item/agentMessage/delta":
             if let id = p["itemId"] as? String { streamedItems.insert(id) }
             if let delta = p["delta"] as? String {
@@ -160,6 +205,14 @@ import OctoCore
             if let usage = try? Self.decodeUsage(p) { onEvent?(.usage(usage)) }
         case "item/started", "item/completed":
             guard let item = p["item"] as? [String: Any], let type = item["type"] as? String else { return }
+            if type == "mcpToolCall" {
+                guard p["threadId"] as? String == threadID, p["turnId"] as? String == turnID,
+                      let id = item["id"] as? String, let server = item["server"] as? String, let name = item["tool"] as? String else { return }
+                if let previous = tools[id], previous.state != .running { return }
+                let state: ToolActivity.State = item["status"] as? String == "failed" ? .failed : (method == "item/completed" ? .completed : .running)
+                let tool = ToolActivity(id: "\(connectionID):\(turnEpoch):\(id)", server: CodexToolDetails.text(server, limit: 256), tool: CodexToolDetails.text(name, limit: 256), state: state, detail: CodexToolDetails.result(item))
+                if tools[id] != tool { tools[id] = tool; onEvent?(.toolActivity(tool)) }
+            }
             if type == "agentMessage", item["phase"] as? String == "commentary", method == "item/started" {
                 if let id = item["id"] as? String { commentaryItems.insert(id) }
                 onEvent?(.activity(""))
@@ -175,39 +228,100 @@ import OctoCore
             if method == "item/started", type == "commandExecution" { onEvent?(.activity(item["command"] as? String ?? "Running command")) }
             if method == "item/completed", type == "fileChange" { onEvent?(.activity("Updated files")) }
         case "turn/completed":
+            invalidateRequests(); endTools(); acceptingRequests = false
             busy = false; turnID = nil
             let turn = p["turn"] as? [String: Any] ?? [:]
             if turn["status"] as? String == "failed" {
                 let error = turn["error"] as? [String: Any]; onEvent?(.failed(error?["message"] as? String ?? "Codex turn failed."))
             } else { onEvent?(.finished) }
-        case "serverRequest/resolved": if let id = p["requestId"] { onEvent?(.approvalResolved(String(describing: id))) }
+        case "serverRequest/resolved":
+            guard let wireID = p["requestId"], let key = Self.requestKey(wireID) else { return }
+            for (id, pending) in interactions where pending.key == key { interactions[id] = nil; onEvent?(.interactionResolved(id)) }
+            if let approval = approvalKeys.removeValue(forKey: key) { onEvent?(.approvalResolved(approval.id)) }
         case "error":
             if p["willRetry"] as? Bool != true { let error = p["error"] as? [String: Any]; onEvent?(.activity(error?["message"] as? String ?? "Codex reported an error.")) }
         default: break
         }
     }
+    private static func requestKey(_ id: Any) -> String? {
+        if let string = id as? String { return "string:" + string }
+        if let number = id as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() { return "number:" + number.stringValue }
+        return nil
+    }
     private func serverRequest(_ id: Any, _ method: String, _ p: [String: Any]) {
-        if method == "item/commandExecution/requestApproval" || method == "item/fileChange/requestApproval" {
+        guard let key = Self.requestKey(id), seenRequests.insert(key).inserted else { return }
+        let elicitation = method == "mcpServer/elicitation/request"
+        let questions = method == "item/tool/requestUserInput"
+        guard busy, acceptingRequests,
+              (p["threadId"] as? String == nil || p["threadId"] as? String == threadID),
+              (p["turnId"] as? String == nil || p["turnId"] as? String == turnID) else {
+            if elicitation { rpc.respond(id: id, result: ["action": "cancel", "content": NSNull()]) }
+            else if questions { rpc.respond(id: id, result: ["answers": [:]]) }
+            else { rpc.reject(id: id, method: method) }
+            return
+        }
+        if elicitation || questions {
+            do {
+                guard let owner = threadID, p["threadId"] as? String == owner,
+                      (questions || (p["serverName"] as? String)?.isEmpty == false),
+                      (!questions || ((p["itemId"] as? String)?.isEmpty == false && p["isBlocking"] is Bool)),
+                      (!questions || (extendedInteractions && p["turnId"] as? String == turnID)),
+                      (p["mode"] as? String == "form" || questions || extendedInteractions) else {
+                    throw ProcessFailure.exited("Unsupported interaction context or experimental API; use a supported Codex CLI (0.158 or newer).")
+                }
+                let decoded = try CodexInteraction.decode(p, questions: questions)
+                interactions[decoded.request.id] = PendingInteraction(wireID: id, key: key, connection: connectionID, epoch: turnEpoch, decoded: decoded)
+                onEvent?(.interaction(decoded.request))
+            } catch {
+                rpc.respond(id: id, result: questions ? ["answers": [:]] : ["action": "decline", "content": NSNull()])
+                onEvent?(.interactionUnavailable(error.localizedDescription))
+            }
+        } else if method == "item/commandExecution/requestApproval" || method == "item/fileChange/requestApproval" {
             let detail = [p["command"] as? String, p["cwd"] as? String, p["reason"] as? String, p["grantRoot"] as? String].compactMap { $0 }.joined(separator: "\n")
-            onEvent?(.approval(.init(id: String(describing: id), title: method.contains("commandExecution") ? "Command approval" : "File change approval", detail: detail.isEmpty ? "The agent requests permission for this operation." : detail, respond: { [weak self] allow in
-                self?.rpc.respond(id: id, result: ["decision": allow ? "accept" : "decline"])
+            let localID = UUID().uuidString, epoch = turnEpoch, connection = connectionID
+            approvalKeys[key] = (localID, epoch)
+            onEvent?(.approval(.init(id: localID, title: method.contains("commandExecution") ? "Command approval" : "File change approval", detail: detail.isEmpty ? "The agent requests permission for this operation." : detail, respond: { [weak self] allow in
+                guard let self, self.connectionID == connection, self.turnEpoch == epoch,
+                      self.approvalKeys[key]?.id == localID, self.acceptingRequests else { return }
+                self.approvalKeys[key] = nil
+                self.rpc.respond(id: id, result: ["decision": allow ? "accept" : "decline"])
+                self.onEvent?(.approvalResolved(localID))
             })))
         } else if method == "item/permissions/requestApproval" {
             rpc.respond(id: id, result: ["permissions": [:], "scope": "turn"])
-            onEvent?(.activity("Additional permission request declined: this request type is not yet supported."))
-        } else if method == "mcpServer/elicitation/request" {
-            rpc.respond(id: id, result: ["action": "decline", "content": NSNull()])
-            onEvent?(.activity("MCP elicitation declined: this request type is not yet supported."))
+            onEvent?(.interactionUnavailable("Additional permission request declined: this request type is not yet supported."))
         } else {
-            rpc.reject(id: id, method: method); onEvent?(.activity("Unsupported agent request: \(method)"))
+            rpc.reject(id: id, method: method); onEvent?(.interactionUnavailable("Unsupported agent request: \(method)"))
+        }
+    }
+    public func respond(to id: UUID, with response: AgentInteractionResponse) throws {
+        guard let pending = interactions[id], pending.connection == connectionID, pending.epoch == turnEpoch,
+              busy, acceptingRequests, rpc.running else { throw ProcessFailure.exited("This request is no longer active.") }
+        let result = try pending.decoded.response(response)
+        try rpc.sendResponse(id: pending.wireID, result: result)
+        interactions[id] = nil; onEvent?(.interactionResolved(id))
+    }
+    private func invalidateRequests(cancel: Bool = false) {
+        let pending = interactions; interactions.removeAll()
+        for (id, request) in pending {
+            if cancel, let result = try? request.decoded.response(.cancel) { rpc.respond(id: request.wireID, result: result) }
+            onEvent?(.interactionResolved(id))
+        }
+        for approval in approvalKeys.values { onEvent?(.approvalResolved(approval.id)) }
+        approvalKeys.removeAll()
+    }
+    private func endTools() {
+        for (id, var tool) in tools where tool.state == .running {
+            tool.state = .interrupted; tools[id] = tool; onEvent?(.toolActivity(tool))
         }
     }
     public func interrupt() async {
+        acceptingRequests = false; invalidateRequests(cancel: true); endTools()
         guard let threadID, let turnID else {
             if busy { rpc.close(); busy = false; initialized = false; onEvent?(.finished) }
             return
         }
         _ = try? await rpc.request("turn/interrupt", ["threadId": threadID, "turnId": turnID])
     }
-    public func shutdown() { busy = false; rpc.close() }
+    public func shutdown() { acceptingRequests = false; invalidateRequests(cancel: true); endTools(); busy = false; rpc.close() }
 }

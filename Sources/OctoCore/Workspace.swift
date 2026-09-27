@@ -101,7 +101,11 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var attachments: [CodeAttachment]
     public var images: [ImageAttachment]
     public var createdAt: Date
-    private enum CodingKeys: String, CodingKey { case id, role, text, attachments, images, createdAt }
+    public var completedAt: Date?
+    /// Recorded on the initiating user message. Absent on legacy conversations.
+    public var toolActivity: ToolActivity?
+    public var work: TurnWork?
+    private enum CodingKeys: String, CodingKey { case id, role, text, attachments, images, createdAt, completedAt, work, toolActivity }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -110,9 +114,55 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         attachments = try values.decode([CodeAttachment].self, forKey: .attachments)
         images = try values.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
         createdAt = try values.decode(Date.self, forKey: .createdAt)
+        completedAt = try values.decodeIfPresent(Date.self, forKey: .completedAt)
+        work = try values.decodeIfPresent(TurnWork.self, forKey: .work)
+        toolActivity = try values.decodeIfPresent(ToolActivity.self, forKey: .toolActivity)
     }
     public init(id: UUID = UUID(), role: Role, text: String, attachments: [CodeAttachment] = [], images: [ImageAttachment] = []) {
         self.id = id; self.role = role; self.text = text; self.attachments = attachments; self.images = images; self.createdAt = Date()
+    }
+}
+
+public struct TurnWork: Codable, Equatable, Sendable {
+    public enum Outcome: String, Codable, Sendable { case completed, stopped, failed, interrupted }
+    public var startedAt: Date
+    public var elapsed: TimeInterval?
+    public var outcome: Outcome?
+    public init(startedAt: Date = Date()) { self.startedAt = startedAt }
+    public static func duration(_ interval: TimeInterval) -> String {
+        let seconds = Int(min(31_536_000, max(0, interval.isFinite ? interval : 0)))
+        if seconds >= 3600 { return "\(seconds / 3600)h \((seconds % 3600) / 60)m" }
+        if seconds >= 60 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds)s"
+    }
+    public var label: String {
+        let prefix: String
+        switch outcome {
+        case .completed: prefix = "Worked for"
+        case .stopped: prefix = "Stopped after"
+        case .failed: prefix = "Failed after"
+        case .interrupted: prefix = "Interrupted after"
+        case nil: return "Interrupted"
+        }
+        guard let elapsed else { return outcome == .interrupted ? "Interrupted" : prefix }
+        return "\(prefix) \(Self.duration(elapsed))"
+    }
+}
+
+/// A user message starts a turn; imported leading responses form their own group.
+public struct ChatTurn: Identifiable {
+    public var id: UUID { messages[0].id }
+    public var messages: [ChatMessage]
+    public var user: ChatMessage? { messages.first?.role == .user ? messages.first : nil }
+    public var details: [ChatMessage] { messages.filter { $0.role == .reasoning || $0.role == .activity } }
+    public var responses: [ChatMessage] { messages.filter { $0.role == .assistant || $0.role == .error } }
+    public static func turns(_ messages: [ChatMessage]) -> [ChatTurn] {
+        var turns: [ChatTurn] = []
+        for message in messages {
+            if message.role == .user || turns.isEmpty { turns.append(ChatTurn(messages: [message])) }
+            else { turns[turns.count - 1].messages.append(message) }
+        }
+        return turns
     }
 }
 

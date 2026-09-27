@@ -13,6 +13,9 @@ import OctoGit
     @Published var branch = ""
     @Published var error: String?
     @Published var loading = false
+    @Published var expandedFolders = Set<String>()
+    @Published var revealLine: Int?
+    @Published var revealRequest = 0
     @Published private(set) var loadingSnapshot = false
     private var filePath: String?
     private var changePath: String?
@@ -25,7 +28,7 @@ import OctoGit
         snapshotGeneration = UUID(); loadingSnapshot = false
         let nextContext = projectID.uuidString + root
         if context != nextContext {
-            context = nextContext; filePath = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""
+            context = nextContext; filePath = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
@@ -58,12 +61,21 @@ import OctoGit
     }
     func selectPath(_ path: String, projectID: UUID, root: String) async {
         guard browsingFiles else { return }
-        let token = UUID(); snapshotGeneration = token; selectedPath = path; filePath = path; selection = nil; loadingSnapshot = true
+        let token = UUID(); snapshotGeneration = token; selectedPath = path; filePath = path; selection = nil; loadingSnapshot = true; revealLine = nil
         defer { if snapshotGeneration == token { loadingSnapshot = false } }
         do {
             let value = try await git.fileSnapshot(path: path, projectID: projectID, root: root)
             guard snapshotGeneration == token else { return }; snapshot = value; error = nil
         } catch { if snapshotGeneration == token { self.error = error.localizedDescription; snapshot = nil } }
+    }
+    func reveal(_ link: MarkdownFileLink, projectID: UUID, root: String) async {
+        // Remember the linked file so returning to Files restores this preview.
+        filePath = link.path; browsingFiles = true
+        let parts = link.path.split(separator: "/")
+        for count in 1..<max(1, parts.count) { expandedFolders.insert(parts.prefix(count).joined(separator: "/")) }
+        await selectPath(link.path, projectID: projectID, root: root)
+        guard selectedPath == link.path, snapshot?.path == link.path, snapshot?.workingDirectory == root else { return }
+        revealLine = link.line; revealRequest += 1
     }
     func select(_ file: ChangedFile, projectID: UUID, root: String) async {
         guard !browsingFiles else { return }

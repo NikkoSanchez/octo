@@ -97,7 +97,7 @@ struct SettingsView: View {
         }
     }
     static let shortcutGroups: [(String, [(String, String)])] = [
-        ("Navigate & create", [("Search chats", "⌘K"), ("Find in current thread", "⌘F"), ("Next / previous matching message", "⌘G / ⇧⌘G"), ("New thread / add project", "⌘N / ⇧⌘O"), ("Find file / command palette", "⌘P / ⇧⌘P"), ("Previous / next thread", "⌥⌘[ / ⌥⌘]")]),
+        ("Navigate & create", [("Search chats", "⌘K"), ("Switch project", "⇧⌘K"), ("Find in current thread", "⌘F"), ("Next / previous matching message", "⌘G / ⇧⌘G"), ("New thread / add project", "⌘N / ⇧⌘O"), ("Find file / command palette", "⌘P / ⇧⌘P"), ("Previous / next thread", "⌥⌘[ / ⌥⌘]")]),
         ("Workspace", [("Toggle left sidebar / review panel", "⌘B / ⌥⌘R"), ("Focus composer / show changes / show files", "⌘1 / ⌘2 / ⌘3"), ("Focus code preview", "⌘4"), ("Toggle terminal", "⌘J"), ("Settings", "⌘,")]),
         ("Conversation & review", [("Send message / stop agent", "⌘Return / ⌘."), ("Attach selected code to draft", "⇧⌘A"), ("Open selected file in LazyVim", "⇧⌘E"), ("Refresh changes and files", "⇧⌘R")]),
         ("Terminal", [("New tab / close tab with confirmation", "⌘T / ⌘W"), ("Previous / next terminal tab", "⇧⌘[ / ⇧⌘]")])
@@ -125,6 +125,10 @@ struct SettingsView: View {
                     Text(store.codexIsRunning ? "Stop running Codex turns to change installations." : "The same installation supplies the model list and runs your turns. Changing it refreshes models; saved conversations remain.")
                         .font(.system(size: 12)).foregroundStyle(store.theme.secondary)
                 }.padding(.vertical, 4)
+            }
+            Section("CLI-owned integrations") {
+                Text("Configure and authenticate integrations with your selected CLI, including in Octo’s terminal. Octo inherits its launch environment; shell-only variables may differ. Use the executable shown above and the same project. No credentials or MCP settings are copied into Octo.").font(.system(size: 13)).foregroundStyle(store.theme.secondary)
+                Text("Missing tools, service connection failures, macOS permissions, app authorization, and unsupported forms are separate issues. Follow the owning CLI’s setup/login workflow; app approval does not repair a transport or OS permission failure.").font(.system(size: 13)).foregroundStyle(store.theme.secondary)
             }
             Section("Local workspace") { Text("Uses your installed CLI authentication and Neovim configuration. Terminal tabs survive navigation, but do not survive app exit.").font(.system(size: 13)).foregroundStyle(store.theme.secondary) }
         }.formStyle(.grouped).scrollContentBackground(.hidden)

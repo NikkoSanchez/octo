@@ -181,7 +181,18 @@ final class KeyRoutingView: NSView {
     }
 }
 
-enum PaletteMode: String, Identifiable { case chats, commands, files; var id: String { rawValue } }
+enum PaletteMode: String, Identifiable {
+    case chats, projects, commands, files
+    var id: String { rawValue }
+    var placeholder: String {
+        switch self {
+        case .chats: return "Search chats across projects…"
+        case .projects: return "Switch project by name or path…"
+        case .commands: return "Type a command…"
+        case .files: return "Find a project file…"
+        }
+    }
+}
 struct PaletteEntry: Identifiable {
     let id: String
     let title: String
@@ -195,6 +206,7 @@ struct CommandPalette: View {
     let mode: PaletteMode
     let entries: [PaletteEntry]
     let dismiss: () -> Void
+    let activateEntry: (PaletteEntry) -> Void
     @Environment(\.octoTheme) private var theme
     @State private var query = ""
     @State private var selected = 0
@@ -205,8 +217,8 @@ struct CommandPalette: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Image(systemName: mode == .commands ? "command" : "magnifyingglass").foregroundStyle(theme.accent)
-                SearchInputField(placeholder: mode == .chats ? "Search chats across projects…" : mode == .files ? "Find a project file…" : "Type a command…", text: $query,
+                Image(systemName: mode == .commands ? "command" : mode == .projects ? "folder" : "magnifyingglass").foregroundStyle(theme.accent)
+                SearchInputField(placeholder: mode.placeholder, text: $query,
                                    move: move, submit: activate, cancel: dismiss)
                     .frame(height: 32)
                 Button("Esc", action: dismiss).buttonStyle(.plain).foregroundStyle(theme.secondary)
@@ -227,12 +239,20 @@ struct CommandPalette: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(11)
                                     .background(index == selected ? theme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
                                     .contentShape(Rectangle())
-                            }.buttonStyle(.plain).disabled(!entry.enabled).opacity(entry.enabled ? 1 : 0.45).id(index)
+                            }.buttonStyle(.plain).disabled(!entry.enabled).opacity(entry.enabled ? 1 : 0.45).id(entry.id)
                         }
-                        if matches.isEmpty { Text("No results").foregroundStyle(theme.secondary).padding(35) }
+                        if matches.isEmpty {
+                            Text(mode == .projects && entries.isEmpty ? "No projects yet. Add one with ⇧⌘O." : "No results")
+                                .foregroundStyle(theme.secondary).padding(35)
+                        }
                     }.padding(10)
                 }.frame(height: 350)
-                    .onChange(of: selected) { _, value in proxy.scrollTo(value) }
+                    .onChange(of: selected) { _, value in
+                        if matches.indices.contains(value) { proxy.scrollTo(matches[value].id) }
+                    }
+                    .onChange(of: query) { _, _ in
+                        if let first = matches.first { proxy.scrollTo(first.id) }
+                    }
             }
             Divider()
             HStack { Text("↑ ↓ to navigate · Return to open · Esc to close"); Spacer(); Text("\(matches.count) results") }
@@ -243,10 +263,7 @@ struct CommandPalette: View {
     private func move(_ delta: Int) { guard !matches.isEmpty else { return }; selected = (selected + delta + matches.count) % matches.count }
     private func activate() {
         guard matches.indices.contains(selected), matches[selected].enabled else { return }
-        let action = matches[selected].action
-        dismiss()
-        // Execute after SwiftUI removes the sheet (important for focus and dialogs).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { action() }
+        activateEntry(matches[selected])
     }
 }
 struct SearchInputField: NSViewRepresentable {

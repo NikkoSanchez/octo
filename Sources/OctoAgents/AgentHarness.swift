@@ -9,6 +9,7 @@ public struct HarnessDescriptor: Identifiable {
     public var permissionOptions: [AgentPermissionOption] = []
     public var defaultPermissionMode: AgentPermissionMode? = nil
     public var supportsUsageLimits = false
+    public var capabilities = HarnessCapabilities()
 }
 public struct AgentApproval: Identifiable {
     public var id: String
@@ -24,6 +25,10 @@ public enum AgentEvent {
     case activityDelta(String)
     case reasoningDelta(String)
     case usage(AgentUsage)
+    case toolActivity(ToolActivity)
+    case interaction(AgentInteraction)
+    case interactionResolved(UUID)
+    case interactionUnavailable(String)
     case approval(AgentApproval)
     case approvalResolved(String)
     case finished
@@ -32,14 +37,20 @@ public enum AgentEvent {
 @MainActor public protocol AgentHarness: AnyObject {
     var onEvent: ((AgentEvent) -> Void)? { get set }
     func send(prompt: String, sessionID: String?, directory: String, settings: AgentSettings, images: [ImageAttachment]) async throws
+    func respond(to id: UUID, with response: AgentInteractionResponse) throws
     func interrupt() async
     func shutdown()
+}
+@MainActor public extension AgentHarness {
+    func respond(to id: UUID, with response: AgentInteractionResponse) throws {
+        throw ProcessFailure.exited("Interactive requests are unavailable in this adapter.")
+    }
 }
 @MainActor public enum HarnessRegistry {
     public static var descriptors: [HarnessDescriptor] {
         [.init(id: .codex, executable: CodexExecutable.resolve(), supportsApprovals: true,
-               detail: "App-server · streaming, resume, command and file approvals",
-               permissionOptions: CodexHarness.permissionOptions, defaultPermissionMode: .ask, supportsUsageLimits: true),
+               detail: "App-server · tool activity, bounded forms and app-access decisions; experimental questions require CLI 0.158+. Inventory and URL/device verification are unavailable.",
+               permissionOptions: CodexHarness.permissionOptions, defaultPermissionMode: .ask, supportsUsageLimits: true, capabilities: .codex),
          .init(id: .claude, executable: Executables.find("claude"), supportsApprovals: false,
                detail: "CLI print mode · streaming and resume; interactive approvals are unavailable")]
     }

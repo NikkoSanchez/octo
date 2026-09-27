@@ -6,6 +6,74 @@ import OctoAgents
 @testable import OctoApp
 
 @MainActor final class WorkspaceTests: XCTestCase {
+    func testProjectSelectionAndThreadCyclingPreserveDraftsAndPersistSelection() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        let store = AppStore(storage: storage)
+        defer { store.shutdown() }
+        let first = WorkspaceThread(title: "First", workingDirectory: directory.path)
+        var pinned = WorkspaceThread(title: "Pinned", workingDirectory: directory.path)
+        pinned.isPinned = true
+        var project = WorkspaceProject(name: "Destination", rootPath: directory.path, threads: [first, pinned])
+        project.isCollapsed = true
+        let empty = WorkspaceProject(name: "Empty", rootPath: directory.path)
+        store.archive = WorkspaceArchive(projects: [empty, project], selectedProjectID: empty.id)
+        store.drafts[first.id] = "Unsent draft"
+        store.running.insert(first.id)
+        store.showingTerminal = true
+        let focus = store.composerFocus
+        store.selectProject(project)
+        XCTAssertEqual(store.thread?.id, pinned.id)
+        XCTAssertFalse(store.project!.isCollapsed)
+        XCTAssertFalse(store.showingTerminal)
+        XCTAssertGreaterThan(store.composerFocus, focus)
+        store.cycleThread(1)
+        XCTAssertEqual(store.thread?.id, first.id)
+        store.selectProject(project)
+        XCTAssertEqual(store.thread?.id, first.id, "Selecting the current project keeps its current thread")
+        store.cycleThread(1)
+        XCTAssertEqual(store.thread?.id, pinned.id, "Cycling wraps within the selected project")
+        store.cycleThread(-1)
+        XCTAssertEqual(store.thread?.id, first.id)
+        XCTAssertEqual(store.drafts[first.id], "Unsent draft")
+        XCTAssertTrue(store.running.contains(first.id))
+        store.saveNow()
+        let saved = try storage.load()
+        XCTAssertEqual(saved.selectedProjectID, project.id)
+        XCTAssertEqual(saved.selectedThreadID, first.id)
+        XCTAssertFalse(saved.projects[1].isCollapsed)
+        store.selectProject(empty)
+        store.cycleThread(1)
+        XCTAssertNil(store.thread)
+        XCTAssertEqual(store.project?.id, empty.id)
+        XCTAssertEqual(store.project?.threads.count, 0, "Navigation must not create a thread")
+        store.selectProject(WorkspaceProject(name: "Removed", rootPath: directory.path))
+        XCTAssertEqual(store.project?.id, empty.id, "A stale picker action cannot select a removed project")
+    }
+
+    func testDraftTypingOnlyPublishesWorkspaceWhenSendEligibilityChanges() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppStore(storage: WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json")))
+        defer { store.shutdown() }
+        let id = UUID(), other = UUID()
+        var workspaceUpdates = 0, editorUpdates = 0
+        let workspaceToken = store.objectWillChange.sink { workspaceUpdates += 1 }
+        let editorToken = store.draftStore.objectWillChange.sink { editorUpdates += 1 }
+        store.drafts[id] = "H"
+        store.drafts[id] = "Hello"
+        store.drafts[id] = "Hello\nLonger draft 👋"
+        XCTAssertEqual(workspaceUpdates, 1)
+        XCTAssertEqual(editorUpdates, 3)
+        XCTAssertEqual(store.drafts[id], "Hello\nLonger draft 👋")
+        store.drafts[other] = "Other thread"
+        store.drafts[id] = " "
+        XCTAssertEqual(workspaceUpdates, 3)
+        XCTAssertEqual(store.drafts[other], "Other thread")
+        withExtendedLifetime([workspaceToken, editorToken]) {}
+    }
+
     func testNewThreadReusesDraftAndRemembersProviderChoicesAcrossProjectsAndRelaunch() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -317,5 +385,69 @@ import OctoAgents
         XCTAssertEqual(model.snapshot?.path, "b.txt")
         XCTAssertEqual(blankPreviews, 0)
         XCTAssertFalse(model.loadingSnapshot)
+    }
+}
+
+@MainActor final class TranscriptBehaviorTests: XCTestCase {
+    func testTurnCompletionFailureStopAndPersistenceWithoutProviderCalls() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json"))
+        let store = AppStore(storage: storage)
+        defer { store.shutdown() }
+        var first = WorkspaceThread(workingDirectory: directory.path)
+        first.messages = [ChatMessage(role: .user, text: "One")]
+        var second = WorkspaceThread(workingDirectory: directory.path)
+        second.messages = [ChatMessage(role: .user, text: "Two")]
+        let project = WorkspaceProject(name: "Fixture", rootPath: directory.path, threads: [first, second])
+        store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: second.id)
+        store.beginWork(first.id)
+        store.beginWork(second.id)
+        store.handle(.textDelta("Response"), threadID: first.id)
+        store.handle(.finished, threadID: first.id)
+        let done = store.archive.projects[0].threads[0].messages
+        XCTAssertEqual(done[0].work?.outcome, .completed)
+        XCTAssertNotNil(done[0].work?.elapsed)
+        XCTAssertNotNil(done[1].completedAt)
+        XCTAssertNil(store.thread?.messages[0].work?.outcome, "Another running thread must be untouched")
+        store.stop(second.id)
+        store.handle(.finished, threadID: second.id)
+        XCTAssertEqual(store.thread?.messages[0].work?.outcome, .stopped)
+        store.handle(.finished, threadID: first.id)
+        XCTAssertEqual(store.archive.projects[0].threads[0].messages, done, "Duplicate completion cannot change timing")
+        store.archive.projects[0].threads[0].messages.append(ChatMessage(role: .user, text: "Again"))
+        store.beginWork(first.id)
+        store.handle(.failed("Fixture error"), threadID: first.id)
+        XCTAssertEqual(store.archive.projects[0].threads[0].messages[2].work?.outcome, .failed)
+        store.archive.projects[0].threads[1].messages.append(ChatMessage(role: .user, text: "Interrupted by quit"))
+        store.beginWork(second.id)
+        store.shutdown()
+        XCTAssertEqual(store.archive.projects[0].threads[1].messages.last?.work?.outcome, .interrupted)
+        store.saveNow()
+        let saved = try storage.load()
+        XCTAssertEqual(saved.projects[0].threads, store.archive.projects[0].threads)
+    }
+
+    func testFileLinkRevealsNestedFileAndRetainsLineWithoutAttaching() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Sources/Nested"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let git = try XCTUnwrap(Executables.find("git"))
+        _ = try await ProcessRunner.run(git, arguments: ["init", "-b", "main"], directory: root)
+        let path = "Sources/Nested/file with spaces.swift"
+        try "first\nsecond\nthird\n".write(to: root.appendingPathComponent(path), atomically: true, encoding: .utf8)
+        let model = ReviewModel(), projectID = UUID()
+        await model.refresh(projectID: projectID, root: root.path)
+        let link = try XCTUnwrap(MarkdownFileLink(url: XCTUnwrap(URL(string: "Sources/Nested/file%20with%20spaces.swift#L2")), checkout: root.path))
+        await model.reveal(link, projectID: projectID, root: root.path)
+        XCTAssertTrue(model.browsingFiles)
+        XCTAssertEqual(model.selectedPath, path)
+        XCTAssertEqual(model.snapshot?.path, path)
+        XCTAssertEqual(model.revealLine, 2)
+        XCTAssertEqual(model.expandedFolders, ["Sources", "Sources/Nested"])
+        XCTAssertNil(model.selection)
+        await model.selectPath("missing.swift", projectID: projectID, root: root.path)
+        XCTAssertNotNil(model.error)
+        XCTAssertNil(model.revealLine)
     }
 }

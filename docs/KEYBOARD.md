@@ -10,6 +10,7 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | --- | --- |
 | Toggle left sidebar | ⌘B |
 | Search chats across projects (titles and message text) | ⌘K |
+| Switch project (search names and paths) | ⇧⌘K |
 | Find in current thread | ⌘F |
 | Next / previous matching message | ⌘G / ⇧⌘G |
 | New thread / reopen unstarted draft in current project | ⌘N |
@@ -34,6 +35,8 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 Numbers are destinations; ⌘J is a round trip between chat and terminal. File search opens and focuses the native preview. Use native selection (e.g. Shift-arrow, ⌘A), then ⇧⌘A to attach code. Attaching never sends. Thread search highlights and navigates matching messages rather than individual word occurrences. Return advances; Escape closes the find bar when its field is focused.
 
 App shortcuts take precedence over any Ghostty bindings for those same combinations. Send, stop, next/previous thread-search result, and code attachment shortcuts are inactive in the terminal. ⌘W remains normal window closing outside the terminal. Native copy/paste/undo, terminal Control-C/Control-D/Control-R, Option navigation, and Neovim leader keys remain untouched. Modals and Settings use their native key handling. Full traversal of native buttons uses macOS Keyboard navigation (Tab/Shift-Tab); the palette provides direct access to workspace actions without that preference.
+
+Use ⇧⌘K to switch projects from any workspace pane, including the terminal or a hidden sidebar. Type a project name or path, use ↑/↓, then Return; Escape cancels without changing projects. Results follow the sidebar's pinned-first order and label the current project. Opening a project expands its sidebar group, opens its first thread in sidebar order, and focuses the composer; selecting the current project keeps its current thread. Then use ⌥⌘[ / ⌥⌘] to cycle threads, ⌘J for its terminal, or ⌘N to start a thread in an empty project. Terminal sessions remain mounted.
 
 ## Themes
 

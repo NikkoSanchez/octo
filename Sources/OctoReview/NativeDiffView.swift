@@ -6,11 +6,14 @@ import OctoCore
 public struct NativeDiffView: NSViewRepresentable {
     public var theme: AppTheme
     public var focusRequest: Int
+    public var revealLine: Int?
+    public var revealRequest: Int
     public var snapshot: ReviewSnapshot
     public var onSelection: (CodeAttachment?) -> Void
     public var onAskAgent: (CodeAttachment) -> Void
-    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
+    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, revealLine: Int? = nil, revealRequest: Int = 0, onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
         self.theme = theme; self.focusRequest = focusRequest; self.snapshot = snapshot; self.onSelection = onSelection; self.onAskAgent = onAskAgent
+        self.revealLine = revealLine; self.revealRequest = revealRequest
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
     public func makeNSView(context: Context) -> NSScrollView {
@@ -43,6 +46,15 @@ public struct NativeDiffView: NSViewRepresentable {
             DispatchQueue.main.async { text.window?.makeFirstResponder(text) }
         }
         let changedSnapshot = coordinator.document?.snapshot.id != snapshot.id
+        defer {
+            if coordinator.revealRequest != revealRequest {
+                coordinator.revealRequest = revealRequest
+                if let line = revealLine, let segment = coordinator.document?.segments.first(where: { $0.line.newLine == line }) {
+                    text.setSelectedRange(segment.contentRange)
+                    text.scrollRangeToVisible(segment.contentRange)
+                }
+            }
+        }
         guard changedSnapshot || coordinator.theme != theme else { return }
         let selection = text.selectedRange()
         let document = ReviewDocument(snapshot: snapshot); coordinator.document = document; coordinator.theme = theme
@@ -90,6 +102,7 @@ public struct NativeDiffView: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var theme: AppTheme?
         var focusRequest = 0
+        var revealRequest = 0
         var parent: NativeDiffView
         var document: ReviewDocument?
         weak var textView: ReviewTextView?

@@ -4,6 +4,20 @@ import OctoCore
 @testable import OctoApp
 
 @MainActor final class KeyboardThemeTests: XCTestCase {
+    func testProjectPickerShortcutIsDistinctFromChatSearchAndWorksInTerminal() throws {
+        let projects = AppCommand(id: "projects", title: "Switch Project", group: "Navigate", key: "k", modifiers: [.command, .shift]) {}
+        let chats = AppCommand(id: "chats", title: "Search Chats", group: "Navigate", key: "k") {}
+        func event(_ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: "K", charactersIgnoringModifiers: "K", isARepeat: false, keyCode: 40))
+        }
+        XCTAssertTrue(projects.matches(try event([.command, .shift])))
+        XCTAssertFalse(chats.matches(try event([.command, .shift])))
+        for flags: NSEvent.ModifierFlags in [.command, .control, .option, [.command, .option, .shift]] {
+            XCTAssertFalse(projects.matches(try event(flags)))
+        }
+        XCTAssertTrue(projects.isAvailable(inTerminal: true))
+    }
+
     func testShortcutHintsWaitForHoldAndCancelOnReleaseOrShortcut() {
         var pending: [DispatchWorkItem] = []
         var delays: [TimeInterval] = []

@@ -96,6 +96,7 @@ struct JSONLineFramer {
         }
     }
     func notify(_ method: String) throws { try transport.write(["method": method, "params": [:]]) }
+    func sendResponse(id: Any, result: [String: Any]) throws { try transport.write(["id": id, "result": result]) }
     func respond(id: Any, result: [String: Any]) { try? transport.write(["id": id, "result": result]) }
     func reject(id: Any, method: String) { try? transport.write(["id": id, "error": ["code": -32601, "message": "Octo does not yet support \(method)"]]) }
     private func receive(_ object: [String: Any]) {

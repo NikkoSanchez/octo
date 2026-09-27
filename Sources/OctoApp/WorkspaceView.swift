@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     @StateObject private var review = ReviewModel()
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var palette: PaletteMode?
+    @State private var paletteAction: (() -> Void)?
     @State private var reviewFocus = 0
     @State private var showingShortcutHints = false
     @Environment(\.openSettings) private var openSettings
@@ -33,8 +34,11 @@ struct WorkspaceView: View {
         .environment(\.shortcutHints, showingShortcutHints ? Dictionary(uniqueKeysWithValues: commands.filter { $0.isAvailable(inTerminal: store.showingTerminal) && $0.key != nil }.map { ($0.id, $0.shortcut) }) : [:])
         .focusedSceneValue(\.workspaceCommands, WorkspaceCommandContext(commands: commands, terminalVisible: store.showingTerminal))
         .background(WorkspaceKeyRouter(commands: commands, terminalVisible: store.showingTerminal, hintsChanged: { showingShortcutHints = $0 }).frame(width: 0, height: 0))
-        .sheet(item: $palette, onDismiss: restoreFocus) { mode in
-            CommandPalette(mode: mode, entries: paletteEntries(mode), dismiss: { palette = nil })
+        .sheet(item: $palette, onDismiss: finishPalette) { mode in
+            CommandPalette(mode: mode, entries: paletteEntries(mode), dismiss: { palette = nil }, activateEntry: { entry in
+                paletteAction = entry.action
+                palette = nil
+            })
                 .modifier(ThemedContent(theme: store.theme))
         }
         .onChange(of: store.showingTerminal) { _, visible in
@@ -55,8 +59,18 @@ struct WorkspaceView: View {
         guard let project = store.project else { return }
         await review.refresh(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
     }
+    private func openMarkdownFile(_ url: URL) {
+        guard let project = store.project else { return }
+        let root = store.thread?.workingDirectory ?? project.rootPath
+        guard let link = MarkdownFileLink(url: url, checkout: root) else {
+            store.error = "This link does not point to a file inside this thread's checkout."
+            return
+        }
+        store.showingTerminal = false; store.showingReview = true
+        Task { await review.reveal(link, projectID: project.id, root: root) }
+    }
     private var sidebar: some View {
-        ProjectSidebar(store: store).navigationTitle("Octo")
+        ProjectSidebar(store: store, switchProject: { NativeWorkspaceFocus.clear(); palette = .projects }).navigationTitle("Octo")
     }
     private var titlebar: some View {
         HStack {
@@ -79,7 +93,7 @@ struct WorkspaceView: View {
     @ViewBuilder private var threadWorkspace: some View {
         if let project = store.project {
             ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.showingReview) {
-                ChatPane(store: store)
+                ChatPane(store: store, openFile: openMarkdownFile)
             } trailing: {
                 reviewPane(project)
             }
@@ -94,19 +108,18 @@ struct WorkspaceView: View {
         VStack(spacing: 0) {
             HStack {
                 HStack(spacing: 3) {
-                    Button { review.browsingFiles = false } label: {
+                    Button { revealReview(files: false) } label: {
                         Text("Changes (\(review.files.count))").frame(maxWidth: .infinity, minHeight: 28)
                     }.buttonStyle(HoverButtonStyle(padded: false, selected: !review.browsingFiles))
                         .shortcutHint("changes")
                         .accessibilityAddTraits(!review.browsingFiles ? .isSelected : [])
-                    Button { review.browsingFiles = true } label: {
+                    Button { revealReview(files: true) } label: {
                         Text("Files").frame(maxWidth: .infinity, minHeight: 28)
                     }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles))
                         .shortcutHint("browseFiles")
                         .accessibilityAddTraits(review.browsingFiles ? .isSelected : [])
                 }.padding(3).background(theme.surface, in: RoundedRectangle(cornerRadius: 8))
                     .frame(maxWidth: 240)
-                .onChange(of: review.browsingFiles) { _, _ in Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
                 Spacer()
                 ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
@@ -115,21 +128,16 @@ struct WorkspaceView: View {
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
                 ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3) {
                     ZStack {
-                        List {
-                            OutlineGroup(review.tree, children: \.children) { node in
-                                if node.children != nil {
-                                    Label(node.name, systemImage: "folder").font(.system(size: 13)).lineLimit(1)
-                                        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).hoverFeedback()
+                        ScrollViewReader { proxy in
+                            List {
+                                FileTreeRows(nodes: review.tree, review: review) { path in
+                                    Task { await review.selectPath(path, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
                                 }
-                                else {
-                                    Button { Task { await review.selectPath(node.id, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } } label: {
-                                        Label(node.name, systemImage: "doc.text").font(.system(size: 13)).lineLimit(1).padding(.horizontal, 8).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
-                                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.selectedPath == node.id)).help(node.id)
-                                        .listRowBackground(Color.clear)
+                            }.listStyle(.sidebar).scrollContentBackground(.hidden)
+                                .onChange(of: review.revealRequest) { _, _ in
+                                    if let path = review.selectedPath { proxy.scrollTo(path, anchor: .center) }
                                 }
-                            }
-                        }.listStyle(.sidebar).scrollContentBackground(.hidden)
-                            .opacity(review.browsingFiles ? 1 : 0).allowsHitTesting(review.browsingFiles).accessibilityHidden(!review.browsingFiles)
+                        }.opacity(review.browsingFiles ? 1 : 0).allowsHitTesting(review.browsingFiles).accessibilityHidden(!review.browsingFiles)
                     List(review.files, selection: Binding(get: { review.selectedPath }, set: { path in
                         if let file = review.files.first(where: { $0.path == path }) { Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
                     })) { file in
@@ -154,7 +162,7 @@ struct WorkspaceView: View {
                             Divider()
                             if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
                             else {
-                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, onSelection: { if !review.loadingSnapshot { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { store.attach($0) } })
+                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, onSelection: { if !review.loadingSnapshot { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { store.attach($0) } })
                             }
                             Divider()
                             HStack {
@@ -206,6 +214,7 @@ private struct TerminalPane: View {
 
 private struct ProjectSidebar: View {
     @ObservedObject var store: AppStore
+    let switchProject: () -> Void
     @Environment(\.octoTheme) private var theme
     @State private var renaming: SidebarTarget?
     @State private var removing: SidebarTarget?
@@ -217,6 +226,9 @@ private struct ProjectSidebar: View {
                 HStack {
                     Text("Projects").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.secondary)
                     Spacer()
+                    Button(action: switchProject) { Image(systemName: "magnifyingglass").frame(width: 26, height: 28) }
+                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects").help("Switch Project (⇧⌘K)")
+                        .accessibilityLabel("Switch Project")
                     Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
                         .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
                         .accessibilityLabel("Add Project")
@@ -244,17 +256,22 @@ private struct ProjectSidebar: View {
                                 .accessibilityLabel("New thread in \(project.name)")
                         }.contextMenu { projectMenu(project) }
                         if !project.isCollapsed {
-                            ForEach(project.orderedThreads) { thread in
-                                SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
-                                                 selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
-                                                 select: { store.selectThread(thread, project: project) },
-                                                 togglePin: { store.toggleThreadPin(thread.id) })
-                                    .contextMenu { threadMenu(thread, project: project) }
-                            }
-                            Button { store.openTerminal(project) } label: {
-                                Label("Terminal", systemImage: "terminal").font(.system(size: 14))
-                                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && store.showingTerminal))
+                            VStack(spacing: 3) {
+                                ForEach(project.orderedThreads) { thread in
+                                    SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
+                                                     selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
+                                                     select: { store.selectThread(thread, project: project) },
+                                                     togglePin: { store.toggleThreadPin(thread.id) })
+                                        .contextMenu { threadMenu(thread, project: project) }
+                                }
+                                if !project.threads.isEmpty {
+                                    Divider().padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
+                                }
+                                Button { store.openTerminal(project) } label: {
+                                    Label("Terminal", systemImage: "terminal").font(.system(size: 14))
+                                        .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
+                                }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && store.showingTerminal))
+                            }.padding(.leading, 24)
                         }
                     }
                 }
@@ -349,10 +366,12 @@ private struct SidebarThreadRow: View {
         HStack(spacing: 0) {
             Button(action: select) {
                 HStack(spacing: 9) {
-                    if running { WorkingIndicator().frame(width: 16) }
-                    else { Image(systemName: "bubble.left").foregroundStyle(theme.secondary).frame(width: 16) }
                     Text(thread.title).lineLimit(1)
                     Spacer(minLength: 0)
+                    // Reserve the trailing status slot so starting/stopping work never shifts the title.
+                    ZStack {
+                        if running { WorkingIndicator().accessibilityHidden(true) }
+                    }.frame(width: 16, height: 16)
                 }.font(.system(size: 14)).padding(.leading, 10).padding(.trailing, 6)
                     .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(HoverButtonStyle(padded: false)).help(thread.title)
@@ -501,18 +520,23 @@ private struct ResizableColumns<Leading: View, Trailing: View>: View {
 }
 
 extension WorkspaceView {
+    private func finishPalette() {
+        let action = paletteAction
+        paletteAction = nil
+        // Let the native sheet finish restoring its responder before navigating.
+        DispatchQueue.main.async {
+            if let action { action() } else { restoreFocus() }
+        }
+    }
     private func restoreFocus() {
         if store.showingTerminal, let project = store.project { store.terminal.focusSelected(projectID: project.id) }
         else { store.composerFocus += 1 }
     }
     private func revealReview(files: Bool) {
         store.showingTerminal = false; store.showingReview = true; review.browsingFiles = files
-    }
-    private func cycleThread(_ offset: Int) {
-        guard let project = store.project, !project.orderedThreads.isEmpty else { return }
-        let threads = project.orderedThreads
-        let index = threads.firstIndex { $0.id == store.thread?.id } ?? 0
-        store.selectThread(threads[(index + offset + threads.count) % threads.count], project: project)
+        if let project = store.project {
+            Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
+        }
     }
     private func editSidebar(_ kind: SidebarEdit.Kind, thread: Bool) {
         guard let project = store.project else { return }
@@ -527,10 +551,11 @@ extension WorkspaceView {
             .init(id: "newThread", title: "New Thread", group: "Create", key: "n", enabled: hasProject) { store.newThread() },
             .init(id: "addProject", title: "Add Project…", group: "Create", key: "o", modifiers: [.command, .shift]) { store.chooseProject() },
             .init(id: "chats", title: "Search Chats…", group: "Navigate", key: "k") { NativeWorkspaceFocus.clear(); palette = .chats },
+            .init(id: "projects", title: "Switch Project…", group: "Navigate", key: "k", modifiers: [.command, .shift]) { NativeWorkspaceFocus.clear(); palette = .projects },
             .init(id: "commands", title: "Command Palette…", group: "Navigate", key: "p", modifiers: [.command, .shift]) { NativeWorkspaceFocus.clear(); palette = .commands },
             .init(id: "files", title: "Find File…", group: "Navigate", key: "p", enabled: hasProject) { NativeWorkspaceFocus.clear(); palette = .files },
-            .init(id: "previousThread", title: "Previous Thread", group: "Navigate", key: "[", modifiers: [.command, .option], enabled: hasThread) { cycleThread(-1) },
-            .init(id: "nextThread", title: "Next Thread", group: "Navigate", key: "]", modifiers: [.command, .option], enabled: hasThread) { cycleThread(1) },
+            .init(id: "previousThread", title: "Previous Thread", group: "Navigate", key: "[", modifiers: [.command, .option], enabled: hasThread) { store.cycleThread(-1) },
+            .init(id: "nextThread", title: "Next Thread", group: "Navigate", key: "]", modifiers: [.command, .option], enabled: hasThread) { store.cycleThread(1) },
             .init(id: "sidebar", title: "Toggle Left Sidebar", group: "Panels", key: "b") { columns = columns == .detailOnly ? .all : .detailOnly },
             .init(id: "review", title: "Toggle Review Panel", group: "Panels", key: "r", modifiers: [.command, .option], enabled: hasProject) { store.showingTerminal = false; store.showingReview.toggle() },
             .init(id: "composer", title: "Focus Thread / Composer", group: "Panels", key: "1", enabled: hasThread) { store.focusComposer() },
@@ -617,6 +642,11 @@ extension WorkspaceView {
     }
     private func paletteEntries(_ mode: PaletteMode) -> [PaletteEntry] {
         switch mode {
+        case .projects:
+            return store.archive.orderedProjects.map { project in
+                PaletteEntry(id: project.id.uuidString, title: project.name, detail: project.rootPath,
+                             shortcut: project.id == store.project?.id ? "Current" : "") { store.selectProject(project) }
+            }
         case .commands: return commands.map { item in
             PaletteEntry(id: item.id, title: item.title, detail: item.group, shortcut: item.shortcut, enabled: item.enabled, action: item.action)
         }
@@ -636,6 +666,32 @@ extension WorkspaceView {
                         reviewFocus += 1
                     }
                 }
+            }
+        }
+    }
+}
+
+private struct FileTreeRows: View {
+    let nodes: [FileNode]
+    @ObservedObject var review: ReviewModel
+    let select: (String) -> Void
+    var body: some View {
+        ForEach(nodes) { node in
+            if let children = node.children {
+                DisclosureGroup(isExpanded: Binding(get: { review.expandedFolders.contains(node.id) }, set: {
+                    if $0 { review.expandedFolders.insert(node.id) } else { review.expandedFolders.remove(node.id) }
+                })) {
+                    FileTreeRows(nodes: children, review: review, select: select)
+                } label: {
+                    Label(node.name, systemImage: "folder").font(.system(size: 13)).lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                }
+            } else {
+                Button { select(node.id) } label: {
+                    Label(node.name, systemImage: "doc.text").font(.system(size: 13)).lineLimit(1)
+                        .padding(.horizontal, 8).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
+                }.buttonStyle(HoverButtonStyle(padded: false, selected: review.selectedPath == node.id))
+                    .help(node.id).id(node.id).listRowBackground(Color.clear)
             }
         }
     }

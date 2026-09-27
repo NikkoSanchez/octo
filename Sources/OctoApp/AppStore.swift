@@ -18,6 +18,7 @@ import OctoTerminal
             if descriptor.id == .codex { descriptor.executable = codexExecutable }
             if descriptor.id == .codex && !CodexHarness.supportsAutoReview(version: codexVersion) {
                 descriptor.permissionOptions.removeAll { $0.mode == .autoReview }
+                descriptor.capabilities.toolQuestions = false
             }
             return descriptor
         }
@@ -50,16 +51,30 @@ import OctoTerminal
     @Published var usageErrors: [String: String] = [:]
     @Published var loadingUsage = Set<String>()
     @Published var error: String?
-    @Published var drafts: [UUID: String] = [:]
+    let draftStore = DraftStore()
+    var drafts: [UUID: String] {
+        get { draftStore.values }
+        set {
+            // App-wide controls depend on send eligibility, not each character.
+            let oldReady = Set(draftStore.values.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.keys)
+            let newReady = Set(newValue.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.keys)
+            if oldReady != newReady { objectWillChange.send() }
+            draftStore.values = newValue
+        }
+    }
     @Published var draftImages: [UUID: [ImageAttachment]] = [:]
     @Published var attachments: [UUID: [CodeAttachment]] = [:]
     @Published var running = Set<UUID>()
     @Published var approvals: [UUID: [AgentApproval]] = [:]
+    @Published var interactions: [UUID: [AgentInteraction]] = [:]
     let terminal = TerminalWorkspace()
     let git = GitService()
     private let storage: WorkspaceStore
     private var canSave = true
     private var harnesses: [UUID: any AgentHarness] = [:]
+    private var turnClocks: [UUID: TimeInterval] = [:]
+    private var runIDs: [UUID: UUID] = [:]
+    private var stopping = Set<UUID>()
     private var saveTask: Task<Void, Never>?
     var project: WorkspaceProject? { archive.projects.first { $0.id == archive.selectedProjectID } }
     var thread: WorkspaceThread? { project?.threads.first { $0.id == archive.selectedThreadID } }
@@ -69,6 +84,18 @@ import OctoTerminal
         terminal.applyTheme(theme)
         codexExecutablePath = preferences.string(forKey: Self.codexPathKey)
         do { archive = try storage.load() } catch { self.error = "Could not load workspace: \(error.localizedDescription)\nThe existing file will not be overwritten."; canSave = false }
+        // Persisted activity is historical: a previous process cannot still own a live call.
+        for p in archive.projects.indices {
+            for t in archive.projects[p].threads.indices {
+                for m in archive.projects[p].threads[t].messages.indices {
+                    if var activity = archive.projects[p].threads[t].messages[m].toolActivity, activity.state == .running {
+                        activity.state = .interrupted
+                        archive.projects[p].threads[t].messages[m].toolActivity = activity
+                        archive.projects[p].threads[t].messages[m].text = activity.text
+                    }
+                }
+            }
+        }
         if archive.rememberedAgentSettings == nil, let thread {
             archive.lastHarness = thread.harness
             archive.rememberedAgentSettings = [thread.harness.rawValue: thread.agentSettings]
@@ -101,7 +128,21 @@ import OctoTerminal
         } catch { self.error = "Could not add project: \(error.localizedDescription)" }
     }
     func selectProject(_ project: WorkspaceProject) {
-        archive.selectedProjectID = project.id; archive.selectedThreadID = project.orderedThreads.first?.id; showingTerminal = false; saveSoon()
+        guard let index = archive.projects.firstIndex(where: { $0.id == project.id }) else { return }
+        NativeWorkspaceFocus.clear()
+        let current = archive.projects[index]
+        // Re-selecting the current project should not jump away from its thread.
+        let selected = current.threads.first { $0.id == archive.selectedThreadID } ?? current.orderedThreads.first
+        archive.projects[index].isCollapsed = false
+        archive.selectedProjectID = current.id; archive.selectedThreadID = selected?.id
+        showingTerminal = false; composerFocus += 1; saveSoon()
+    }
+    func cycleThread(_ offset: Int) {
+        guard let project, !project.orderedThreads.isEmpty else { return }
+        let threads = project.orderedThreads
+        let index = threads.firstIndex { $0.id == thread?.id } ?? 0
+        let next = ((index + offset) % threads.count + threads.count) % threads.count
+        selectThread(threads[next], project: project)
     }
     func selectThread(_ thread: WorkspaceThread, project: WorkspaceProject) {
         NativeWorkspaceFocus.clear()
@@ -173,7 +214,7 @@ import OctoTerminal
     func deleteThread(_ id: UUID, projectID: UUID) {
         guard !running.contains(id) else { error = "Stop the running agent before deleting this thread."; return }
         harnesses.removeValue(forKey: id)?.shutdown()
-        drafts[id] = nil; draftImages[id] = nil; attachments[id] = nil; approvals[id] = nil
+        drafts[id] = nil; draftImages[id] = nil; attachments[id] = nil; approvals[id] = nil; interactions[id] = nil
         archive.removeThread(id, projectID: projectID); saveSoon()
     }
     func removeProject(_ id: UUID) {
@@ -352,18 +393,48 @@ import OctoTerminal
             if $0.messages.isEmpty && $0.title == "New thread" { $0.title = text.isEmpty ? "Screenshot discussion" : String(text.prefix(52)) }
             $0.messages.append(ChatMessage(role: .user, text: text, attachments: selections, images: images))
         }
-        drafts[id] = ""; attachments[id] = []; draftImages[id] = []; running.insert(id)
+        drafts[id] = ""; attachments[id] = []; draftImages[id] = []; beginWork(id)
         let harness: any AgentHarness
         if let existing = harnesses[id] { harness = existing } else {
             harness = HarnessRegistry.make(thread.harness, codexExecutable: codexExecutable); harnesses[id] = harness
             harness.onEvent = { [weak self] event in self?.handle(event, threadID: id) }
         }
+        let runID = runIDs[id]
         Task {
             do { try await harness.send(prompt: prompt, sessionID: thread.remoteSessionID, directory: thread.workingDirectory, settings: thread.agentSettings, images: images) }
-            catch { handle(.failed(error.localizedDescription), threadID: id) }
+            catch { if runIDs[id] == runID { handle(.failed(error.localizedDescription), threadID: id) } }
         }
     }
-    func stop(_ id: UUID) { Task { await harnesses[id]?.interrupt() } }
+    func beginWork(_ id: UUID) {
+        guard !running.contains(id) else { return }
+        runIDs[id] = UUID()
+        turnClocks[id] = ProcessInfo.processInfo.systemUptime
+        stopping.remove(id); running.insert(id)
+        mutate(id) { thread in
+            guard let index = thread.messages.lastIndex(where: { $0.role == .user }) else { return }
+            thread.messages[index].work = TurnWork()
+        }
+    }
+    private func finishWork(_ id: UUID, outcome: TurnWork.Outcome) {
+        guard let started = turnClocks.removeValue(forKey: id) else { return }
+        runIDs[id] = nil
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started), completed = Date()
+        let result = stopping.remove(id) != nil ? TurnWork.Outcome.stopped : outcome
+        mutate(id) { thread in
+            guard let index = thread.messages.lastIndex(where: { $0.role == .user }), thread.messages[index].work != nil else { return }
+            thread.messages[index].work?.elapsed = elapsed
+            thread.messages[index].work?.outcome = result
+            for i in thread.messages.indices where i > index && thread.messages[i].role == .assistant {
+                thread.messages[i].completedAt = completed
+            }
+        }
+    }
+    func stop(_ id: UUID) {
+        guard running.contains(id) else { return }
+        stopping.insert(id)
+        interactions[id] = []; approvals[id] = []
+        Task { await harnesses[id]?.interrupt() }
+    }
     func handle(_ event: AgentEvent, threadID: UUID) {
         guard archive.projects.contains(where: { $0.threads.contains(where: { $0.id == threadID }) }) else { return }
         switch event {
@@ -373,9 +444,23 @@ import OctoTerminal
             else { $0.messages.append(ChatMessage(role: .assistant, text: text)) }
         }
         case .message(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .assistant, text: text)) }
+        case .toolActivity(let activity): mutate(threadID) { thread in
+            if let index = thread.messages.firstIndex(where: { $0.toolActivity?.id == activity.id }) {
+                guard thread.messages[index].toolActivity?.state == .running else { return }
+                thread.messages[index].toolActivity = activity; thread.messages[index].text = activity.text
+            } else {
+                var message = ChatMessage(role: .activity, text: activity.text); message.toolActivity = activity
+                thread.messages.append(message)
+            }
+        }
+        case .interaction(let request):
+            guard running.contains(threadID), !stopping.contains(threadID) else { return }
+            if !(interactions[threadID] ?? []).contains(where: { $0.id == request.id }) { interactions[threadID, default: []].append(request) }
+        case .interactionResolved(let id): interactions[threadID]?.removeAll { $0.id == id }
+        case .interactionUnavailable(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .error, text: text)) }
         case .activity(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .activity, text: text)) }
         case .activityDelta(let text): mutate(threadID) {
-            if $0.messages.last?.role == .activity { $0.messages[$0.messages.count - 1].text += text }
+            if $0.messages.last?.role == .activity && $0.messages.last?.toolActivity == nil { $0.messages[$0.messages.count - 1].text += text }
             else { $0.messages.append(ChatMessage(role: .activity, text: text)) }
         }
         case .reasoningDelta(let text): mutate(threadID) {
@@ -393,15 +478,25 @@ import OctoTerminal
                 usageSnapshots[key] = merged
             }
         case .failed(let text):
-            running.remove(threadID); approvals[threadID] = []
+            finishWork(threadID, outcome: .failed)
+            running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []
             mutate(threadID) { $0.messages.append(ChatMessage(role: .error, text: text)) }
-        case .finished: running.remove(threadID); approvals[threadID] = []; saveSoon()
-        case .approval(let approval): approvals[threadID, default: []].append(approval)
+        case .finished: finishWork(threadID, outcome: .completed); running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []; saveSoon()
+        case .approval(let approval):
+            if !(approvals[threadID] ?? []).contains(where: { $0.id == approval.id }) { approvals[threadID, default: []].append(approval) }
         case .approvalResolved(let id): approvals[threadID]?.removeAll { $0.id == id }
         }
     }
     func answer(_ approval: AgentApproval, threadID: UUID, allow: Bool) {
+        guard running.contains(threadID), !stopping.contains(threadID), approvals[threadID]?.contains(where: { $0.id == approval.id }) == true else { return }
         approval.respond(allow); approvals[threadID]?.removeAll { $0.id == approval.id }
+    }
+    func respond(to request: AgentInteraction, threadID: UUID, response: AgentInteractionResponse) -> String? {
+        guard running.contains(threadID), !stopping.contains(threadID),
+              interactions[threadID]?.contains(where: { $0.id == request.id }) == true,
+              let harness = harnesses[threadID] else { return "This request is no longer active." }
+        do { try harness.respond(to: request.id, with: response); interactions[threadID]?.removeAll { $0.id == request.id }; return nil }
+        catch { return error.localizedDescription }
     }
     private func mutate(_ id: UUID, _ update: (inout WorkspaceThread) -> Void) {
         for p in archive.projects.indices {
@@ -410,7 +505,11 @@ import OctoTerminal
             }
         }
     }
-    func shutdown() { saveTask?.cancel(); saveNow(); harnesses.values.forEach { $0.shutdown() } }
+    func shutdown() {
+        for id in Array(turnClocks.keys) { finishWork(id, outcome: .interrupted) }
+        harnesses.values.forEach { $0.shutdown() }; saveTask?.cancel(); saveNow()
+        interactions.removeAll(); approvals.removeAll()
+    }
 }
 
 struct SidebarEdit: Identifiable {
@@ -419,4 +518,8 @@ struct SidebarEdit: Identifiable {
     let projectID: UUID
     var threadID: UUID?
     let kind: Kind
+}
+
+@MainActor final class DraftStore: ObservableObject {
+    @Published var values: [UUID: String] = [:]
 }

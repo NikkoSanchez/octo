@@ -5,13 +5,19 @@ import OctoAgents
 
 struct ChatPane: View {
     @ObservedObject var store: AppStore
+    var isVisible = true
     var openFile: (URL) -> Void = { _ in }
+    @Environment(\.scenePhase) private var phase
     @Environment(\.octoTheme) private var theme
     @StateObject private var transcriptScroll = TranscriptScrollController()
     @State private var matchIndex = 0
     @State private var expandedDetails = Set<UUID>()
     @State private var showingUsage = false
     @State private var fullAccessThread: UUID?
+    @State private var windowIsKey = false
+    private var readableThreadID: UUID? {
+        isVisible && phase == .active && windowIsKey && transcriptScroll.isFollowing && !store.findingThread ? store.thread?.id : nil
+    }
     var body: some View {
         VStack(spacing: 0) {
             if let thread = store.thread {
@@ -109,6 +115,13 @@ struct ChatPane: View {
             } else { ContentUnavailableView("Start a thread", systemImage: "bubble.left", description: Text("Choose New Thread to work with an agent.")) }
         }.frame(maxWidth: 840, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(ChatWindowActivity(isKey: $windowIsKey).frame(width: 0, height: 0))
+            .onChange(of: readableThreadID, initial: true) { _, id in
+                if let id { store.markThreadRead(id) }
+            }
+            .onChange(of: store.thread?.unreadCompletedAt) { _, _ in
+                if let id = readableThreadID { store.markThreadRead(id) }
+            }
             .alert("Enable full access?", isPresented: Binding(get: { fullAccessThread != nil }, set: { if !$0 { fullAccessThread = nil } })) {
                 Button("Cancel", role: .cancel) { fullAccessThread = nil }
                 Button("Enable full access", role: .destructive) {
@@ -157,6 +170,7 @@ struct ChatPane: View {
                                 ForEach(turn.details) { transcriptMessage($0, harness: harness) }
                             }.padding(.top, 10)
                         } label: { workLabel(turn, active: active) }
+                        .disclosureGroupStyle(WorkDisclosureStyle())
                     }
                     Divider().overlay(theme.border.opacity(0.25))
                 }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
@@ -184,45 +198,51 @@ struct ChatPane: View {
             .help(date.formatted(date: .complete, time: .standard))
     }
     private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            if message.role == .user { Spacer(minLength: 48) }
-            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if message.role == .error {
-                        Text("Agent notice").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.red)
-                    }
-                    if message.role == .assistant {
-                        MarkdownResponseView(source: message.text)
-                            .environment(\.openURL, OpenURLAction { url in
-                                if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return .systemAction }
-                                openFile(url)
-                                return .handled
-                            })
-                    } else {
-                        Text(verbatim: message.text)
-                            .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
-                            .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
-                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    imageStrip(message.images)
-                    ForEach(message.attachments) { attachment in
-                        Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
-                            .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-                .padding(message.role == .user ? 14 : 0)
-                .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
-                if message.role == .user || message.role == .assistant || message.role == .error {
-                    HStack(spacing: 10) {
-                        if message.role == .assistant {
-                            Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
-                                .buttonStyle(HoverButtonStyle()).help("Copy original response")
-                                .accessibilityLabel("Copy original response")
+        let latestResponse = message.role == .assistant && store.thread?.messages.last(where: { $0.role == .assistant })?.id == message.id
+        return ResponseTimestampHover(hoverOnly: latestResponse) { showTimestamp in
+            HStack(alignment: .top, spacing: 0) {
+                if message.role == .user { Spacer(minLength: 48) }
+                VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if message.role == .error {
+                            Text("Agent notice").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.red)
                         }
-                        timestamp(message)
-                    }.foregroundStyle(theme.secondary)
-                }
-            }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
+                        if message.role == .assistant {
+                            MarkdownResponseView(source: message.text)
+                                .environment(\.openURL, OpenURLAction { url in
+                                    if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return .systemAction }
+                                    openFile(url)
+                                    return .handled
+                                })
+                        } else {
+                            Text(verbatim: message.text)
+                                .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
+                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        imageStrip(message.images)
+                        ForEach(message.attachments) { attachment in
+                            Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
+                                .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                    .padding(message.role == .user ? 14 : 0)
+                    .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
+                    if message.role == .user || message.role == .assistant || message.role == .error {
+                        HStack(spacing: 10) {
+                            if message.role == .assistant {
+                                Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
+                                    .buttonStyle(HoverButtonStyle()).help("Copy original response")
+                                    .accessibilityLabel("Copy original response")
+                            }
+                            timestamp(message)
+                                // Reserve its space: hovering must never reflow the response.
+                                .opacity(showTimestamp ? 1 : 0)
+                                .accessibilityHidden(false)
+                        }.foregroundStyle(theme.secondary)
+                    }
+                }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
+            }
         }
     }
     private func permissionsMenu(_ thread: WorkspaceThread, compact: Bool = false) -> some View {
@@ -416,6 +436,64 @@ struct ChatPane: View {
             if thread.harness == .claude { Text("Claude uses its CLI model and reasoning settings. Interactive approvals are unavailable.").font(.system(size: 12)).foregroundStyle(theme.secondary) }
         }.padding(12).background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary)).padding(14)
+    }
+}
+
+private struct ResponseTimestampHover<Content: View>: View {
+    let hoverOnly: Bool
+    @ViewBuilder let content: (Bool) -> Content
+    @State private var hovering = false
+    var body: some View {
+        content(!hoverOnly || hovering).contentShape(Rectangle()).onHover { hovering = $0 }
+    }
+}
+
+/// The label, chevron and trailing whitespace all share one native button.
+private struct WorkDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { configuration.isExpanded.toggle() } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).frame(width: 12).accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(HoverButtonStyle(padded: false))
+                .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+                .accessibilityHint("Show or hide reasoning and activity")
+            if configuration.isExpanded { configuration.content }
+        }
+    }
+}
+
+/// The app can stay active while Settings or another window obscures this chat.
+private struct ChatWindowActivity: NSViewRepresentable {
+    @Binding var isKey: Bool
+    func makeNSView(context: Context) -> ObserverView { ObserverView() }
+    func updateNSView(_ view: ObserverView, context: Context) {
+        view.changed = { isKey = $0 }
+        view.publish()
+    }
+    final class ObserverView: NSView {
+        var changed: ((Bool) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            if let window {
+                for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+                    NotificationCenter.default.addObserver(self, selector: #selector(publish), name: name, object: window)
+                }
+            }
+            publish()
+        }
+        @objc func publish() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.changed?(self.window?.isKeyWindow == true && self.window?.attachedSheet == nil)
+            }
+        }
+        deinit { NotificationCenter.default.removeObserver(self) }
     }
 }
 

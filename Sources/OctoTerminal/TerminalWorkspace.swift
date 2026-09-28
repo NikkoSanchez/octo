@@ -7,18 +7,38 @@ import OctoCore
     public let id = UUID()
     public let projectID: UUID
     public let directory: String
-    public let editorSocket: String?
-    private var editorDirectory: PrivateTemporaryDirectory?
+    public var editorSocket: String? { editorSession?.socket }
+    private var editorSession: EditorSession?
+    private var editorMonitor: Task<Void, Never>?
     @Published public var label: String
     @Published public var exited = false
     public let state: TerminalViewState
-    init(projectID: UUID, directory: String, label: String, command: String? = nil, editorSocket: String? = nil, editorDirectory: PrivateTemporaryDirectory? = nil) {
-        self.projectID = projectID; self.directory = directory; self.label = label; self.editorSocket = editorSocket; self.editorDirectory = editorDirectory
+    init(projectID: UUID, directory: String, label: String, command: String? = nil, editorSession: EditorSession? = nil) {
+        self.projectID = projectID; self.directory = directory; self.label = label; self.editorSession = editorSession
         let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/ghostty/config").path
         state = TerminalViewState(configFilePath: FileManager.default.fileExists(atPath: config) ? config : nil)
         state.configuration = TerminalSurfaceOptions(backend: .exec, fontSize: 13, workingDirectory: directory,
             envVars: ["PATH": Executables.searchPath, "OCTO_PROJECT_ID": projectID.uuidString], command: command, waitAfterCommand: true)
-        state.onClose = { [weak self] _ in self?.exited = true; self?.editorDirectory = nil }
+        state.onClose = { [weak self] _ in
+            self?.exited = true; self?.editorSession = nil; self?.editorMonitor?.cancel()
+        }
+        if editorSession != nil {
+            editorMonitor = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                    guard let self, self.editorSession != nil else { return }
+                    self.refreshEditorSession()
+                }
+            }
+        }
+    }
+    deinit { editorMonitor?.cancel() }
+
+    func refreshEditorSession() {
+        guard editorSession?.hasExited == true else { return }
+        editorSession = nil
+        label = "Terminal"
+        editorMonitor?.cancel()
     }
 }
 
@@ -70,19 +90,23 @@ import OctoCore
         guard file.path.hasPrefix(root.path + "/"), FileManager.default.fileExists(atPath: file.path) else {
             throw ProcessFailure.exited("The selected file no longer exists in this checkout.")
         }
+        for tab in tabs { tab.refreshEditorSession() }
         if let tab = tabs.first(where: { $0.projectID == projectID && $0.directory == directory && $0.editorSocket != nil && !$0.exited }), let socket = tab.editorSocket {
             // RPC talks only to an editor Octo launched; it never types a command into a busy shell.
             let pathData = try JSONSerialization.data(withJSONObject: [file.path])
             let pathJSON = String(decoding: pathData, as: UTF8.self)
             let expression = "luaeval('(function() vim.cmd.edit(vim.fn.fnameescape(_A[1])); vim.api.nvim_win_set_cursor(0, {math.min(\(max(1,line)), vim.api.nvim_buf_line_count(0)), 0}); return 1 end)()', json_decode('\(pathJSON.replacingOccurrences(of: "'", with: "''"))'))"
             let result = try await ProcessRunner.run(nvim, arguments: ["--server", socket, "--remote-expr", expression], directory: root)
-            guard result.status == 0 else { throw ProcessFailure.exited("The editor tab is not ready or has exited. Close it and try again. " + String(decoding: result.error, as: UTF8.self)) }
-            tab.label = file.lastPathComponent; select(tab); return
+            guard tabs.contains(where: { $0.id == tab.id }) else { return }
+            tab.refreshEditorSession()
+            if tab.editorSocket != nil && !tab.exited {
+                guard result.status == 0 else { throw ProcessFailure.exited("The editor tab is not ready or could not open the file. " + String(decoding: result.error, as: UTF8.self)) }
+                tab.label = file.lastPathComponent; select(tab); return
+            }
         }
-        let socketDirectory = try PrivateTemporaryDirectory()
-        let socket = socketDirectory.url.appendingPathComponent("nvim.sock").path
-        let command = [nvim.path, "--listen", socket, "+\(max(1,line))", "--", file.path].map(Executables.shellQuote).joined(separator: " ")
-        let tab = TerminalTab(projectID: projectID, directory: directory, label: file.lastPathComponent, command: command, editorSocket: socket, editorDirectory: socketDirectory)
+        let session = try EditorSession()
+        let command = session.command(editor: nvim, file: file, line: line)
+        let tab = TerminalTab(projectID: projectID, directory: directory, label: file.lastPathComponent, command: command, editorSession: session)
         applyTheme(to: tab); tabs.append(tab); select(tab)
     }
 }

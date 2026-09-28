@@ -171,7 +171,7 @@ struct WorkspaceView: View {
     @ViewBuilder private var threadWorkspace: some View {
         if let project = store.project {
             ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.showingReview, singleColumnWhenNarrow: true) {
-                ChatPane(store: store, openFile: openMarkdownFile)
+                ChatPane(store: store, isVisible: !store.showingTerminal && !singleReview && !layout.overlayVisible && palette == nil && store.error == nil, openFile: openMarkdownFile)
             } trailing: {
                 reviewPane(project)
             }
@@ -271,7 +271,7 @@ private struct TerminalPane: View {
                         HStack(spacing: 6) {
                     ForEach(terminal.tabs.filter { $0.projectID == project.id }) { tab in
                         HStack(spacing: 6) {
-                            Button { terminal.select(tab) } label: { Text(tab.label).lineLimit(1).padding(.horizontal, 8).frame(minHeight: 30).contentShape(Rectangle()) }.buttonStyle(HoverButtonStyle(padded: false))
+                            Button { terminal.select(tab) } label: { TerminalTabTitle(tab: tab).lineLimit(1).padding(.horizontal, 8).frame(minHeight: 30).contentShape(Rectangle()) }.buttonStyle(HoverButtonStyle(padded: false))
                             Button { store.closingTerminal = tab.id } label: { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 24, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("closeTerminal", active: terminal.selectedTabs[project.id] == tab.id).help("Close tab")
                         }.font(.system(size: 13)).padding(8).background(terminal.selectedTabs[project.id] == tab.id ? theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                     }
@@ -291,6 +291,11 @@ private struct TerminalPane: View {
     }
 }
 
+private struct TerminalTabTitle: View {
+    @ObservedObject var tab: TerminalTab
+    var body: some View { Text(tab.label) }
+}
+
 private struct ProjectSidebar: View {
     @ObservedObject var store: AppStore
     let switchProject: () -> Void
@@ -301,80 +306,55 @@ private struct ProjectSidebar: View {
     @State private var name = ""
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Projects").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.secondary)
-                    Spacer()
-                    Button(action: switchProject) { Image(systemName: "magnifyingglass").frame(width: 26, height: 28) }
-                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects").help("Switch Project (⇧⌘K)")
-                        .accessibilityLabel("Switch Project")
-                    Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
-                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
-                        .accessibilityLabel("Add Project")
-                }.padding(.leading, 8)
-                ForEach(store.archive.orderedProjects) { project in
-                    VStack(spacing: 3) {
-                        HStack(spacing: 2) {
-                            Button { store.toggleProjectCollapse(project.id) } label: {
-                                HStack(spacing: 8) {
-                                    ProjectFolderIcon(isOpen: !project.isCollapsed)
-                                        .stroke(style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
-                                        .foregroundStyle(theme.secondary).frame(width: 20, height: 20)
-                                        .accessibilityHidden(true)
-                                    Text(project.name).lineLimit(1).truncationMode(.middle)
-                                    Spacer(minLength: 0)
-                                    if project.isPinned { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(theme.secondary) }
-                                }.font(.system(size: 15, weight: .semibold)).padding(.horizontal, 10)
-                                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && project.isCollapsed)).help(project.rootPath)
-                                .accessibilityLabel("\(project.isCollapsed ? "Expand" : "Collapse") \(project.name)")
-                                .accessibilityValue(project.isCollapsed ? "Collapsed" : "Expanded")
-                            Button { didNavigate(); store.newThread(projectID: project.id) } label: {
-                                Image(systemName: "plus").frame(width: 26, height: 34)
-                            }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newThread", active: store.project?.id == project.id).help("New thread in \(project.name)")
-                                .accessibilityLabel("New thread in \(project.name)")
-                        }.contextMenu { projectMenu(project) }
-                        if !project.isCollapsed {
-                            VStack(spacing: 3) {
-                                ForEach(project.orderedThreads) { thread in
-                                    SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
-                                                     selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
-                                                     select: { didNavigate(); store.selectThread(thread, project: project) },
-                                                     togglePin: { store.toggleThreadPin(thread.id) })
-                                        .contextMenu { threadMenu(thread, project: project) }
-                                }
-                                if !project.threads.isEmpty {
-                                    Divider().padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
-                                }
-                                Button { didNavigate(); store.openTerminal(project) } label: {
-                                    Label("Terminal", systemImage: "terminal").font(.system(size: 14))
-                                        .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-                                }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && store.showingTerminal))
-                            }.padding(.leading, 24)
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 2) {
+                        sectionHeader("Projects", collapsed: store.archive.projectsSectionCollapsed == true,
+                                      unread: unreadCount, toggle: store.toggleProjectsSection)
+                        Button(action: switchProject) { Image(systemName: "magnifyingglass").frame(width: 26, height: 28) }
+                            .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects").help("Switch Project (⇧⌘K)")
+                            .accessibilityLabel("Switch Project")
+                        Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
+                            .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
+                            .accessibilityLabel("Add Project")
+                    }
+                    if store.archive.projectsSectionCollapsed != true {
+                        projectRows
+                        if store.archive.projects.isEmpty {
+                            Text("Add a project to start a conversation.")
+                                .font(.system(size: 12)).foregroundStyle(theme.secondary).padding(8)
                         }
                     }
-                }
-            }.padding(10)
+                    Divider().padding(.horizontal, 8)
+                    VStack(alignment: .leading, spacing: 3) {
+                        sectionHeader("Recent", collapsed: store.archive.recentSectionCollapsed == true,
+                                      unread: store.archive.recentThreads.filter { $0.thread.hasUnreadCompletion }.count, toggle: store.toggleRecentSection)
+                        if store.archive.recentSectionCollapsed != true {
+                            if store.archive.recentThreads.isEmpty {
+                                Text("Your conversations will appear here.")
+                                    .font(.system(size: 12)).foregroundStyle(theme.secondary).padding(8)
+                            }
+                            ForEach(store.archive.recentThreads) { entry in
+                                SidebarThreadRow(thread: entry.thread, projectName: entry.project.name,
+                                                 running: store.running.contains(entry.id),
+                                                 selected: store.archive.selectedThreadID == entry.id && !store.showingTerminal,
+                                                 select: { didNavigate(); store.selectThread(entry.thread, project: entry.project) },
+                                                 togglePin: { store.toggleThreadPin(entry.id) })
+                                    .contextMenu { threadMenu(entry.thread, project: entry.project) }
+                            }
+                        }
+                    }
+                }.padding(10)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+            Divider()
+            SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer() } }
+                .buttonStyle(HoverButtonStyle()).shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
+                .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(14)
+                .frame(maxWidth: .infinity).background(theme.panel)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.panel)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer() } }
-                    .buttonStyle(HoverButtonStyle()).shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
-            }
-                .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(14)
-        }
-        .overlay {
-            if store.archive.projects.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "folder.badge.plus").font(.largeTitle)
-                    Text("Your projects live here").font(.system(size: 14))
-                    Button("Add Project…") { store.chooseProject() }
-                }.padding()
-            }
-        }
         .onChange(of: store.sidebarEdit?.id) { _, _ in
             guard let edit = store.sidebarEdit else { return }
             let target = SidebarTarget(projectID: edit.projectID, threadID: edit.threadID)
@@ -409,6 +389,79 @@ private struct ProjectSidebar: View {
             Text(removing?.threadID == nil ? "This removes the project and its saved conversations from Octo. Files on disk are kept. Stop agents and close this project's terminal tabs first." : "This permanently deletes the saved conversation and its draft from Octo. Files on disk and CLI history are kept.")
         }
     }
+    private var unreadCount: Int { store.archive.projects.reduce(0) { $0 + $1.threads.filter(\.hasUnreadCompletion).count } }
+
+    private func sectionHeader(_ title: String, collapsed: Bool, unread: Int, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack(spacing: 7) {
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold)).frame(width: 10).accessibilityHidden(true)
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 0)
+                if collapsed && unread > 0 {
+                    Text("\(unread)").font(.system(size: 11, weight: .semibold)).foregroundStyle(theme.accent)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(theme.accent.opacity(0.12), in: Capsule())
+                }
+            }.foregroundStyle(theme.secondary).padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, minHeight: 28).contentShape(Rectangle())
+        }.buttonStyle(HoverButtonStyle(padded: false))
+            .accessibilityLabel("\(collapsed ? "Expand" : "Collapse") \(title) section")
+            .accessibilityValue((collapsed ? "Collapsed" : "Expanded") + (unread > 0 ? ", \(unread) finished unread" : ""))
+    }
+
+    private var projectRows: some View {
+        ForEach(store.archive.orderedProjects) { project in
+            VStack(spacing: 3) {
+                HStack(spacing: 2) {
+                    Button { store.toggleProjectCollapse(project.id) } label: {
+                        HStack(spacing: 8) {
+                            ProjectFolderIcon(isOpen: !project.isCollapsed)
+                                .stroke(style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                                .foregroundStyle(theme.secondary).frame(width: 20, height: 20)
+                                .accessibilityHidden(true)
+                            Text(project.name).lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 0)
+                            let unread = project.threads.filter(\.hasUnreadCompletion).count
+                            if unread > 0 {
+                                Text("\(unread)").font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(theme.accent).padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(theme.accent.opacity(0.12), in: Capsule())
+                                    .help("\(unread) completed, unread \(unread == 1 ? "thread" : "threads")")
+                            }
+                            if project.isPinned { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(theme.secondary) }
+                        }.font(.system(size: 15, weight: .semibold)).padding(.horizontal, 10)
+                            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && project.isCollapsed)).help(project.rootPath)
+                        .accessibilityLabel("\(project.isCollapsed ? "Expand" : "Collapse") \(project.name)")
+                        .accessibilityValue(project.isCollapsed ? "Collapsed" : "Expanded")
+                    Button { didNavigate(); store.newThread(projectID: project.id) } label: {
+                        Image(systemName: "plus").frame(width: 26, height: 34)
+                    }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newThread", active: store.project?.id == project.id).help("New thread in \(project.name)")
+                        .accessibilityLabel("New thread in \(project.name)")
+                }.contextMenu { projectMenu(project) }
+                if !project.isCollapsed {
+                    VStack(spacing: 3) {
+                        ForEach(project.orderedThreads) { thread in
+                            SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
+                                             selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
+                                             select: { didNavigate(); store.selectThread(thread, project: project) },
+                                             togglePin: { store.toggleThreadPin(thread.id) })
+                                .contextMenu { threadMenu(thread, project: project) }
+                        }
+                        if !project.threads.isEmpty {
+                            Divider().padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
+                        }
+                        Button { didNavigate(); store.openTerminal(project) } label: {
+                            Label("Terminal", systemImage: "terminal").font(.system(size: 14))
+                                .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && store.showingTerminal))
+                    }.padding(.leading, 24)
+                }
+            }
+        }
+    }
+
     @ViewBuilder private func projectMenu(_ project: WorkspaceProject) -> some View {
         Button("New Thread") { store.newThread(projectID: project.id) }
         Button("Open Terminal") { store.openTerminal(project) }
@@ -434,6 +487,7 @@ private struct ProjectSidebar: View {
 
 private struct SidebarThreadRow: View {
     let thread: WorkspaceThread
+    var projectName: String? = nil
     let running: Bool
     let selected: Bool
     let select: () -> Void
@@ -446,16 +500,26 @@ private struct SidebarThreadRow: View {
         HStack(spacing: 0) {
             Button(action: select) {
                 HStack(spacing: 9) {
-                    Text(thread.title).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(thread.title).fontWeight(thread.hasUnreadCompletion ? .semibold : .regular).lineLimit(1)
+                        if let projectName {
+                            Text(projectName).font(.system(size: 11)).foregroundStyle(theme.secondary).lineLimit(1)
+                        }
+                    }.padding(.vertical, projectName == nil ? 0 : 5)
                     Spacer(minLength: 0)
-                    // Reserve the trailing status slot so starting/stopping work never shifts the title.
-                    ZStack {
-                        if running { WorkingIndicator().accessibilityHidden(true) }
-                    }.frame(width: 16, height: 16)
+                    if running { WorkingIndicator().frame(width: 16, height: 16).accessibilityHidden(true) }
+                    else if thread.hasUnreadCompletion {
+                        Label("New", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(theme.accent)
+                            .fixedSize().help("Finished — unread")
+                    } else {
+                        Color.clear.frame(width: 16, height: 16)
+                    }
                 }.font(.system(size: 14)).padding(.leading, 10).padding(.trailing, 6)
                     .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(HoverButtonStyle(padded: false)).help(thread.title)
-                .accessibilityLabel(thread.title).accessibilityValue(running ? "Working" : "Idle")
+            }.buttonStyle(HoverButtonStyle(padded: false)).help(thread.title + (thread.hasUnreadCompletion ? " — Finished, unread" : ""))
+                .accessibilityLabel(thread.title + (projectName.map { ", \($0)" } ?? ""))
+                .accessibilityValue(running ? "Working" : thread.hasUnreadCompletion ? "Finished, unread" : "Read")
             Button(action: togglePin) {
                 Image(systemName: thread.isPinned ? "pin.fill" : "pin")
                     .font(.system(size: 12)).foregroundStyle(thread.isPinned ? theme.accent : theme.secondary)

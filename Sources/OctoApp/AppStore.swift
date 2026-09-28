@@ -143,6 +143,7 @@ import OctoTerminal
         let selected = current.threads.first { $0.id == archive.selectedThreadID } ?? current.orderedThreads.first
         archive.projects[index].isCollapsed = false
         archive.selectedProjectID = current.id; archive.selectedThreadID = selected?.id
+        if let selected { mutate(selected.id) { $0.lastVisitedAt = Date() } }
         showingTerminal = false; composerFocus += 1; saveSoon()
     }
     func cycleThread(_ offset: Int) {
@@ -153,8 +154,16 @@ import OctoTerminal
         selectThread(threads[next], project: project)
     }
     func selectThread(_ thread: WorkspaceThread, project: WorkspaceProject) {
+        guard let owner = archive.projects.first(where: { $0.id == project.id }),
+              owner.threads.contains(where: { $0.id == thread.id }) else { return }
         NativeWorkspaceFocus.clear()
+        mutate(thread.id) { $0.lastVisitedAt = Date() }
         archive.selectedProjectID = project.id; archive.selectedThreadID = thread.id; showingTerminal = false; composerFocus += 1; saveSoon()
+    }
+    /// Called only when the active chat is visible and following its latest output.
+    func markThreadRead(_ id: UUID) {
+        guard thread?.id == id, !showingTerminal, thread?.hasUnreadCompletion == true else { return }
+        mutate(id) { $0.unreadCompletedAt = nil }
     }
     func openTerminal(_ project: WorkspaceProject) {
         archive.selectedProjectID = project.id
@@ -203,6 +212,12 @@ import OctoTerminal
     func toggleProjectPin(_ id: UUID) {
         guard let p = archive.projects.firstIndex(where: { $0.id == id }) else { return }
         archive.projects[p].isPinned.toggle(); saveSoon()
+    }
+    func toggleProjectsSection() {
+        archive.projectsSectionCollapsed = !(archive.projectsSectionCollapsed ?? false); saveSoon()
+    }
+    func toggleRecentSection() {
+        archive.recentSectionCollapsed = !(archive.recentSectionCollapsed ?? false); saveSoon()
     }
     func toggleProjectCollapse(_ id: UUID) {
         guard let p = archive.projects.firstIndex(where: { $0.id == id }) else { return }
@@ -419,6 +434,7 @@ import OctoTerminal
         turnClocks[id] = ProcessInfo.processInfo.systemUptime
         stopping.remove(id); running.insert(id)
         mutate(id) { thread in
+            thread.lastActivityAt = Date()
             guard let index = thread.messages.lastIndex(where: { $0.role == .user }) else { return }
             thread.messages[index].work = TurnWork()
         }
@@ -430,6 +446,8 @@ import OctoTerminal
         let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started), completed = Date()
         let result = stopping.remove(id) != nil ? TurnWork.Outcome.stopped : outcome
         mutate(id) { thread in
+            thread.lastActivityAt = completed
+            if result == .completed { thread.unreadCompletedAt = completed }
             guard let index = thread.messages.lastIndex(where: { $0.role == .user }), thread.messages[index].work != nil else { return }
             thread.messages[index].work?.elapsed = elapsed
             thread.messages[index].work?.outcome = result

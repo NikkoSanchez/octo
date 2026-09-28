@@ -24,6 +24,7 @@ let package = Package(
         .executableTarget(name: "OctoApp", dependencies: ["OctoCore", "OctoGit", "OctoAgents", "OctoReview", "OctoTerminal"]),
         .testTarget(name: "OctoAppTests", dependencies: ["OctoApp"]),
         .testTarget(name: "OctoReviewTests", dependencies: ["OctoReview"]),
+        .testTarget(name: "OctoTerminalTests", dependencies: ["OctoTerminal"]),
         .testTarget(name: "OctoCoreTests", dependencies: ["OctoCore"]),
         .testTarget(name: "OctoGitTests", dependencies: ["OctoGit"]),
         .testTarget(name: "OctoAgentsTests", dependencies: ["OctoAgents"])

@@ -22,6 +22,54 @@ final class InteractionTests: XCTestCase {
         XCTAssertEqual(try decoded.response(.cancel)["action"] as? String, "cancel")
         XCTAssertTrue(try decoded.response(.cancel)["content"] is NSNull)
     }
+    private var metadataForm: [String: Any] {
+        ["mode": "form", "message": "Allow Computer Use to use Safari?",
+         "_meta": ["codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use",
+                   "tool_name": "get_app_state", "tool_params": ["app": "com.apple.Safari"],
+                   "tool_params_display": [["name": "app", "value": "Safari"]], "persist": ["session", "always"]],
+         "requestedSchema": ["type": "object", "properties": [String: Any]()]]
+    }
+    func testComputerUseMetadataScopesReturnExactMetadataAndEmptyContent() throws {
+        let decoded = try CodexInteraction.decode(metadataForm, questions: false)
+        XCTAssertEqual(decoded.request.target, "Safari (com.apple.Safari)")
+        let field = try XCTUnwrap(decoded.request.fields.first)
+        XCTAssertEqual(field.options.map(\.id), ["once", "session", "always"])
+        XCTAssertThrowsError(try decoded.response(.submit([:])), "Consent must be explicit")
+        for scope in ["once", "session", "always"] {
+            let result = try decoded.response(.submit([field.id: .text(scope)]))
+            XCTAssertEqual(result["action"] as? String, "accept")
+            XCTAssertEqual((result["content"] as? [String: String])?.count, 0, "Synthetic UI field is never sent to the server")
+            XCTAssertEqual((result["_meta"] as? [String: String])?["persist"], scope == "once" ? nil : scope)
+        }
+        for response: AgentInteractionResponse in [.decline, .cancel] {
+            let result = try decoded.response(response)
+            XCTAssertTrue(result["content"] is NSNull)
+            XCTAssertNil(result["_meta"])
+        }
+    }
+    func testMetadataScopeRestrictionsAndSessionOnlyProvider() throws {
+        var form = metadataForm
+        var meta = try XCTUnwrap(form["_meta"] as? [String: Any])
+        meta["persist"] = ["session"]; form["_meta"] = meta
+        let decoded = try CodexInteraction.decode(form, questions: false)
+        let field = try XCTUnwrap(decoded.request.fields.first)
+        XCTAssertEqual(field.options.map(\.id), ["once", "session"])
+        XCTAssertThrowsError(try decoded.response(.submit([field.id: .text("always")])))
+        for (key, value): (String, Any) in [
+            ("persist", ["session", "unknown"]), ("persist", "session"), ("persist", ["session", "session"]),
+            ("connector_id", "another-tool"), ("codex_approval_kind", "unknown"),
+            ("tool_params", ["app": ""]), ("tool_name", "")
+        ] {
+            var invalid = meta; invalid[key] = value; form["_meta"] = invalid
+            XCTAssertTrue(try CodexInteraction.decode(form, questions: false).request.fields.isEmpty)
+        }
+        form = metadataForm
+        form["requestedSchema"] = ["type": "object", "properties": ["approval": ["type": "string", "enum": ["once"]]], "required": ["approval"]]
+        let constrained = try CodexInteraction.decode(form, questions: false)
+        XCTAssertEqual(constrained.request.fields.count, 1)
+        XCTAssertEqual(constrained.request.fields[0].options.map(\.id), ["once"])
+        XCTAssertNil(try constrained.response(.submit(["approval": .text("once")]))["_meta"])
+    }
     func testMetadataCannotBroadenSchemaAndDefaultsNeverConsent() throws {
         var p = form
         p["requestedSchema"] = ["type": "object", "properties": ["approval": ["type": "string", "enum": ["once"], "default": "once"]], "required": ["approval"]]
@@ -114,6 +162,39 @@ final class InteractionTests: XCTestCase {
             if scenario == "unsupported" { XCTAssertEqual(response?["action"] as? String, "decline") }
         }
     }
+    @MainActor func testMetadataScopesThroughAppServer() async throws {
+        let harness = CodexHarness(executable: fixture); defer { harness.shutdown() }
+        var previous: AgentInteraction?
+        for scope in ["once", "session", "always"] {
+            let done = expectation(description: scope)
+            var output = "", count = 0
+            harness.onEvent = { event in
+                switch event {
+                case .interaction(let request):
+                    count += 1
+                    XCTAssertNotNil(request.validationError([:]))
+                    if let previous { do { try harness.respond(to: previous.id, with: .cancel); XCTFail("Stale request accepted") } catch {} }
+                    do {
+                        let field = try XCTUnwrap(request.fields.first)
+                        try harness.respond(to: request.id, with: .submit([field.id: .text(scope)]))
+                    } catch { XCTFail(error.localizedDescription) }
+                    previous = request
+                case .textDelta(let delta): output += delta
+                case .finished: done.fulfill()
+                case .failed(let message): XCTFail(message); done.fulfill()
+                default: break
+                }
+            }
+            try await harness.send(prompt: "metadata-" + scope, sessionID: nil, directory: "/tmp")
+            await fulfillment(of: [done], timeout: 5)
+            XCTAssertEqual(count, 1)
+            let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+            XCTAssertEqual(result["action"] as? String, "accept")
+            XCTAssertEqual((result["content"] as? [String: String])?.count, 0)
+            XCTAssertEqual((result["_meta"] as? [String: String])?["persist"], scope == "once" ? nil : scope)
+        }
+    }
+
     @MainActor func testProviderResolutionInterruptDisconnectAndShutdownInvalidate() async throws {
         for scenario in ["resolved", "wait", "disconnect", "shutdown"] {
             let harness = CodexHarness(executable: fixture)

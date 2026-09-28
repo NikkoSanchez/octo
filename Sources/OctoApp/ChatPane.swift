@@ -7,6 +7,7 @@ struct ChatPane: View {
     @ObservedObject var store: AppStore
     var openFile: (URL) -> Void = { _ in }
     @Environment(\.octoTheme) private var theme
+    @StateObject private var transcriptScroll = TranscriptScrollController()
     @State private var matchIndex = 0
     @State private var expandedDetails = Set<UUID>()
     @State private var showingUsage = false
@@ -26,29 +27,59 @@ struct ChatPane: View {
                 findBar.frame(height: store.findingThread ? 50 : 0).clipped()
                     .opacity(store.findingThread ? 1 : 0).allowsHitTesting(store.findingThread).accessibilityHidden(!store.findingThread)
                 ScrollViewReader { proxy in
+                    let turns = ChatTurn.turns(thread.messages)
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 20) {
                             if thread.messages.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text("What are we building?").font(.title2.weight(.semibold))
                                     Text("Start a conversation about this project. Select code in the review pane to attach precise context.").foregroundStyle(theme.secondary)
                                 }.padding(.top, 30)
                             }
-                            ForEach(ChatTurn.turns(thread.messages)) { turn in
-                                turnView(turn, harness: thread.harness,
-                                         active: store.running.contains(thread.id) && turn.messages.last?.id == thread.messages.last?.id)
+                            if turns.count > 1 {
+                                LazyVStack(alignment: .leading, spacing: 20) {
+                                    ForEach(turns.dropLast()) { turn in
+                                        turnView(turn, harness: thread.harness, active: false)
+                                    }
+                                }
+                            }
+                            // Keep the latest turn and end target measured together. A lazy
+                            // estimate for a large streaming turn can strand jumps in blank space.
+                            ForEach(turns.suffix(1)) { turn in
+                                turnView(turn, harness: thread.harness, active: store.running.contains(thread.id))
                             }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
+                            .background(TranscriptScrollProbe(controller: transcriptScroll, threadID: thread.id,
+                                                              suspended: store.showingTerminal, searching: store.findingThread,
+                                                              scrollToEnd: { proxy.scrollTo("bottom", anchor: .bottom) }))
+                            .background(GeometryReader { geometry in
+                                Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
+                            })
                     }
-                    .onChange(of: thread.messages.last?.text) { _, _ in if !store.findingThread { proxy.scrollTo("bottom", anchor: .bottom) } }
+                    .onChange(of: thread.messages.last?.text) { _, _ in transcriptScroll.contentChanged() }
+                    .onPreferenceChange(TranscriptHeightKey.self) { _ in transcriptScroll.contentChanged() }
+                    .overlay(alignment: .bottom) {
+                        if !transcriptScroll.isFollowing && !store.findingThread {
+                            Button { transcriptScroll.resumeFollowing() } label: {
+                                Label("Scroll to end", systemImage: "arrow.down")
+                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(.regularMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain).help("Scroll to the latest message and follow new output")
+                            .padding(.bottom, 10)
+                        }
+                    }
+                    .onDisappear { transcriptScroll.disconnect() }
                     .onChange(of: store.threadQuery) { _, _ in matchIndex = 0; scrollToMatch(proxy) }
                     .onChange(of: store.findStep) { old, new in
                         guard !matchIDs.isEmpty else { return }
                         matchIndex = (matchIndex + (new > old ? 1 : -1) + matchIDs.count) % matchIDs.count
                         scrollToMatch(proxy)
                     }
-                    .onChange(of: thread.id) { _, _ in store.threadQuery = ""; matchIndex = 0; proxy.scrollTo("bottom", anchor: .bottom) }
+                    .onChange(of: thread.id) { _, _ in
+                        store.threadQuery = ""; matchIndex = 0
+                    }
                 }
                 ForEach(store.approvals[thread.id] ?? []) { approval in
                     VStack(alignment: .leading, spacing: 9) {
@@ -346,6 +377,16 @@ struct ChatPane: View {
                 }.font(.system(size: 15)).padding(7).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
             imageStrip(store.draftImages[thread.id] ?? [], threadID: thread.id)
+            if let compaction = thread.lastCompaction, compaction.state == .compacting {
+                TimelineView(.periodic(from: .now, by: 1)) { clock in
+                    HStack(spacing: 7) {
+                        WorkingIndicator(symbol: "arrow.triangle.2.circlepath")
+                        Text("Compacting context…")
+                        Spacer()
+                        Text(TurnWork.duration(clock.date.timeIntervalSince(compaction.startedAt))).monospacedDigit()
+                    }.font(.system(size: 12)).foregroundStyle(theme.secondary)
+                }
+            }
             DraftEditor(drafts: store.draftStore, threadID: thread.id, focusRequest: store.composerFocus, theme: store.theme,
                         onChange: { store.drafts[thread.id] = $0 },
                         onPasteImage: { store.pasteScreenshot(from: $0, threadID: thread.id) }, onSend: { store.send() })
@@ -357,6 +398,11 @@ struct ChatPane: View {
                     HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread, compact: true) }
                 }
                 Spacer(minLength: 0)
+                ContextUsageView(usage: thread.conversationUsage, compaction: thread.lastCompaction,
+                                 provider: thread.harness.title,
+                                 supportsUsage: store.harnessDescriptors.first { $0.id == thread.harness }?.supportsConversationUsage == true,
+                                 supportsCompaction: store.harnessDescriptors.first { $0.id == thread.harness }?.supportsCompactionStatus == true)
+                    .id(thread.id)
                 if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback().shortcutHint("stop") }
                 else { Button { store.send() } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback().disabled(!store.canSend(thread)).shortcutHint("send") }
             }

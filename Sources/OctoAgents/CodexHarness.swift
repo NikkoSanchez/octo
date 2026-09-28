@@ -7,6 +7,9 @@ import OctoCore
     private let rpc = RPCConnection()
     private var threadID: String?
     private var turnID: String?
+    // Retain the completed turn's identity for usage delivered just after turn/completed.
+    private var usageTurnID: String?
+    private var compactions: [String: ContextCompaction] = [:]
     private var busy = false
     private var initialized = false
     private var streamedItems = Set<String>()
@@ -43,6 +46,7 @@ import OctoCore
         guard !busy else { throw ProcessFailure.exited("This thread already has a running turn.") }
         guard let executable = executableOverride ?? CodexExecutable.resolve() else { throw ProcessFailure.missing("codex") }
         busy = true; acceptingRequests = true; turnID = nil; turnEpoch = UUID()
+        usageTurnID = nil; compactions.removeAll()
         let epoch = turnEpoch
         do {
         let mode = settings.permissionMode ?? .ask
@@ -91,7 +95,10 @@ import OctoCore
             if let model = settings.model { params["model"] = model }
             if let effort = settings.reasoningEffort { params["effort"] = effort }
             let result = try await rpc.request("turn/start", params)
-            if busy && turnEpoch == epoch { turnID = (result["turn"] as? [String: Any])?["id"] as? String }
+            if busy && turnEpoch == epoch {
+                turnID = (result["turn"] as? [String: Any])?["id"] as? String
+                usageTurnID = turnID
+            }
         } catch {
             if turnEpoch == epoch { busy = false; acceptingRequests = false; invalidateRequests(); endTools() }
             throw error
@@ -179,6 +186,12 @@ import OctoCore
         return models
     }
     private func notification(_ method: String, _ p: [String: Any]) {
+        if method == "thread/tokenUsage/updated" {
+            guard let threadID, let usageTurnID, p["threadId"] as? String == threadID,
+                  p["turnId"] as? String == usageTurnID,
+                  let usage = try? Self.decodeConversationUsage(p) else { return }
+            onEvent?(.conversationUsage(usage)); return
+        }
         if let id = p["threadId"] as? String, let threadID, id != threadID { return }
         if let id = p["turnId"] as? String, let turnID, id != turnID { return }
         if method == "turn/completed", let id = (p["turn"] as? [String: Any])?["id"] as? String, let turnID, id != turnID { return }
@@ -190,7 +203,7 @@ import OctoCore
             tool.detail = CodexToolDetails.text(p["message"] as? String ?? "")
             if tools[id] != tool { tools[id] = tool; onEvent?(.toolActivity(tool)) }
         case "turn/started":
-            if let id = (p["turn"] as? [String: Any])?["id"] as? String, turnID == nil || turnID == id { turnID = id }
+            if let id = (p["turn"] as? [String: Any])?["id"] as? String, turnID == nil || turnID == id { turnID = id; usageTurnID = id }
         case "item/agentMessage/delta":
             if let id = p["itemId"] as? String { streamedItems.insert(id) }
             if let delta = p["delta"] as? String {
@@ -205,6 +218,17 @@ import OctoCore
             if let usage = try? Self.decodeUsage(p) { onEvent?(.usage(usage)) }
         case "item/started", "item/completed":
             guard let item = p["item"] as? [String: Any], let type = item["type"] as? String else { return }
+            if type == "contextCompaction" {
+                guard acceptingRequests, let threadID, let turnID, p["threadId"] as? String == threadID,
+                      p["turnId"] as? String == turnID, let id = item["id"] as? String, !id.isEmpty else { return }
+                let state: ContextCompaction.State = method == "item/started" ? .compacting : .completed
+                if let previous = compactions[id], previous.state == state || previous.state != .compacting { return }
+                var compaction = compactions[id] ?? ContextCompaction(id: "\(connectionID):\(turnEpoch):\(id)", state: state)
+                compaction.state = state
+                if state == .completed { compaction.endedAt = Date() }
+                compactions[id] = compaction; onEvent?(.compaction(compaction))
+                return
+            }
             if type == "mcpToolCall" {
                 guard p["threadId"] as? String == threadID, p["turnId"] as? String == turnID,
                       let id = item["id"] as? String, let server = item["server"] as? String, let name = item["tool"] as? String else { return }
@@ -323,5 +347,5 @@ import OctoCore
         }
         _ = try? await rpc.request("turn/interrupt", ["threadId": threadID, "turnId": turnID])
     }
-    public func shutdown() { acceptingRequests = false; invalidateRequests(cancel: true); endTools(); busy = false; rpc.close() }
+    public func shutdown() { acceptingRequests = false; usageTurnID = nil; invalidateRequests(cancel: true); endTools(); busy = false; rpc.close() }
 }

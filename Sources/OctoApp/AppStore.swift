@@ -76,6 +76,9 @@ import OctoTerminal
     private var runIDs: [UUID: UUID] = [:]
     private var stopping = Set<UUID>()
     private var saveTask: Task<Void, Never>?
+    private var streamTask: Task<Void, Never>?
+    private var pendingText: [UUID: [(role: ChatMessage.Role, text: String)]] = [:]
+    private var pendingTextBytes = 0
     var project: WorkspaceProject? { archive.projects.first { $0.id == archive.selectedProjectID } }
     var thread: WorkspaceThread? { project?.threads.first { $0.id == archive.selectedThreadID } }
     init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard) {
@@ -87,6 +90,10 @@ import OctoTerminal
         // Persisted activity is historical: a previous process cannot still own a live call.
         for p in archive.projects.indices {
             for t in archive.projects[p].threads.indices {
+                if archive.projects[p].threads[t].lastCompaction?.state == .compacting {
+                    archive.projects[p].threads[t].lastCompaction?.state = .interrupted
+                    archive.projects[p].threads[t].lastCompaction?.endedAt = Date()
+                }
                 for m in archive.projects[p].threads[t].messages.indices {
                     if var activity = archive.projects[p].threads[t].messages[m].toolActivity, activity.state == .running {
                         activity.state = .interrupted
@@ -110,6 +117,7 @@ import OctoTerminal
         }
     }
     func saveNow() {
+        flushStreamText()
         guard canSave else { return }
         do { try storage.save(archive) } catch { self.error = "Could not save workspace: \(error.localizedDescription)" }
     }
@@ -397,12 +405,12 @@ import OctoTerminal
         let harness: any AgentHarness
         if let existing = harnesses[id] { harness = existing } else {
             harness = HarnessRegistry.make(thread.harness, codexExecutable: codexExecutable); harnesses[id] = harness
-            harness.onEvent = { [weak self] event in self?.handle(event, threadID: id) }
+            harness.onEvent = { [weak self] event in self?.receive(event, threadID: id) }
         }
         let runID = runIDs[id]
         Task {
             do { try await harness.send(prompt: prompt, sessionID: thread.remoteSessionID, directory: thread.workingDirectory, settings: thread.agentSettings, images: images) }
-            catch { if runIDs[id] == runID { handle(.failed(error.localizedDescription), threadID: id) } }
+            catch { if runIDs[id] == runID { receive(.failed(error.localizedDescription), threadID: id) } }
         }
     }
     func beginWork(_ id: UUID) {
@@ -416,6 +424,7 @@ import OctoTerminal
         }
     }
     private func finishWork(_ id: UUID, outcome: TurnWork.Outcome) {
+        endCompaction(id)
         guard let started = turnClocks.removeValue(forKey: id) else { return }
         runIDs[id] = nil
         let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started), completed = Date()
@@ -431,13 +440,84 @@ import OctoTerminal
     }
     func stop(_ id: UUID) {
         guard running.contains(id) else { return }
+        flushStreamText()
+        endCompaction(id)
         stopping.insert(id)
         interactions[id] = []; approvals[id] = []
         Task { await harnesses[id]?.interrupt() }
     }
+    private func endCompaction(_ id: UUID) {
+        guard archive.projects.flatMap(\.threads).first(where: { $0.id == id })?.lastCompaction?.state == .compacting else { return }
+        mutate(id) { $0.lastCompaction?.state = .interrupted; $0.lastCompaction?.endedAt = Date() }
+    }
+    /// Coalesce text from all active chats into one UI publication per 100 ms.
+    /// Protocol boundaries stay immediate and flush text first, preserving order.
+    func receive(_ event: AgentEvent, threadID: UUID) {
+        let role: ChatMessage.Role, text: String
+        switch event {
+        case .textDelta(let value): role = .assistant; text = value
+        case .activityDelta(let value): role = .activity; text = value
+        case .reasoningDelta(let value): role = .reasoning; text = value
+        default:
+            flushStreamText()
+            handle(event, threadID: threadID)
+            return
+        }
+        guard running.contains(threadID), !stopping.contains(threadID), !text.isEmpty else { return }
+        // Bound retained buffering even when a producer outpaces the UI timer.
+        if pendingTextBytes + text.utf8.count > 65_536 { flushStreamText() }
+        var chunks = pendingText[threadID] ?? []
+        if let last = chunks.indices.last, chunks[last].role == role { chunks[last].text += text }
+        else { chunks.append((role, text)) }
+        pendingText[threadID] = chunks
+        pendingTextBytes += text.utf8.count
+        if pendingTextBytes >= 65_536 { flushStreamText(); return }
+        guard streamTask == nil else { return }
+        streamTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            self?.flushStreamText()
+        }
+    }
+    func flushStreamText() {
+        streamTask?.cancel(); streamTask = nil
+        guard !pendingText.isEmpty else { return }
+        let pending = pendingText; pendingText.removeAll(); pendingTextBytes = 0
+        var next = archive
+        var changed = false
+        for p in next.projects.indices {
+            for t in next.projects[p].threads.indices {
+                guard let chunks = pending[next.projects[p].threads[t].id] else { continue }
+                for chunk in chunks {
+                    let last = next.projects[p].threads[t].messages.indices.last
+                    if let last, next.projects[p].threads[t].messages[last].role == chunk.role,
+                       next.projects[p].threads[t].messages[last].toolActivity == nil {
+                        next.projects[p].threads[t].messages[last].text += chunk.text
+                    } else {
+                        next.projects[p].threads[t].messages.append(ChatMessage(role: chunk.role, text: chunk.text))
+                    }
+                }
+                changed = true
+            }
+        }
+        if changed { archive = next; saveSoon() }
+    }
     func handle(_ event: AgentEvent, threadID: UUID) {
         guard archive.projects.contains(where: { $0.threads.contains(where: { $0.id == threadID }) }) else { return }
         switch event {
+        case .conversationUsage(let usage):
+            mutate(threadID) {
+                // Provider totals are authoritative replacements, including decreases after reset.
+                guard $0.conversationUsage?.latest != usage.latest || $0.conversationUsage?.session != usage.session ||
+                      $0.conversationUsage?.contextWindow != usage.contextWindow else { return }
+                $0.conversationUsage = usage
+            }
+        case .compaction(let compaction):
+            guard running.contains(threadID), !stopping.contains(threadID) else { return }
+            mutate(threadID) {
+                if let previous = $0.lastCompaction, previous.id == compaction.id,
+                   previous.state == compaction.state || previous.state != .compacting { return }
+                $0.lastCompaction = compaction
+            }
         case .session(let remoteID): mutate(threadID) { $0.remoteSessionID = remoteID }
         case .textDelta(let text): mutate(threadID) {
             if $0.messages.last?.role == .assistant { $0.messages[$0.messages.count - 1].text += text }
@@ -506,6 +586,7 @@ import OctoTerminal
         }
     }
     func shutdown() {
+        flushStreamText()
         for id in Array(turnClocks.keys) { finishWork(id, outcome: .interrupted) }
         harnesses.values.forEach { $0.shutdown() }; saveTask?.cancel(); saveNow()
         interactions.removeAll(); approvals.removeAll()

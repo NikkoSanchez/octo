@@ -8,6 +8,7 @@ struct CodexInteraction {
     let request: AgentInteraction
     let questions: Bool
     let persistence: [String: [String: String]]
+    let metadataScopeField: String?
 
     static func decode(_ p: [String: Any], questions: Bool) throws -> Self {
         func invalid(_ reason: String) -> ProcessFailure { .exited("Unsupported Codex interaction: \(reason)") }
@@ -15,6 +16,7 @@ struct CodexInteraction {
         var persistence: [String: [String: String]] = [:]
         let message: String
         var target: String?
+        var metadataScopeField: String?
         if questions {
             guard let items = p["questions"] as? [[String: Any]], !items.isEmpty, items.count <= 16 else { throw invalid("invalid questions") }
             message = "Answer the provider’s questions explicitly."
@@ -107,6 +109,35 @@ struct CodexInteraction {
                 fields.append(field)
             }
         }
+        // The bundled Computer Use policy advertises duration in metadata, with an
+        // empty form. This is a separate protocol extension, not a schema default.
+        // Keep it narrowly identified so generic forms cannot acquire broader consent.
+        if !questions, fields.isEmpty, p["mode"] as? String == "form",
+           let meta = p["_meta"] as? [String: Any],
+           meta["codex_approval_kind"] as? String == "mcp_tool_call",
+           meta["connector_id"] as? String == "computer-use",
+           let params = meta["tool_params"] as? [String: Any],
+           let app = params["app"] as? String, !app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let tool = meta["tool_name"] as? String, !tool.isEmpty,
+           let scopes = meta["persist"] as? [String], !scopes.isEmpty,
+           scopes.count <= 2, Set(scopes).count == scopes.count,
+           scopes.allSatisfy({ ["session", "always"].contains($0) }) {
+            let key = "octo.accessDuration"
+            metadataScopeField = key
+            target = app
+            if let display = meta["tool_params_display"] as? [[String: Any]],
+               let name = display.first(where: { $0["name"] as? String == "app" })?["value"] as? String,
+               !name.isEmpty { target = "\(name) (\(app))" }
+            var options = [InteractionOption(id: "once", label: "Allow once", detail: "Approve only this request.")]
+            if scopes.contains("session") {
+                options.append(InteractionOption(id: "session", label: "Allow for this chat session", detail: "Let Computer Use access this app for the current provider session."))
+            }
+            if scopes.contains("always") {
+                options.append(InteractionOption(id: "always", label: "Always allow this app", detail: "The provider remembers this permission beyond the current chat session."))
+            }
+            fields.append(InteractionField(id: key, label: "App access", detail: "Choose how long to allow access to this app.", kind: .choice, required: true, options: options))
+            persistence[key] = Dictionary(uniqueKeysWithValues: scopes.map { ($0, $0) })
+        }
         guard Set(fields.map(\.id)).count == fields.count else { throw invalid("repeated field ID") }
         for field in fields {
             guard !field.id.isEmpty, field.id.count <= 256, field.label.count <= 1024, field.detail.count <= 8192,
@@ -116,7 +147,7 @@ struct CodexInteraction {
         }
         guard message.count <= 16384, (target?.count ?? 0) <= 1024 else { throw invalid("request too large") }
         return Self(request: AgentInteraction(id: UUID(), title: questions ? "Input requested" : "Access / information requested", detail: message, target: target, fields: fields, canDecline: !questions,
-            cancellationDetail: questions ? "Cancel sends no answers; it does not approve a choice." : "Decline refuses this request. Cancel dismisses it without consent."), questions: questions, persistence: persistence)
+            cancellationDetail: questions ? "Cancel sends no answers; it does not approve a choice." : "Decline refuses this request. Cancel dismisses it without consent."), questions: questions, persistence: persistence, metadataScopeField: metadataScopeField)
     }
     func response(_ response: AgentInteractionResponse) throws -> [String: Any] {
         switch response {
@@ -136,6 +167,7 @@ struct CodexInteraction {
                 }
                 if let scope = persistence[key]?[lookup] { scopes.insert(scope) }
             }
+            if let metadataScopeField { content.removeValue(forKey: metadataScopeField) }
             guard scopes.count <= 1 else { throw ProcessFailure.exited("Conflicting access durations; choose a single duration.") }
             if questions { return ["answers": content] }
             var result: [String: Any] = ["action": "accept", "content": content]

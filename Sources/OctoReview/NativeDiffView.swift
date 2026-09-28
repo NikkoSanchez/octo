@@ -41,6 +41,8 @@ public struct NativeDiffView: NSViewRepresentable {
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator; coordinator.parent = self
         guard let text = coordinator.textView else { return }
+        coordinator.updatingView = true
+        defer { coordinator.updatingView = false; coordinator.scheduleSelection() }
         if coordinator.focusRequest != focusRequest {
             coordinator.focusRequest = focusRequest
             DispatchQueue.main.async { text.window?.makeFirstResponder(text) }
@@ -106,11 +108,28 @@ public struct NativeDiffView: NSViewRepresentable {
         var parent: NativeDiffView
         var document: ReviewDocument?
         weak var textView: ReviewTextView?
+        var updatingView = false
+        private var selectionGeneration = 0
+        private var selectionKey: String?
         init(_ parent: NativeDiffView) { self.parent = parent }
         public func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
-            parent.onSelection(document?.attachment(for: textView.selectedRange()))
+            if !updatingView { scheduleSelection() }
             textView.updateHover()
+        }
+        func scheduleSelection() {
+            guard let textView, let document else { return }
+            let range = textView.selectedRange(), snapshotID = document.snapshot.id
+            let key = "\(snapshotID):\(range.location):\(range.length)"
+            guard selectionKey != key else { return }
+            selectionKey = key; selectionGeneration += 1
+            let generation = selectionGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.selectionGeneration == generation,
+                      self.document?.snapshot.id == snapshotID,
+                      self.textView?.selectedRange() == range else { return }
+                self.parent.onSelection(self.document?.attachment(for: range))
+            }
         }
         func ask() {
             guard let textView, let attachment = document?.attachment(for: textView.selectedRange()) else { return }

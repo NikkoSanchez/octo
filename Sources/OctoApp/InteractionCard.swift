@@ -46,27 +46,33 @@ struct InteractionCard: View {
                 Text("Choose…").tag(""); Text("Yes / true").tag("true"); Text("No / false").tag("false")
             }.labelsHidden()
         case .choice:
-            Picker(field.label, selection: Binding(get: {
-                if other.contains(field.id) { return Choice.other }
-                if case .text(let value) = values[field.id] { return Choice.advertised(value) }; return Choice.unset
-            }, set: {
-                switch $0 {
-                case .other: other.insert(field.id); values[field.id] = nil; rawInputs[field.id] = ""
-                case .unset: other.remove(field.id); values[field.id] = nil
-                case .advertised(let value): other.remove(field.id); values[field.id] = .text(value)
-                }
-            })) {
-                Text("Choose…").tag(Choice.unset)
-                ForEach(field.options) { option in Text(option.label).tag(Choice.advertised(option.id)) }
-                if field.allowsOther { Text("Write an answer…").tag(Choice.other) }
-            }.labelsHidden()
+            if field.options.count <= 4 {
+                choicePicker(field).pickerStyle(.radioGroup)
+            } else {
+                choicePicker(field).pickerStyle(.menu)
+            }
             if other.contains(field.id) { textInput(field) }
             if case .text(let value) = values[field.id], let selected = field.options.first(where: { $0.id == value }) {
-                Text("Selected: \(selected.label) [\(selected.id)]").font(.caption).textSelection(.enabled)
                 if !selected.detail.isEmpty { Text(selected.detail).font(.caption) }
             }
         case .text, .number, .integer: textInput(field)
         }
+    }
+    private func choicePicker(_ field: InteractionField) -> some View {
+        Picker(field.label, selection: Binding(get: {
+            if other.contains(field.id) { return Choice.other }
+            if case .text(let value) = values[field.id] { return Choice.advertised(value) }; return Choice.unset
+        }, set: {
+            switch $0 {
+            case .other: other.insert(field.id); values[field.id] = nil; rawInputs[field.id] = ""
+            case .unset: other.remove(field.id); values[field.id] = nil
+            case .advertised(let value): other.remove(field.id); values[field.id] = .text(value)
+            }
+        })) {
+            Text("Choose…").tag(Choice.unset)
+            ForEach(field.options) { option in Text(option.label).tag(Choice.advertised(option.id)) }
+            if field.allowsOther { Text("Write an answer…").tag(Choice.other) }
+        }.labelsHidden()
     }
     private func textInput(_ field: InteractionField) -> some View {
         TextField(field.label, text: Binding(get: {

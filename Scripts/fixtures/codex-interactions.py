@@ -59,6 +59,9 @@ for line in sys.stdin:
         notify('item/mcpToolCall/progress', dict(context, itemId='tool-1', message='Waiting for app authorization'))
         notify('item/mcpToolCall/progress', dict(context, itemId='tool-1', message='Waiting for app authorization'))
         request = dict(context, serverName='computer-use-fixture', mode='form', message='Allow the fixture to use Safari? This is a simulated request.', _meta={'app_name': 'Safari', 'persist': ['session', 'always']}, requestedSchema={'type': 'object', 'properties': {'approval': {'type': 'string', 'oneOf': [{'const': 'once', 'title': 'Allow once'}, {'const': 'session', 'title': 'Allow for this session'}, {'const': 'always', 'title': 'Always allow Safari'}]}}, 'required': ['approval']})
+        if scenario.startswith('metadata-'):
+            request['_meta'] = {'codex_approval_kind': 'mcp_tool_call', 'connector_id': 'computer-use', 'tool_name': 'get_app_state', 'tool_params': {'app': 'com.apple.Safari'}, 'tool_params_display': [{'name': 'app', 'value': 'Safari'}], 'persist': ['session', 'always']}
+            request['requestedSchema'] = {'type': 'object', 'properties': {}}
         request_method = 'mcpServer/elicitation/request'
         if scenario == 'unsupported':
             request['requestedSchema']['properties']['approval']['pattern'] = '.*'

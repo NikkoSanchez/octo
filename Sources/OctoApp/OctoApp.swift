@@ -16,7 +16,7 @@ import OctoAgents
         WindowGroup("Octo") {
             WorkspaceView(store: store)
                 .modifier(ThemedContent(theme: store.theme))
-                .frame(minWidth: 1080, minHeight: 640)
+                .frame(minWidth: 480, minHeight: 600)
                 .onAppear { delegate.store = store }
                 .task {
                     if let index = CommandLine.arguments.firstIndex(of: "--project"), CommandLine.arguments.count > index + 1 {

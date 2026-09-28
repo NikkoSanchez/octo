@@ -9,6 +9,8 @@ public struct HarnessDescriptor: Identifiable {
     public var permissionOptions: [AgentPermissionOption] = []
     public var defaultPermissionMode: AgentPermissionMode? = nil
     public var supportsUsageLimits = false
+    public var supportsConversationUsage = false
+    public var supportsCompactionStatus = false
     public var capabilities = HarnessCapabilities()
 }
 public struct AgentApproval: Identifiable {
@@ -25,6 +27,8 @@ public enum AgentEvent {
     case activityDelta(String)
     case reasoningDelta(String)
     case usage(AgentUsage)
+    case conversationUsage(ConversationUsage)
+    case compaction(ContextCompaction)
     case toolActivity(ToolActivity)
     case interaction(AgentInteraction)
     case interactionResolved(UUID)
@@ -50,7 +54,8 @@ public enum AgentEvent {
     public static var descriptors: [HarnessDescriptor] {
         [.init(id: .codex, executable: CodexExecutable.resolve(), supportsApprovals: true,
                detail: "App-server · tool activity, bounded forms and app-access decisions; experimental questions require CLI 0.158+. Inventory and URL/device verification are unavailable.",
-               permissionOptions: CodexHarness.permissionOptions, defaultPermissionMode: .ask, supportsUsageLimits: true, capabilities: .codex),
+               permissionOptions: CodexHarness.permissionOptions, defaultPermissionMode: .ask, supportsUsageLimits: true,
+               supportsConversationUsage: true, supportsCompactionStatus: true, capabilities: .codex),
          .init(id: .claude, executable: Executables.find("claude"), supportsApprovals: false,
                detail: "CLI print mode · streaming and resume; interactive approvals are unavailable")]
     }

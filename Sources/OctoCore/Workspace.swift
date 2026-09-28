@@ -59,11 +59,13 @@ public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
     public var harness: HarnessID
     public var workingDirectory: String
     public var remoteSessionID: String?
+    public var conversationUsage: ConversationUsage?
+    public var lastCompaction: ContextCompaction?
     public var isPinned = false
 
     public var agentSettings = AgentSettings()
 
-    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned }
+    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned, conversationUsage, lastCompaction }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -72,6 +74,8 @@ public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
         harness = try values.decode(HarnessID.self, forKey: .harness)
         workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
         remoteSessionID = try values.decodeIfPresent(String.self, forKey: .remoteSessionID)
+        conversationUsage = try values.decodeIfPresent(ConversationUsage.self, forKey: .conversationUsage)
+        lastCompaction = try values.decodeIfPresent(ContextCompaction.self, forKey: .lastCompaction)
         messages = try values.decode([ChatMessage].self, forKey: .messages)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         isPinned = try values.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false

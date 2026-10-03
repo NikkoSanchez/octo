@@ -26,8 +26,9 @@ enum ReviewSyntax {
             case .deletion: spans = scan(segment.line.text, state: &old, python: python, json: json, theme: theme)
             case .addition: spans = scan(segment.line.text, state: &new, python: python, json: json, theme: theme)
             default:
-                _ = scan(segment.line.text, state: &old, python: python, json: json, theme: theme)
-                spans = scan(segment.line.text, state: &new, python: python, json: json, theme: theme)
+                let oldSpans = scan(segment.line.text, state: &old, python: python, json: json, theme: theme)
+                let newSpans = scan(segment.line.text, state: &new, python: python, json: json, theme: theme)
+                spans = document.side == .before ? oldSpans : newSpans
             }
             for (range, hex) in spans {
                 // System appearance also benefits from lexical isolation, using native colors.

@@ -17,6 +17,16 @@ public struct NativeDiffView: NSViewRepresentable {
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
     public func makeNSView(context: Context) -> NSScrollView {
+        let scroll = Self.makeScrollView()
+        let text = scroll.documentView as! ReviewTextView
+        text.delegate = context.coordinator
+        text.askAgent = { [weak coordinator = context.coordinator] in coordinator?.ask() }
+        text.attachRange = { [weak coordinator = context.coordinator] range in coordinator?.attach(range) }
+        context.coordinator.textView = text
+        updateNSView(scroll, context: context)
+        return scroll
+    }
+    static func makeScrollView() -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
         let text = ReviewTextView(usingTextLayoutManager: true)
@@ -28,14 +38,9 @@ public struct NativeDiffView: NSViewRepresentable {
         text.autoresizingMask = [.width]
         text.textContainer?.widthTracksTextView = false
         text.textContainer?.containerSize = NSSize(width: 100_000, height: CGFloat.greatestFiniteMagnitude)
-        text.delegate = context.coordinator
         text.setAccessibilityLabel("Code changes. Hover a line to attach it with the plus button, or select code and choose Ask Agent.")
-        text.askAgent = { [weak coordinator = context.coordinator] in coordinator?.ask() }
-        text.attachRange = { [weak coordinator = context.coordinator] range in coordinator?.attach(range) }
         scroll.documentView = text
         text.observeScrolling()
-        context.coordinator.textView = text
-        updateNSView(scroll, context: context)
         return scroll
     }
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
@@ -61,14 +66,21 @@ public struct NativeDiffView: NSViewRepresentable {
         let selection = text.selectedRange()
         let document = ReviewDocument(snapshot: snapshot); coordinator.document = document; coordinator.theme = theme
         text.reviewDocument = document
-        text.theme = theme
-        text.backgroundColor = Self.color(theme.palette?.base, fallback: .textBackgroundColor)
-        text.insertionPointColor = Self.color(theme.palette?.rosewater, fallback: .labelColor)
-        let selectionColor = theme.palette.map { Self.color($0.overlay2, fallback: .selectedTextBackgroundColor).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor
-        text.selectedTextAttributes = [.backgroundColor: selectionColor, .foregroundColor: Self.color(theme.palette?.text, fallback: .selectedTextColor)]
+        Self.applyTheme(theme, to: text)
         text.textStorage?.setAttributedString(Self.render(document, theme: theme))
         if changedSnapshot { text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollToBeginningOfDocument(nil) }
         else { text.setSelectedRange(selection) }
+    }
+    static func applyTheme(_ theme: AppTheme, to text: ReviewTextView) {
+        text.theme = theme
+        text.backgroundColor = color(theme.palette?.base, fallback: .textBackgroundColor)
+        text.insertionPointColor = color(theme.palette?.rosewater, fallback: .labelColor)
+        let selectionColor = theme.palette.map { color($0.overlay2, fallback: .selectedTextBackgroundColor).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor
+        text.selectedTextAttributes = [.backgroundColor: selectionColor, .foregroundColor: color(theme.palette?.text, fallback: .selectedTextColor)]
+    }
+    public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.textView?.delegate = nil
+        coordinator.textView = nil
     }
     static func color(_ hex: String?, fallback: NSColor) -> NSColor {
         guard let hex, let value = UInt32(hex, radix: 16) else { return fallback }
@@ -76,6 +88,10 @@ public struct NativeDiffView: NSViewRepresentable {
     }
     static func render(_ document: ReviewDocument, theme: AppTheme) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 3
+        if document.side != nil {
+            // Equal paragraph height keeps Unicode, empty rows and fallback fonts aligned.
+            paragraph.minimumLineHeight = 22; paragraph.maximumLineHeight = 22; paragraph.lineSpacing = 0
+        }
         let result = NSMutableAttributedString(string: document.text, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
             .foregroundColor: color(theme.palette?.text, fallback: .labelColor), .paragraphStyle: paragraph
@@ -143,6 +159,23 @@ public struct NativeDiffView: NSViewRepresentable {
     }
 }
 final class ReviewTextView: NSTextView {
+    // Split review fixes document geometry independently of AppKit's viewport
+    // resizing. Ordinary stacked review and the file editor leave this at zero.
+    var minimumReviewSize: NSSize = .zero
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(NSSize(width: max(newSize.width, minimumReviewSize.width),
+                                  height: max(newSize.height, minimumReviewSize.height)))
+    }
+    var fileUndoManager: UndoManager?
+    private var fileFocusPending = false
+    override var undoManager: UndoManager? { fileUndoManager ?? super.undoManager }
+    @objc func undo(_ sender: Any?) { undoManager?.undo() }
+    @objc func redo(_ sender: Any?) { undoManager?.redo() }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
+        if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        return super.validateUserInterfaceItem(item)
+    }
     var theme: AppTheme = .system {
         didSet {
             attachButton.contentTintColor = NativeDiffView.color(theme.palette?.base, fallback: .white)
@@ -151,8 +184,15 @@ final class ReviewTextView: NSTextView {
         }
     }
     var askAgent: (() -> Void)?
+    var onFocus: (() -> Void)?
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocus?() }
+        return accepted
+    }
     var attachRange: ((NSRange) -> Void)?
     var reviewDocument: ReviewDocument? { didSet { clearHover() } }
+    var sourceDocument: SourceDocument? { didSet { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true } }
     private var hoverTracking: NSTrackingArea?
     private var hoverPoint: NSPoint?
     private var hoveredRange: NSRange?
@@ -180,6 +220,16 @@ final class ReviewTextView: NSTextView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        if fileFocusPending { requestFileFocus() }
+    }
+    func requestFileFocus() {
+        fileFocusPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            self.fileFocusPending = false
+            guard window.attachedSheet == nil else { return }
+            window.makeFirstResponder(self)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -200,10 +250,10 @@ final class ReviewTextView: NSTextView {
         hoverPoint = convert(event.locationInWindow, from: nil)
         updateHover()
     }
-    @objc private func viewportChanged() { clearHover() }
+    @objc private func viewportChanged() { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true }
 
     func updateHover() {
-        guard let point = hoverPoint, let document = reviewDocument,
+        guard let point = hoverPoint,
               let layout = textLayoutManager, let content = layout.textContentManager else { clearHover(); return }
         guard visibleRect.contains(point) else { clearHover(); return }
         // Each unwrapped source line is one TextKit 2 paragraph. Resolve vertically so
@@ -213,7 +263,8 @@ final class ReviewTextView: NSTextView {
               let fragment = layout.textLayoutFragment(for: location) else { clearHover(); return }
         let frame = fragment.layoutFragmentFrame.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
         guard point.y >= frame.minY, point.y < frame.maxY else { clearHover(); return }
-        guard let range = document.attachmentRange(forLineAtUTF16Offset: offset, selection: selectedRange()) else { clearHover(); return }
+        guard let range = sourceDocument?.attachmentRange(forLineAtUTF16Offset: offset, selection: selectedRange())
+            ?? reviewDocument?.attachmentRange(forLineAtUTF16Offset: offset, selection: selectedRange()), range.length > 0 else { clearHover(); return }
         hoveredRange = range
         hoveredLineRect = NSRect(x: visibleRect.minX, y: frame.minY, width: visibleRect.width, height: frame.height)
         let size: CGFloat = min(20, frame.height)

@@ -35,6 +35,13 @@ import OctoAgents
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if store?.fileOperationInProgress == true || store?.fileEditors.isSaving == true { return .terminateCancel }
+        if store?.hasUnsavedFileEdits == true {
+            let alert = NSAlert(); alert.messageText = "Discard file changes and quit?"
+            alert.informativeText = "Your unsaved file edits will be lost."
+            alert.addButton(withTitle: "Discard and Quit"); alert.addButton(withTitle: "Keep Editing")
+            if alert.runModal() != .alertFirstButtonReturn { return .terminateCancel }
+        }
         if store?.running.isEmpty == false || store?.terminal.tabs.isEmpty == false {
             let alert = NSAlert(); alert.messageText = "Quit Octo?"; alert.informativeText = "Active agent connections and terminal processes will close. Saved chat history will remain."
             alert.addButton(withTitle: "Quit"); alert.addButton(withTitle: "Cancel")
@@ -99,7 +106,7 @@ struct SettingsView: View {
     static let shortcutGroups: [(String, [(String, String)])] = [
         ("Navigate & create", [("Search chats", "⌘K"), ("Switch project", "⇧⌘K"), ("Find in current thread", "⌘F"), ("Next / previous matching message", "⌘G / ⇧⌘G"), ("New thread / add project", "⌘N / ⇧⌘O"), ("Find file / command palette", "⌘P / ⇧⌘P"), ("Previous / next thread", "⌥⌘[ / ⌥⌘]")]),
         ("Workspace", [("Toggle left sidebar / review panel", "⌘B / ⌥⌘R"), ("Focus composer / show changes / show files", "⌘1 / ⌘2 / ⌘3"), ("Focus code preview", "⌘4"), ("Toggle terminal", "⌘J"), ("Settings", "⌘,")]),
-        ("Conversation & review", [("Send message / stop agent", "⌘Return / ⌘."), ("Attach selected code to draft", "⇧⌘A"), ("Open selected file in LazyVim", "⇧⌘E"), ("Refresh changes and files", "⇧⌘R")]),
+        ("Conversation & review", [("Send message / stop agent", "⌘Return / ⌘."), ("Attach selected code to draft", "⇧⌘A"), ("Open selected file in LazyVim", "⇧⌘E"), ("Refresh changes and files", "⇧⌘R"), ("Save file now (also autosaves)", "⌘S")]),
         ("Terminal", [("New tab / close tab with confirmation", "⌘T / ⌘W"), ("Previous / next terminal tab", "⇧⌘[ / ⇧⌘]")])
     ]
     private var agents: some View {

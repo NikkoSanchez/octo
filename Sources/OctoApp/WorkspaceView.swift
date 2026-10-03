@@ -7,7 +7,12 @@ import OctoTerminal
 
 struct WorkspaceView: View {
     @ObservedObject var store: AppStore
-    @StateObject private var review = ReviewModel()
+    @StateObject private var review: ReviewModel
+    @State private var editorWindowID = UUID()
+    init(store: AppStore) {
+        self.store = store
+        _review = StateObject(wrappedValue: ReviewModel(editors: store.fileEditors))
+    }
     @State private var sidebarOpen = true
     @State private var compactSidebarOpen = false
     @State private var sidebarWidth: CGFloat = 270
@@ -15,6 +20,7 @@ struct WorkspaceView: View {
     @State private var windowWidth: CGFloat = 1380
     @State private var palette: PaletteMode?
     @State private var paletteAction: (() -> Void)?
+    @State private var fileAction: FileAction?
     @State private var reviewFocus = 0
     @State private var showingShortcutHints = false
     @Environment(\.openSettings) private var openSettings
@@ -93,6 +99,13 @@ struct WorkspaceView: View {
                 palette = nil
             })
                 .modifier(ThemedContent(theme: store.theme))
+        }
+        .sheet(item: $fileAction, onDismiss: {
+            if review.browsingFiles { reviewFocus += 1 }
+        }) { action in
+            FileActionSheet(action: action, store: store) { path in
+                await review.fileDidChange(path, deleted: action.kind == .delete, projectID: action.projectID, root: action.root)
+            }.modifier(ThemedContent(theme: store.theme))
         }
         .onChange(of: store.showingTerminal) { _, visible in
             compactSidebarOpen = false
@@ -199,7 +212,17 @@ struct WorkspaceView: View {
                 }.padding(3).background(theme.surface, in: RoundedRectangle(cornerRadius: 8))
                     .frame(maxWidth: 240)
                 Spacer()
+                if !review.browsingFiles {
+                    Picker("Diff layout", selection: $review.diffLayout) {
+                        Text("Stacked").tag(DiffLayout.stacked)
+                        Text("Side by Side").tag(DiffLayout.sideBySide)
+                    }.labelsHidden().frame(width: 120).hoverFeedback().help("Diff layout")
+                }
                 ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
+                if review.browsingFiles {
+                    Button { requestFileAction(.create, path: "") } label: { Image(systemName: "doc.badge.plus") }
+                        .hoverFeedback().help("New file").accessibilityLabel("New file")
+                }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
             }.padding(12)
             Divider()
@@ -208,8 +231,12 @@ struct WorkspaceView: View {
                     ZStack {
                         ScrollViewReader { proxy in
                             List {
-                                FileTreeRows(nodes: review.tree, review: review) { path in
-                                    Task { await review.selectPath(path, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
+                                FileTreeRows(nodes: review.tree, review: review, action: requestFileAction) { path in
+                                    let root = store.thread?.workingDirectory ?? project.rootPath
+                                    Task {
+                                        await review.selectPath(path, projectID: project.id, root: root)
+                                        if review.browsingFiles && review.selectedPath == path && review.represents(projectID: project.id, root: root) { reviewFocus += 1 }
+                                    }
                                 }
                             }.listStyle(.sidebar).scrollContentBackground(.hidden)
                                 .onChange(of: review.revealRequest) { _, _ in
@@ -238,9 +265,21 @@ struct WorkspaceView: View {
                                 if !review.browsingFiles, let file = review.files.first(where: { $0.path == review.selectedPath }) { Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
                             }
                             Divider()
-                            if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
+                            if review.browsingFiles, let editor = review.editor {
+                                InlineFilePane(session: editor, windowID: editorWindowID, theme: store.theme, focusRequest: reviewFocus,
+                                    revealLine: review.revealLine, revealRequest: review.revealRequest,
+                                    onSelection: { selection in
+                                        if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { review.selection = selection }
+                                    }, onAskAgent: { if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { attachToDraft($0) } })
+                                    .id(editor.id)
+                            } else if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
+                            else if !review.browsingFiles && review.diffLayout == .sideBySide {
+                                SideBySideDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus,
+                                    onSelection: { if !review.loadingSnapshot && review.diffLayout == .sideBySide { review.selection = $0 } },
+                                    onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                            }
                             else {
-                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, onSelection: { if !review.loadingSnapshot { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, onSelection: { if !review.loadingSnapshot && (review.browsingFiles || review.diffLayout == .stacked) { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
                             }
                             Divider()
                             HStack {
@@ -682,6 +721,13 @@ private struct ResizableColumns<Leading: View, Trailing: View>: View {
 }
 
 extension WorkspaceView {
+    private func requestFileAction(_ kind: FileAction.Kind, path: String) {
+        guard let project = store.project else { return }
+        let root = store.thread?.workingDirectory ?? project.rootPath
+        guard path.isEmpty || review.represents(projectID: project.id, root: root) else { return }
+        NativeWorkspaceFocus.clear()
+        fileAction = FileAction(kind: kind, projectID: project.id, root: root, path: path)
+    }
     private func finishPalette() {
         let action = paletteAction
         paletteAction = nil
@@ -737,6 +783,13 @@ extension WorkspaceView {
             .init(id: "send", title: "Send Message", group: "Conversation", key: "\r", enabled: thread.map { idle && store.canSend($0) } ?? false, terminalAllowed: false) { store.send() },
             .init(id: "stop", title: "Stop Agent", group: "Conversation", key: ".", enabled: !idle && hasThread, terminalAllowed: false) { if let thread { store.stop(thread.id) } },
             .init(id: "refresh", title: "Refresh Changes and Files", group: "Review", key: "r", modifiers: [.command, .shift], enabled: hasProject) { Task { await refresh() } },
+            .init(id: "newFile", title: "New File…", group: "Review", enabled: hasProject) { requestFileAction(.create, path: "") },
+            .init(id: "saveFile", title: "Save File", group: "Review", key: "s", enabled: review.browsingFiles && review.editor != nil && store.showingReview && !review.loadingSnapshot, terminalAllowed: false) {
+                if let editor = review.editor { Task { await editor.save() } }
+            },
+            .init(id: "deleteFile", title: "Delete File…", group: "Review", enabled: review.browsingFiles && review.selectedPath != nil && !review.loadingSnapshot) {
+                if let path = review.selectedPath { requestFileAction(.delete, path: path) }
+            },
             .init(id: "focusReview", title: "Focus Code Preview", group: "Review", key: "4", enabled: review.snapshot != nil && !review.loadingSnapshot) {
                 compactSidebarOpen = false
                 store.showingTerminal = false; store.showingReview = true
@@ -840,6 +893,7 @@ extension WorkspaceView {
 private struct FileTreeRows: View {
     let nodes: [FileNode]
     @ObservedObject var review: ReviewModel
+    let action: (FileAction.Kind, String) -> Void
     let select: (String) -> Void
     var body: some View {
         ForEach(nodes) { node in
@@ -847,10 +901,12 @@ private struct FileTreeRows: View {
                 DisclosureGroup(isExpanded: Binding(get: { review.expandedFolders.contains(node.id) }, set: {
                     if $0 { review.expandedFolders.insert(node.id) } else { review.expandedFolders.remove(node.id) }
                 })) {
-                    FileTreeRows(nodes: children, review: review, select: select)
+                    FileTreeRows(nodes: children, review: review, action: action, select: select)
                 } label: {
                     Label(node.name, systemImage: "folder").font(.system(size: 13)).lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .contextMenu { Button("New File Here…") { action(.create, node.id + "/") } }
                 }
             } else {
                 Button { select(node.id) } label: {
@@ -858,6 +914,15 @@ private struct FileTreeRows: View {
                         .padding(.horizontal, 8).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
                 }.buttonStyle(HoverButtonStyle(padded: false, selected: review.selectedPath == node.id))
                     .help(node.id).id(node.id).listRowBackground(Color.clear)
+                    .contextMenu {
+                        Button("Open File") { select(node.id) }
+                        Button("New File Here…") {
+                            let folder = node.id.lastIndex(of: "/").map { String(node.id[...$0]) } ?? ""
+                            action(.create, folder)
+                        }
+                        Divider()
+                        Button("Delete File…", role: .destructive) { action(.delete, node.id) }
+                    }
             }
         }
     }

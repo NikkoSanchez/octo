@@ -3,6 +3,9 @@ import OctoCore
 import OctoGit
 
 @MainActor final class ReviewModel: ObservableObject {
+    let editors: FileEditorWorkspace
+    @Published private(set) var editor: FileEditorSession?
+    init(editors: FileEditorWorkspace? = nil) { self.editors = editors ?? FileEditorWorkspace() }
     @Published var browsingFiles = false
     @Published var tree: [FileNode] = []
     @Published var files: [ChangedFile] = []
@@ -10,6 +13,9 @@ import OctoGit
     @Published var selectedPath: String?
     @Published var selection: CodeAttachment?
     @Published var scope: DiffScope = .working
+    @Published var diffLayout: DiffLayout = .stacked {
+        didSet { if diffLayout != oldValue { selection = nil } }
+    }
     @Published var branch = ""
     @Published var error: String?
     @Published var loading = false
@@ -23,23 +29,43 @@ import OctoGit
     private var generation = UUID()
     private var snapshotGeneration = UUID()
     private var context: String?
-    func refresh(projectID: UUID, root: String) async {
+    func represents(projectID: UUID, root: String) -> Bool { context == projectID.uuidString + root }
+    func fileDidChange(_ path: String, deleted: Bool, projectID: UUID, root: String) async {
+        // File actions own their captured checkout; a superseded view must not receive their results.
+        let expected = projectID.uuidString + root
+        guard context == expected else { return }
+        if deleted {
+            editor = nil
+            if filePath == path { filePath = nil }
+            if changePath == path { changePath = nil }
+            if selectedPath == path { selectedPath = nil; snapshot = nil; selection = nil }
+        }
+        await refresh(projectID: projectID, root: root)
+        guard context == expected, !deleted else { return }
+        browsingFiles = true
+        let parts = path.split(separator: "/")
+        for count in 1..<max(1, parts.count) { expandedFolders.insert(parts.prefix(count).joined(separator: "/")) }
+        await selectPath(path, projectID: projectID, root: root)
+        if context == expected { revealRequest += 1 }
+    }
+    func refresh(projectID: UUID, root: String, refreshSelection: Bool = true) async {
         let token = UUID(); generation = token; loading = true
-        snapshotGeneration = UUID(); loadingSnapshot = false
+        if refreshSelection { snapshotGeneration = UUID(); loadingSnapshot = false }
         let nextContext = projectID.uuidString + root
         if context != nextContext {
-            context = nextContext; filePath = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
+            context = nextContext; editor = nil; filePath = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
             guard generation == token else { return }
             let paths = try await git.filePaths(root: root)
             guard generation == token else { return }
-            tree = FileNode.build(paths)
+            tree = FileNode.build(Array(Set(paths + editors.dirtyPaths(root: root))))
             files = result; self.branch = branch; error = nil
+            if !refreshSelection { loading = false; return }
             if browsingFiles {
-                if let selectedPath, paths.contains(selectedPath) { await selectPath(selectedPath, projectID: projectID, root: root) }
-                else { snapshot = nil; selection = nil; selectedPath = nil }
+                if let selectedPath, paths.contains(selectedPath) || editor?.isDirty == true { await selectPath(selectedPath, projectID: projectID, root: root) }
+                else { snapshot = nil; editor = nil; selection = nil; selectedPath = nil }
                 if generation == token { loading = false }; return
             }
             if !result.contains(where: { $0.path == selectedPath }) { selectedPath = result.first?.path }
@@ -61,12 +87,26 @@ import OctoGit
     }
     func selectPath(_ path: String, projectID: UUID, root: String) async {
         guard browsingFiles else { return }
-        let token = UUID(); snapshotGeneration = token; selectedPath = path; filePath = path; selection = nil; loadingSnapshot = true; revealLine = nil
+        if selectedPath != path || snapshot?.scope != .file || snapshot?.workingDirectory != root { selection = nil }
+        let token = UUID(); snapshotGeneration = token; selectedPath = path; filePath = path; loadingSnapshot = true; revealLine = nil
         defer { if snapshotGeneration == token { loadingSnapshot = false } }
         do {
             let value = try await git.fileSnapshot(path: path, projectID: projectID, root: root)
-            guard snapshotGeneration == token else { return }; snapshot = value; error = nil
-        } catch { if snapshotGeneration == token { self.error = error.localizedDescription; snapshot = nil } }
+            guard snapshotGeneration == token else { return }
+            let session = editors.session(for: value)
+            session.didSave = { [weak self] in
+                guard let self, self.represents(projectID: projectID, root: root) else { return }
+                await self.refresh(projectID: projectID, root: root, refreshSelection: !self.browsingFiles)
+            }
+            await session.load()
+            guard snapshotGeneration == token else { return }
+            snapshot = value; editor = session; error = nil
+        } catch {
+            guard snapshotGeneration == token else { return }
+            if let draft = editors.existing(root: root, path: path), draft.isDirty {
+                editor = draft; snapshot = draft.context; self.error = nil
+            } else { self.error = error.localizedDescription; snapshot = nil; editor = nil }
+        }
     }
     func reveal(_ link: MarkdownFileLink, projectID: UUID, root: String) async {
         // Remember the linked file so returning to Files restores this preview.

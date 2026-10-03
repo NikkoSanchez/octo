@@ -44,6 +44,9 @@ import OctoTerminal
         didSet { if oldValue != showingTerminal { NativeWorkspaceFocus.clear() } }
     }
     @Published var showingReview = false
+    let fileEditors = FileEditorWorkspace()
+    var hasUnsavedFileEdits: Bool { fileEditors.hasUnsavedChanges }
+    var fileOperationInProgress = false
     @Published var modelCatalogs: [String: [AgentModel]] = [:]
     @Published var modelErrors: [String: String] = [:]
     @Published var loadingModels = Set<String>()

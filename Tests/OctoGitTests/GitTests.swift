@@ -74,4 +74,34 @@ final class GitTests: XCTestCase {
         let snapshot = try await service.snapshot(file: .init(path: "folder", indexStatus: "?", worktreeStatus: "?"), projectID: id, root: root.path, scope: .working)
         XCTAssertNotNil(snapshot.notice); XCTAssertTrue(snapshot.lines.isEmpty)
     }
+    func testDeletedTrackedFileLeavesFilesTreeButRemainsInChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let git = try XCTUnwrap(Executables.find("git"))
+        for args in [["init", "--quiet"]] {
+            let result = try await ProcessRunner.run(git, arguments: args, directory: root)
+            XCTAssertEqual(result.status, 0)
+        }
+        let url = root.appendingPathComponent("tracked.txt")
+        try "tracked\n".write(to: url, atomically: true, encoding: .utf8)
+        let add = try await ProcessRunner.run(git, arguments: ["add", "--", "tracked.txt"], directory: root)
+        XCTAssertEqual(add.status, 0)
+        let service = GitService(), files = CheckoutFileService()
+        let document = try await files.inspect(path: "tracked.txt", root: root.path, forEditing: true)
+        try await files.save(document, text: "manual\n")
+        let beforeDelete = try await service.changes(root: root.path)
+        let staged = try await service.snapshot(file: XCTUnwrap(beforeDelete.first), projectID: UUID(), root: root.path, scope: .staged)
+        XCTAssertEqual(staged.lines.filter { $0.kind == .addition }.map(\.text), ["tracked"])
+        let deletion = try await files.inspect(path: "tracked.txt", root: root.path, forEditing: false)
+        try await files.delete(deletion)
+        let paths = try await service.filePaths(root: root.path)
+        XCTAssertTrue(paths.isEmpty)
+        let changes = try await service.changes(root: root.path)
+        XCTAssertEqual(changes.first?.path, "tracked.txt")
+        XCTAssertEqual(changes.first?.worktreeStatus, "D")
+        try await files.create(path: "tracked.txt", root: root.path)
+        let restored = try await service.filePaths(root: root.path)
+        XCTAssertEqual(restored, ["tracked.txt"])
+    }
 }

@@ -44,7 +44,11 @@ public actor GitService {
     public func filePaths(root: String) async throws -> [String] {
         let result = try await git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root: root)
         guard result.status == 0 else { throw ProcessFailure.exited(String(decoding: result.error, as: UTF8.self)) }
-        return Array(Set(String(decoding: result.output, as: UTF8.self).split(separator: "\0").map(String.init))).sorted()
+        // Cached paths include tracked files deleted from disk; those belong in Changes only.
+        let deleted = try await git(["ls-files", "--deleted", "-z"], root: root)
+        guard deleted.status == 0 else { throw ProcessFailure.exited(String(decoding: deleted.error, as: UTF8.self)) }
+        let missing = Set(String(decoding: deleted.output, as: UTF8.self).split(separator: "\0").map(String.init))
+        return Array(Set(String(decoding: result.output, as: UTF8.self).split(separator: "\0").map(String.init)).subtracting(missing)).sorted()
     }
     public func fileSnapshot(path: String, projectID: UUID, root: String) async throws -> ReviewSnapshot {
         let preview = try readPreview(path: path, root: root)

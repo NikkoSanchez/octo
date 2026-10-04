@@ -94,4 +94,75 @@ import XCTest
         try await settle()
         XCTAssertEqual(view.documentVisibleRect.minY, 500, accuracy: 1)
     }
+    func testScrollPositionAndUnchangedConnectionsDoNotRequestBottomJumps() async throws {
+        let (controller, view, _, thread) = fixture()
+        defer { controller.disconnect() }
+        try await settle()
+        var jumps = 0
+        controller.connect(view, threadID: thread, suspended: false, searching: false) { jumps += 1 }
+        // Ordinary scrolling inside the follow threshold must not snap to the end.
+        scroll(view, to: 1_580)
+        NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+        controller.connect(view, threadID: thread, suspended: false, searching: false) { jumps += 1 }
+        try await settle()
+        XCTAssertTrue(controller.isFollowing)
+        XCTAssertEqual(jumps, 0)
+        XCTAssertEqual(view.documentVisibleRect.minY, 1_580, accuracy: 1)
+        controller.contentChanged()
+        try await settle()
+        XCTAssertEqual(jumps, 1, "Actual content changes still follow while near the bottom")
+        scroll(view, to: 1_600)
+        controller.contentChanged()
+        try await settle()
+        XCTAssertEqual(jumps, 1, "An already-visible end needs no programmatic scroll")
+    }
+
+    func testGrowthDuringLiveScrollFollowsAfterGestureEnds() async throws {
+        let (controller, view, document, _) = fixture()
+        defer { controller.disconnect() }
+        try await settle()
+        NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: view)
+        document.setFrameSize(NSSize(width: 500, height: 2_020))
+        try await settle()
+        XCTAssertEqual(view.documentVisibleRect.maxY, 2_000, accuracy: 1)
+        NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+        try await settle()
+        XCTAssertEqual(view.documentVisibleRect.maxY, 2_020, accuracy: 1)
+    }
+
+    func testWheelMomentumPreventsPendingFollowBetweenNativeNotifications() async throws {
+        let (controller, view, document, _) = fixture()
+        defer { controller.disconnect() }
+        try await settle()
+        controller.receivedWheelEvent()
+        // End-of-finger can precede momentum; native didEnd alone must not release follow.
+        scroll(view, to: 1_580)
+        document.setFrameSize(NSSize(width: 500, height: 2_010))
+        NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(view.documentVisibleRect.minY, 1_580, accuracy: 1)
+        controller.receivedWheelEvent()
+        scroll(view, to: 1_400)
+        try await Task.sleep(for: .milliseconds(240))
+        XCTAssertFalse(controller.isFollowing)
+        XCTAssertEqual(view.documentVisibleRect.minY, 1_400, accuracy: 1)
+    }
+
+    func testNativeFollowTracksMeasuredDocumentWithoutSwiftUIReanchoring() async throws {
+        let (controller, view, document, thread) = fixture()
+        defer { controller.disconnect() }
+        controller.connect(view, threadID: thread, suspended: false, searching: false) { controller.scrollToEnd() }
+        try await settle()
+        XCTAssertEqual(view.documentVisibleRect.maxY, 2_000, accuracy: 1)
+        for height in stride(from: 2_020, through: 2_200, by: 20) {
+            document.setFrameSize(NSSize(width: 500, height: height))
+            try await Task.sleep(for: .milliseconds(25))
+            XCTAssertEqual(view.documentVisibleRect.maxY, CGFloat(height), accuracy: 1)
+        }
+        scroll(view, to: 800)
+        document.setFrameSize(NSSize(width: 700, height: 1_800))
+        try await settle()
+        XCTAssertEqual(view.documentVisibleRect.minY, 800, accuracy: 1)
+    }
+
 }

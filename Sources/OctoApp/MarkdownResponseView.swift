@@ -11,28 +11,30 @@ struct MarkdownResponseView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let rendered, source.hasPrefix(rendered.document.source) {
-                ForEach(rendered.document.blocks) { block in
+            // Publish complete parsed snapshots only. A literal tail in its own
+            // Text creates a temporary extra paragraph on every streamed update,
+            // then removes it after parsing, making layout and follow-scroll bounce.
+            ForEach(visibleBlocks) { block in
+                if let rendered {
                     blockView(block.kind, inline: rendered.inline)
                 }
-                if rendered.document.source != source {
-                    Text(verbatim: String(source.dropFirst(rendered.document.source.count)))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                // Never display an old response or omit its newest streamed tail.
-                Text(verbatim: source).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .font(.system(size: 15)).foregroundStyle(theme.foreground)
         .textSelection(.enabled).tint(theme.blue)
         .task(id: source) {
             let source = source
-            let work = Task.detached(priority: .userInitiated) { RenderedMarkdown(source) }
+            let previous = rendered
+            let work = Task.detached(priority: .userInitiated) { RenderedMarkdown(source, previous: previous) }
             let value = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel() })
             guard !Task.isCancelled else { return }
             rendered = value
         }
+    }
+
+    private var visibleBlocks: [MarkdownDocument.Block] {
+        guard let rendered, source.hasPrefix(rendered.document.source) else { return [] }
+        return rendered.document.blocks
     }
 
     @ViewBuilder private func blockView(_ block: MarkdownDocument.Kind, inline: [String: AttributedString]) -> some View {
@@ -103,10 +105,10 @@ struct MarkdownResponseView: View {
     }
 }
 
-private struct RenderedMarkdown: Sendable {
+struct RenderedMarkdown: Sendable {
     let document: MarkdownDocument
     var inline: [String: AttributedString] = [:]
-    init(_ source: String) {
+    init(_ source: String, previous: RenderedMarkdown? = nil) {
         document = MarkdownDocument(source)
         for block in document.blocks {
             if Task.isCancelled { break }
@@ -116,7 +118,11 @@ private struct RenderedMarkdown: Sendable {
             case .table(let headers, _, let rows): texts = headers + rows.flatMap { $0 }
             case .code, .spacing: texts = []
             }
-            for text in texts { inline[text] = MarkdownInline.parse(text) }
+            // Completed blocks usually remain unchanged while the last one grows.
+            // Reuse their inline interpretation without retaining obsolete tails.
+            for text in texts {
+                inline[text] = inline[text] ?? previous?.inline[text] ?? MarkdownInline.parse(text)
+            }
         }
     }
 }

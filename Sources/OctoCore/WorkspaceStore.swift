@@ -54,6 +54,28 @@ public struct WorkspaceStore: Sendable {
         guard archive.schemaVersion == 1 else { throw StoreError.unsupportedVersion(archive.schemaVersion) }
         return archive
     }
+    /// Persistent per-chat CLI scratch space, separate from repositories and the
+    /// archive itself. Descriptor-relative opens refuse substituted symlinks.
+    public func prepareChatDirectory(_ id: UUID) throws -> URL {
+        try prepareDirectory()
+        let parent = fileURL.deletingLastPathComponent()
+        var fd = Darwin.open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixError() }
+        defer { Darwin.close(fd) }
+        for component in ["ChatWorkspaces", id.uuidString] {
+            guard mkdirat(fd, component, 0o700) == 0 || errno == EEXIST else { throw posixError() }
+            let child = openat(fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard child >= 0 else { throw posixError() }
+            var info = stat()
+            guard fstat(child, &info) == 0, info.st_uid == getuid(), (info.st_mode & 0o077) == 0 else {
+                Darwin.close(child); throw StoreError.unsafeDirectory
+            }
+            Darwin.close(fd); fd = child
+        }
+        let directory = parent.appendingPathComponent("ChatWorkspaces").appendingPathComponent(id.uuidString)
+        try excludeBackup(directory)
+        return directory
+    }
     public func save(_ archive: WorkspaceArchive) throws {
         try prepareDirectory()
         if let existing = try openArchive() { Darwin.close(existing) }

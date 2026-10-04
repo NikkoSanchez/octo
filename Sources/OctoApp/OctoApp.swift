@@ -99,7 +99,7 @@ struct SettingsView: View {
                     }
                     Divider()
                 }
-                Text("Octo reserves the listed Command shortcuts in workspace windows, including when a terminal is focused. Control, Option-only, Vim leader keys, and Escape stay with the terminal. Copy, paste, undo, and text navigation stay native. ⌘Return and ⌘. act on chat only outside the terminal. Approval buttons require an explicit choice; use Tab / Shift-Tab to focus controls (enable Keyboard navigation in macOS Settings).")
+                Text("Octo reserves the listed Command shortcuts in workspace windows, including when a terminal is focused. Control, Option-only, Vim leader keys, and Escape stay with the terminal. Copy, paste, undo, and text navigation stay native. In the composer, Return sends and Shift–Return inserts a new line. ⌘Return and ⌘. act on chat only outside the terminal. Approval buttons require an explicit choice; use Tab / Shift-Tab to focus controls (enable Keyboard navigation in macOS Settings).")
                     .font(.system(size: 12)).foregroundStyle(store.theme.secondary)
             }.padding(20)
         }
@@ -107,7 +107,7 @@ struct SettingsView: View {
     static let shortcutGroups: [(String, [(String, String)])] = [
         ("Navigate & create", [("Search chats", "⌘K"), ("Switch project", "⇧⌘K"), ("Find in current thread", "⌘F"), ("Next / previous matching message", "⌘G / ⇧⌘G"), ("New thread / add project", "⌘N / ⇧⌘O"), ("Find file / command palette", "⌘P / ⇧⌘P"), ("Previous / next thread", "⌥⌘[ / ⌥⌘]")]),
         ("Workspace", [("Toggle left sidebar / review panel", "⌘B / ⌥⌘R"), ("Focus composer / show changes / show files", "⌘1 / ⌘2 / ⌘3"), ("Focus code preview", "⌘4"), ("Toggle terminal", "⌘J"), ("Settings", "⌘,")]),
-        ("Conversation & review", [("Send message / stop agent", "⌘Return / ⌘."), ("Attach selected code to draft", "⇧⌘A"), ("Open selected file in LazyVim", "⇧⌘E"), ("Refresh changes and files", "⇧⌘R"), ("Save file now (also autosaves)", "⌘S")]),
+        ("Conversation & review", [("Send message / new line (composer)", "Return / ⇧Return"), ("Send message / stop agent", "⌘Return / ⌘."), ("Attach selected code to draft", "⇧⌘A"), ("Open selected file in LazyVim", "⇧⌘E"), ("Refresh changes and files", "⇧⌘R"), ("Save file now (also autosaves)", "⌘S")]),
         ("Terminal", [("New tab / close tab with confirmation", "⌘T / ⌘W"), ("Previous / next terminal tab", "⇧⌘[ / ⇧⌘]")])
     ]
     private var agents: some View {

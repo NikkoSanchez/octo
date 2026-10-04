@@ -38,6 +38,8 @@ struct WorkspaceCommandMenu: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             command("newThread", title: "New Thread", key: "n")
+            Button("New Chat Without a Project") { context?.commands.first { $0.id == "newChat" }?.action() }
+                .disabled(context?.commands.first { $0.id == "newChat" }?.enabled != true)
             command("addProject", title: "Add Project…", key: "o", modifiers: [.command, .shift])
         }
         CommandMenu("Workspace") {
@@ -186,7 +188,7 @@ enum PaletteMode: String, Identifiable {
     var id: String { rawValue }
     var placeholder: String {
         switch self {
-        case .chats: return "Search chats across projects…"
+        case .chats: return "Search all chats…"
         case .projects: return "Switch project by name or path…"
         case .commands: return "Type a command…"
         case .files: return "Find a project file…"
@@ -342,7 +344,7 @@ private struct ShortcutHint: ViewModifier {
     func body(content: Content) -> some View {
         content.overlay(alignment: placement == .inline ? .trailing : .topTrailing) {
             if active, enabled, let shortcut = hints[command] {
-                Text(shortcut).font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Text(shortcut.map(String.init).joined(separator: " ")).font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(theme.foreground).padding(.horizontal, 5).padding(.vertical, 3)
                     .background(theme.panel, in: RoundedRectangle(cornerRadius: 4))
                     .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(theme.border))

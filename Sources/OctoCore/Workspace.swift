@@ -7,9 +7,11 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
     public var threads: [WorkspaceThread]
     public var isPinned = false
     public var isCollapsed = false
+    /// The built-in home for conversations without a user-selected repository.
+    public var isChatCollection = false
     public var orderedThreads: [WorkspaceThread] { threads.filter(\.isPinned) + threads.filter { !$0.isPinned } }
 
-    private enum CodingKeys: String, CodingKey { case id, name, rootPath, threads, isPinned, isCollapsed }
+    private enum CodingKeys: String, CodingKey { case id, name, rootPath, threads, isPinned, isCollapsed, isChatCollection }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -18,6 +20,7 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
         threads = try values.decode([WorkspaceThread].self, forKey: .threads)
         isPinned = try values.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         isCollapsed = try values.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false
+        isChatCollection = try values.decodeIfPresent(Bool.self, forKey: .isChatCollection) ?? false
     }
     public init(id: UUID = UUID(), name: String, rootPath: String, threads: [WorkspaceThread] = []) {
         self.id = id; self.name = name; self.rootPath = rootPath; self.threads = threads
@@ -200,6 +203,11 @@ public struct ChatMessageGroup: Identifiable {
 }
 
 public struct WorkspaceArchive: Codable, Sendable {
+    public var searchableThreads: [RecentThread] {
+        ((chats.map { [$0] } ?? []) + orderedProjects).flatMap { project in
+            project.orderedThreads.map { RecentThread(project: project, thread: $0) }
+        }
+    }
     /// Recent conversations span projects; empty composers remain in their project.
     public var recentThreads: [RecentThread] {
         Array(projects.flatMap { project in
@@ -209,7 +217,11 @@ public struct WorkspaceArchive: Codable, Sendable {
             return $0.id.uuidString < $1.id.uuidString
         }.prefix(8))
     }
-    public var orderedProjects: [WorkspaceProject] { projects.filter(\.isPinned) + projects.filter { !$0.isPinned } }
+    public var chats: WorkspaceProject? { projects.first(where: \.isChatCollection) }
+    public var orderedProjects: [WorkspaceProject] {
+        let repositories = projects.filter { !$0.isChatCollection }
+        return repositories.filter(\.isPinned) + repositories.filter { !$0.isPinned }
+    }
 
     public mutating func removeThread(_ id: UUID, projectID: UUID) {
         guard let p = projects.firstIndex(where: { $0.id == projectID }) else { return }
@@ -217,10 +229,12 @@ public struct WorkspaceArchive: Codable, Sendable {
         if selectedThreadID == id { selectedThreadID = projects[p].orderedThreads.first?.id }
     }
     public mutating func removeProject(_ id: UUID) {
+        guard projects.first(where: { $0.id == id })?.isChatCollection != true else { return }
         projects.removeAll { $0.id == id }
         if selectedProjectID == id {
-            selectedProjectID = orderedProjects.first?.id
-            selectedThreadID = orderedProjects.first?.orderedThreads.first?.id
+            let next = orderedProjects.first ?? chats
+            selectedProjectID = next?.id
+            selectedThreadID = next?.orderedThreads.first?.id
         }
     }
     // Optional fields preserve decoding of archives created before draft defaults.

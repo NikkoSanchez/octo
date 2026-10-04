@@ -23,7 +23,8 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | Focus code preview | ⌘4 |
 | Toggle review panel | ⌥⌘R |
 | Toggle project terminal | ⌘J |
-| Send draft / stop current agent | ⌘Return / ⌘. |
+| Send draft (composer) / insert new line | Return / Shift–Return |
+| Send draft (outside terminal) / stop current agent | ⌘Return / ⌘. |
 | Attach code selection to draft | ⇧⌘A |
 | Open selected file in installed LazyVim | ⇧⌘E |
 | Refresh changes and files | ⇧⌘R |
@@ -57,3 +58,7 @@ Source highlighting is lexical, not a full grammar: it supports common C-family 
 Named themes update mounted terminal surfaces in place, including inactive tabs. Shells, editors and scrollback remain alive. System follows macOS light/dark appearance and removes Octo's terminal color override, using the existing Ghostty configuration where supported by the pinned wrapper. It does not install missing Ghostty theme resources. Neovim retains its installed configuration and colorscheme. Theme changes preserve code-preview selection.
 
 Current limits: fixed shortcut defaults (no remapping UI), no full transcript indexing or occurrence-level search, no code-preview find UI, and no automatic Neovim theme synchronization. International keyboard layouts, IME, and VoiceOver need broader validation.
+
+### Chats without a project
+
+The **Chats** section is always available above Projects. Its + button or **File → New Chat Without a Project** starts or reopens a standalone draft from any project. ⌘N creates/reuses a draft in the current section. The command palette includes **Go to Chats**; ⌘K searches both standalone and project conversations. Project terminal, file and review shortcuts are disabled while Chats is selected.

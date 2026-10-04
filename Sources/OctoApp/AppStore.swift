@@ -1,4 +1,6 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 import SwiftUI
 import OctoCore
 import OctoGit
@@ -66,6 +68,7 @@ import OctoTerminal
         }
     }
     @Published var draftImages: [UUID: [ImageAttachment]] = [:]
+    @Published private(set) var importingImages: Set<UUID> = []
     @Published var attachments: [UUID: [CodeAttachment]] = [:]
     @Published var running = Set<UUID>()
     @Published var approvals: [UUID: [AgentApproval]] = [:]
@@ -88,6 +91,7 @@ import OctoTerminal
     private var pendingTextBytes = 0
     var project: WorkspaceProject? { archive.projects.first { $0.id == archive.selectedProjectID } }
     var thread: WorkspaceThread? { project?.threads.first { $0.id == archive.selectedThreadID } }
+    var isProjectChat: Bool { project.map { !$0.isChatCollection } ?? false }
     init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard,
          titleGenerator: @escaping TitleGenerator = { try await HarnessRegistry.generateTitle($0, text: $1, codexExecutable: $2) }) {
         self.titleGenerator = titleGenerator
@@ -116,6 +120,39 @@ import OctoTerminal
             archive.lastHarness = thread.harness
             archive.rememberedAgentSettings = [thread.harness.rawValue: thread.agentSettings]
         }
+        if canSave {
+            ensureChats()
+            if project == nil { openChats() }
+            if let thread, project?.isChatCollection == true { _ = prepareChat(thread.id) }
+            saveSoon()
+        }
+    }
+    private func ensureChats() {
+        guard canSave, archive.chats == nil else { return }
+        var chats = WorkspaceProject(name: "Chats", rootPath: "")
+        chats.isChatCollection = true
+        archive.projects.append(chats)
+    }
+    func openChats() {
+        ensureChats()
+        guard let chats = archive.chats else { return }
+        selectProject(chats)
+        if thread == nil { newThread(projectID: chats.id) }
+    }
+    func newChat() {
+        ensureChats()
+        guard let chats = archive.chats else { return }
+        newThread(projectID: chats.id)
+    }
+    @discardableResult private func prepareChat(_ id: UUID) -> Bool {
+        guard canSave else { return false }
+        do {
+            let directory = try storage.prepareChatDirectory(id).path
+            if archive.chats?.threads.first(where: { $0.id == id })?.workingDirectory != directory {
+                mutate(id) { $0.workingDirectory = directory }
+            }
+            return true
+        } catch { self.error = "Could not prepare chat: \(error.localizedDescription)"; return false }
     }
     func saveSoon() {
         guard canSave else { return }
@@ -150,10 +187,12 @@ import OctoTerminal
         let current = archive.projects[index]
         // Re-selecting the current project should not jump away from its thread.
         let selected = current.threads.first { $0.id == archive.selectedThreadID } ?? current.orderedThreads.first
+        if current.isChatCollection, let selected, !prepareChat(selected.id) { return }
         archive.projects[index].isCollapsed = false
         archive.selectedProjectID = current.id; archive.selectedThreadID = selected?.id
         if let selected { mutate(selected.id) { $0.lastVisitedAt = Date() } }
         showingTerminal = false; composerFocus += 1; saveSoon()
+        if current.isChatCollection { showingReview = false }
     }
     func cycleThread(_ offset: Int) {
         guard let project, !project.orderedThreads.isEmpty else { return }
@@ -165,9 +204,11 @@ import OctoTerminal
     func selectThread(_ thread: WorkspaceThread, project: WorkspaceProject) {
         guard let owner = archive.projects.first(where: { $0.id == project.id }),
               owner.threads.contains(where: { $0.id == thread.id }) else { return }
+        if owner.isChatCollection, !prepareChat(thread.id) { return }
         NativeWorkspaceFocus.clear()
         mutate(thread.id) { $0.lastVisitedAt = Date() }
         archive.selectedProjectID = project.id; archive.selectedThreadID = thread.id; showingTerminal = false; composerFocus += 1; saveSoon()
+        if owner.isChatCollection { showingReview = false }
     }
     /// Called only when the active chat is visible and following its latest output.
     func markThreadRead(_ id: UUID) {
@@ -175,6 +216,7 @@ import OctoTerminal
         mutate(id) { $0.unreadCompletedAt = nil }
     }
     func openTerminal(_ project: WorkspaceProject) {
+        guard !project.isChatCollection else { return }
         archive.selectedProjectID = project.id
         if !project.threads.contains(where: { $0.id == archive.selectedThreadID }) { archive.selectedThreadID = project.orderedThreads.first?.id }
         terminal.ensureTab(projectID: project.id, directory: project.rootPath); showingTerminal = true; saveSoon()
@@ -192,6 +234,8 @@ import OctoTerminal
         saveSoon()
     }
     func newThread(harness requestedHarness: HarnessID? = nil, projectID: UUID? = nil) {
+        guard canSave else { return }
+        if projectID == nil && project == nil { ensureChats(); archive.selectedProjectID = archive.chats?.id }
         guard let p = archive.projects.firstIndex(where: { $0.id == (projectID ?? archive.selectedProjectID) }) else { return }
         let harness = requestedHarness ?? archive.lastHarness ?? thread?.harness ?? .codex
         let settings = rememberedSettings(for: harness)
@@ -205,21 +249,28 @@ import OctoTerminal
         let id: UUID
         if let existing {
             id = existing.id
+            if archive.projects[p].isChatCollection, !prepareChat(id) { return }
             let hasDraft = !(drafts[id] ?? "").isEmpty || !(draftImages[id] ?? []).isEmpty || !(attachments[id] ?? []).isEmpty
             if requestedHarness != nil || !hasDraft {
                 mutate(id) { $0.harness = harness; $0.agentSettings = settings }
             }
         } else {
             var thread = WorkspaceThread(harness: harness, workingDirectory: archive.projects[p].rootPath)
+            if archive.projects[p].isChatCollection {
+                thread.title = "New chat"
+                do { thread.workingDirectory = try storage.prepareChatDirectory(thread.id).path }
+                catch { self.error = "Could not prepare chat: \(error.localizedDescription)"; return }
+            }
             thread.agentSettings = settings
             archive.projects[p].threads.append(thread); id = thread.id
         }
         archive.projects[p].isCollapsed = false
         archive.selectedProjectID = archive.projects[p].id
         archive.selectedThreadID = id; showingTerminal = false; composerFocus += 1; saveSoon()
+        if archive.projects[p].isChatCollection { showingReview = false }
     }
     func toggleProjectPin(_ id: UUID) {
-        guard let p = archive.projects.firstIndex(where: { $0.id == id }) else { return }
+        guard let p = archive.projects.firstIndex(where: { $0.id == id && !$0.isChatCollection }) else { return }
         archive.projects[p].isPinned.toggle(); saveSoon()
     }
     func toggleProjectsSection() {
@@ -235,7 +286,7 @@ import OctoTerminal
     func toggleThreadPin(_ id: UUID) { mutate(id) { $0.isPinned.toggle() } }
     func renameProject(_ id: UUID, name: String) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let p = archive.projects.firstIndex(where: { $0.id == id }) else { return }
+        guard !name.isEmpty, let p = archive.projects.firstIndex(where: { $0.id == id && !$0.isChatCollection }) else { return }
         archive.projects[p].name = name; saveSoon()
     }
     func renameThread(_ id: UUID, title: String) {
@@ -252,7 +303,7 @@ import OctoTerminal
         archive.removeThread(id, projectID: projectID); saveSoon()
     }
     func removeProject(_ id: UUID) {
-        guard let project = archive.projects.first(where: { $0.id == id }) else { return }
+        guard let project = archive.projects.first(where: { $0.id == id && !$0.isChatCollection }) else { return }
         guard !project.threads.contains(where: { running.contains($0.id) }), !terminal.tabs.contains(where: { $0.projectID == id }) else {
             error = "Stop this project's agents and close its terminal tabs before removing it."; return
         }
@@ -305,11 +356,11 @@ import OctoTerminal
             guard configuration == codexConfigurationID else { return }
             codexVersion = version.isEmpty ? "Version unavailable" : version
         } catch {
-            if configuration == codexConfigurationID { codexVersion = "Version unavailable: \(error.localizedDescription)" }
+            if !Task.isCancelled && configuration == codexConfigurationID { codexVersion = "Version unavailable: \(error.localizedDescription)" }
         }
     }
     func loadModels(directory: String, refresh: Bool = false) async {
-        guard !loadingModels.contains(directory), refresh || modelCatalogs[directory] == nil else { return }
+        guard !Task.isCancelled, !loadingModels.contains(directory), refresh || modelCatalogs[directory] == nil else { return }
         let configuration = codexConfigurationID
         loadingModels.insert(directory); modelErrors[directory] = nil
         defer { if configuration == codexConfigurationID { loadingModels.remove(directory) } }
@@ -319,7 +370,7 @@ import OctoTerminal
             guard configuration == codexConfigurationID else { return }
             modelCatalogs[directory] = models
         } catch {
-            if configuration == codexConfigurationID { modelErrors[directory] = "Could not load Codex models: \(error.localizedDescription)" }
+            if !Task.isCancelled && configuration == codexConfigurationID { modelErrors[directory] = "Could not load Codex models: \(error.localizedDescription)" }
         }
     }
     func selectModel(_ model: AgentModel) {
@@ -364,20 +415,55 @@ import OctoTerminal
     /// cannot silently fall through to a text/file-path paste.
     @discardableResult func pasteScreenshot(from pasteboard: NSPasteboard, threadID: UUID) -> Bool {
         guard let type = pasteboard.availableType(from: [.png, .tiff]) else { return false }
-        guard let owner = archive.projects.flatMap(\.threads).first(where: { $0.id == threadID }) else { return true }
-        guard owner.harness == .codex else { error = "Screenshot attachments currently require Codex."; return true }
-        guard (draftImages[threadID]?.count ?? 0) < 4 else { error = "You can attach up to four screenshots per message."; return true }
-        guard let data = pasteboard.data(forType: type), data.count <= 30 * 1_024 * 1_024,
-              let bitmap = NSBitmapImageRep(data: data), bitmap.pixelsWide > 0, bitmap.pixelsHigh > 0,
-              Double(bitmap.pixelsWide) * Double(bitmap.pixelsHigh) <= 32_000_000,
-              let png = bitmap.representation(using: .png, properties: [:]), png.count <= 5 * 1_024 * 1_024 else {
-            error = "Could not attach this image. Use a smaller screenshot (up to 5 MB as PNG and 32 megapixels)."; return true
-        }
-        draftImages[threadID, default: []].append(ImageAttachment(pngData: png))
+        guard canAttachImage(threadID) else { return true }
+        do {
+            guard let data = pasteboard.data(forType: type) else { throw ImageImportFailure.invalid }
+            draftImages[threadID, default: []].append(try DraftImageImport.decode(data, name: "Screenshot"))
+        } catch { self.error = error.localizedDescription }
         return true
     }
+    private func canAttachImage(_ threadID: UUID) -> Bool {
+        guard let owner = archive.projects.flatMap(\.threads).first(where: { $0.id == threadID }) else { return false }
+        guard owner.harness == .codex else { error = "Image attachments currently require Codex."; return false }
+        guard (draftImages[threadID]?.count ?? 0) < 4 else { error = "You can attach up to four images per message."; return false }
+        return true
+    }
+    func chooseImages(threadID: UUID) {
+        guard !importingImages.contains(threadID), canAttachImage(threadID), let window = NSApp.keyWindow else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Add images"
+        panel.prompt = "Attach"
+        panel.message = "Choose up to four images. Review them in your draft before sending."
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            Task { @MainActor in await self?.importImages(urls, threadID: threadID) }
+        }
+    }
+    func importImages(_ urls: [URL], threadID: UUID) async {
+        guard !urls.isEmpty, !importingImages.contains(threadID), canAttachImage(threadID) else { return }
+        guard urls.count + (draftImages[threadID]?.count ?? 0) <= 4 else {
+            error = "You can attach up to four images per message. Choose fewer files."; return
+        }
+        importingImages.insert(threadID)
+        defer { importingImages.remove(threadID) }
+        for url in urls {
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try DraftImageImport.read(url) }
+            }.value
+            // Navigation, deletion and provider changes may occur while decoding.
+            guard !Task.isCancelled, canAttachImage(threadID) else { return }
+            switch result {
+            case .success(let image): draftImages[threadID, default: []].append(image)
+            case .failure(let failure): error = "\(url.lastPathComponent): \(failure.localizedDescription)"
+            }
+        }
+    }
     func canSend(_ thread: WorkspaceThread) -> Bool {
-        !(drafts[thread.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(draftImages[thread.id] ?? []).isEmpty
+        !importingImages.contains(thread.id) && (!(drafts[thread.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(draftImages[thread.id] ?? []).isEmpty)
     }
     func attach(_ attachment: CodeAttachment) {
         guard let project, project.id == attachment.projectID else { return }
@@ -386,6 +472,7 @@ import OctoTerminal
         attachments[thread.id, default: []].append(attachment); showingTerminal = false
     }
     func openInEditor(_ snapshot: ReviewSnapshot, selection: CodeAttachment?) {
+        guard archive.projects.contains(where: { $0.id == snapshot.projectID && !$0.isChatCollection }) else { return }
         Task {
             do {
                 try await terminal.openInEditor(projectID: snapshot.projectID, directory: snapshot.workingDirectory, relativePath: snapshot.path, line: selection?.newLines?.lowerBound ?? 1)
@@ -394,7 +481,8 @@ import OctoTerminal
         }
     }
     func send() {
-        guard let thread, !running.contains(thread.id) else { return }
+        if let id = thread?.id, project?.isChatCollection == true, !prepareChat(id) { return }
+        guard let thread, !running.contains(thread.id), !importingImages.contains(thread.id) else { return }
         if let mode = thread.agentSettings.permissionMode,
            harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) != true {
             error = "The saved permission mode is unavailable with this CLI. Choose a supported mode before sending."; return
@@ -442,7 +530,7 @@ import OctoTerminal
     }
     /// Called only on explicit send; opening saved chats never makes a title request.
     func prepareThreadTitle(_ thread: WorkspaceThread, text: String) {
-        guard thread.messages.isEmpty, thread.title == "New thread", !thread.isTitleManuallySet else { return }
+        guard thread.messages.isEmpty, ["New thread", "New chat"].contains(thread.title), !thread.isTitleManuallySet else { return }
         let fallback = text.isEmpty ? "Screenshot discussion" : String(text.prefix(52))
         mutate(thread.id) { $0.title = fallback }
         guard !text.isEmpty, HarnessRegistry.titleConfiguration(thread.harness) != nil else { return }
@@ -505,7 +593,7 @@ import OctoTerminal
         guard archive.projects.flatMap(\.threads).first(where: { $0.id == id })?.lastCompaction?.state == .compacting else { return }
         mutate(id) { $0.lastCompaction?.state = .interrupted; $0.lastCompaction?.endedAt = Date() }
     }
-    /// Coalesce text from all active chats into one UI publication per 100 ms.
+    /// Coalesce text from all active chats into one UI publication per 33 ms.
     /// Protocol boundaries stay immediate and flush text first, preserving order.
     func receive(_ event: AgentEvent, threadID: UUID) {
         let role: ChatMessage.Role, text: String
@@ -529,7 +617,7 @@ import OctoTerminal
         if pendingTextBytes >= 65_536 { flushStreamText(); return }
         guard streamTask == nil else { return }
         streamTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            do { try await Task.sleep(for: .milliseconds(33)) } catch { return }
             self?.flushStreamText()
         }
     }
@@ -659,4 +747,46 @@ struct SidebarEdit: Identifiable {
 
 @MainActor final class DraftStore: ObservableObject {
     @Published var values: [UUID: String] = [:]
+}
+
+
+private enum ImageImportFailure: LocalizedError {
+    case invalid
+    var errorDescription: String? {
+        "Could not attach this image. Use a supported image up to 30 MB, 32 megapixels, and 5 MB after PNG conversion."
+    }
+}
+
+/// File I/O and decoding run outside the main actor; the draft owns PNG bytes,
+/// never a reference to a file that can disappear or change before sending.
+enum DraftImageImport {
+    static let sourceLimit = 30 * 1_024 * 1_024
+    static func read(_ url: URL) throws -> ImageAttachment {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard url.isFileURL,
+              try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { throw ImageImportFailure.invalid }
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        let data = try file.read(upToCount: sourceLimit + 1) ?? Data()
+        return try decode(data, name: url.lastPathComponent)
+    }
+    static func decode(_ data: Data, name: String) throws -> ImageAttachment {
+        guard data.count <= sourceLimit,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+              width.doubleValue > 0, height.doubleValue > 0,
+              width.doubleValue * height.doubleValue <= 32_000_000,
+              // ImageIO applies camera orientation; animated images use their first frame.
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(width.intValue, height.intValue)
+              ] as CFDictionary),
+              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
+              png.count <= 5 * 1_024 * 1_024 else { throw ImageImportFailure.invalid }
+        return ImageAttachment(name: name, pngData: png)
+    }
 }

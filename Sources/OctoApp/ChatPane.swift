@@ -38,27 +38,27 @@ struct ChatPane: View {
                         VStack(alignment: .leading, spacing: 20) {
                             if thread.messages.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text("What are we building?").font(.title2.weight(.semibold))
-                                    Text("Start a conversation about this project. Select code in the review pane to attach precise context.").foregroundStyle(theme.secondary)
+                                    Text(store.isProjectChat ? "What are we building?" : "What's on your mind?").font(.title2.weight(.semibold))
+                                    Text(store.isProjectChat ? "Start a conversation about this project. Select code in the review pane to attach precise context." : "Ask a question, explore an idea, or work through something. Your conversations live here in Chats.").foregroundStyle(theme.secondary)
                                 }.padding(.top, 30)
                             }
                             if turns.count > 1 {
-                                LazyVStack(alignment: .leading, spacing: 20) {
+                                VStack(alignment: .leading, spacing: 20) {
                                     ForEach(turns.dropLast()) { turn in
                                         turnView(turn, harness: thread.harness, active: false)
                                     }
                                 }
                             }
-                            // Keep the latest turn and end target measured together. A lazy
-                            // estimate for a large streaming turn can strand jumps in blank space.
+                            // Eager history keeps measured Markdown heights and native scroll
+                            // geometry stable while scrolling or resizing the chat column.
                             ForEach(turns.suffix(1)) { turn in
                                 turnView(turn, harness: thread.harness, active: store.running.contains(thread.id))
                             }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
                             .background(TranscriptScrollProbe(controller: transcriptScroll, threadID: thread.id,
-                                                              suspended: store.showingTerminal, searching: store.findingThread,
-                                                              scrollToEnd: { proxy.scrollTo("bottom", anchor: .bottom) }))
+                                                              suspended: !isVisible || store.showingTerminal, searching: store.findingThread,
+                                                              scrollToEnd: { transcriptScroll.scrollToEnd() }))
                             .background(GeometryReader { geometry in
                                 Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
                             })
@@ -109,10 +109,13 @@ struct ChatPane: View {
                     .task(id: "\(thread.harness.rawValue):\(thread.workingDirectory):\(store.codexConfigurationID)") {
                         if thread.harness == .codex {
                             await store.refreshCodexVersion()
+                            guard !Task.isCancelled else { return }
                             await store.loadModels(directory: thread.workingDirectory)
                         }
                     }
-            } else { ContentUnavailableView("Start a thread", systemImage: "bubble.left", description: Text("Choose New Thread to work with an agent.")) }
+            } else { ContentUnavailableView {
+                Label("Start a chat", systemImage: "bubble.left")
+            } actions: { Button("New Chat") { store.newThread() }.buttonStyle(.borderedProminent) } }
         }.frame(maxWidth: 840, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(ChatWindowActivity(isKey: $windowIsKey).frame(width: 0, height: 0))
@@ -382,7 +385,7 @@ struct ChatPane: View {
                                 Text(attachment.name).font(.system(size: 11)).foregroundStyle(theme.secondary)
                                 if let threadID {
                                     Button { store.draftImages[threadID]?.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
-                                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Remove screenshot")
+                                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Remove image")
                                 }
                             }
                         }
@@ -411,10 +414,21 @@ struct ChatPane: View {
                 }
             }
             DraftEditor(drafts: store.draftStore, threadID: thread.id, focusRequest: store.composerFocus, theme: store.theme,
+                        placeholder: store.isProjectChat ? "Ask about this project…" : "Ask anything…",
                         onChange: { store.drafts[thread.id] = $0 },
                         onPasteImage: { store.pasteScreenshot(from: $0, threadID: thread.id) }, onSend: { store.send() })
                 .id(thread.id).frame(height: 110)
             HStack(spacing: 10) {
+                Button { store.chooseImages(threadID: thread.id) } label: {
+                    Image(systemName: "plus").frame(width: 16, height: 16)
+                }
+                .buttonStyle(HoverButtonStyle())
+                .help(thread.harness == .codex ? "Add images" : "Image attachments require Codex")
+                .accessibilityLabel("Add images")
+                .disabled(thread.harness != .codex || store.importingImages.contains(thread.id) || (store.draftImages[thread.id]?.count ?? 0) >= 4)
+                if store.importingImages.contains(thread.id) {
+                    ProgressView().controlSize(.small).accessibilityLabel("Loading images")
+                }
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread) }
                         .fixedSize(horizontal: true, vertical: false)
@@ -507,13 +521,14 @@ private struct DraftEditor: View {
     let threadID: UUID
     let focusRequest: Int
     let theme: AppTheme
+    let placeholder: String
     let onChange: (String) -> Void
     let onPasteImage: (NSPasteboard) -> Bool
     let onSend: () -> Void
     var body: some View {
         ZStack(alignment: .topLeading) {
             if (drafts.values[threadID] ?? "").isEmpty {
-                Text("Ask about this project…").font(.system(size: 15)).foregroundStyle(theme.subtle)
+                Text(placeholder).font(.system(size: 15)).foregroundStyle(theme.subtle)
                     .padding(.top, 5).padding(.leading, 5).allowsHitTesting(false)
             }
             ComposerTextView(focusRequest: focusRequest, theme: theme,
@@ -548,7 +563,7 @@ struct ComposerTextView: NSViewRepresentable {
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         editor.minSize = .zero; editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
-        editor.setAccessibilityLabel("Message. Paste text or a screenshot.")
+        editor.setAccessibilityLabel("Message. Return to send; Shift-Return for a new line. Paste text or a screenshot.")
         scroll.documentView = editor
         return scroll
     }
@@ -598,8 +613,16 @@ final class ScreenshotTextView: NSTextView {
         super.pasteAsPlainText(sender)
     }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
-            onSend?(); return
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText() {
+            if modifiers.isEmpty || modifiers == .command {
+                if !event.isARepeat { onSend?() }
+                return
+            }
+            if modifiers == .shift {
+                insertNewlineIgnoringFieldEditor(nil)
+                return
+            }
         }
         super.keyDown(with: event)
     }

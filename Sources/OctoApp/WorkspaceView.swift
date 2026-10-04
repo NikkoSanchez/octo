@@ -26,6 +26,7 @@ struct WorkspaceView: View {
     @Environment(\.openSettings) private var openSettings
     @Environment(\.octoTheme) private var theme
     @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geometry in
             let layout = layout(at: geometry.size.width)
@@ -33,19 +34,26 @@ struct WorkspaceView: View {
                 VStack(spacing: 0) {
                     titlebar(showSidebarToggle: !layout.sidebarVisible)
                     Divider()
-                    ZStack {
-                        threadWorkspace.opacity(store.showingTerminal ? 0 : 1).allowsHitTesting(!store.showingTerminal).accessibilityHidden(store.showingTerminal)
-                        TerminalPane(store: store, terminal: store.terminal, visible: store.showingTerminal && !layout.overlayVisible)
-                            .opacity(store.showingTerminal ? 1 : 0).allowsHitTesting(store.showingTerminal).accessibilityHidden(!store.showingTerminal)
+                    GeometryReader { contentGeometry in
+                        ZStack {
+                            threadWorkspace.opacity(store.showingTerminal ? 0 : 1).allowsHitTesting(!store.showingTerminal).accessibilityHidden(store.showingTerminal)
+                            TerminalPane(store: store, terminal: store.terminal, visible: store.showingTerminal && !layout.overlayVisible)
+                                .background(theme.background)
+                                .modifier(PanelSlide(y: store.showingTerminal ? 0 : contentGeometry.size.height, visible: store.showingTerminal))
+                                .allowsHitTesting(store.showingTerminal).accessibilityHidden(!store.showingTerminal)
+                        }
+                        .clipped()
                     }
                 }
-                .frame(width: layout.detailWidth, height: geometry.size.height).clipped()
-                .background(theme.background).offset(x: layout.detailOffset)
+                .frame(height: geometry.size.height).background(theme.background)
+                .modifier(PanelFrame(width: layout.detailWidth, x: layout.detailOffset))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: layout.sidebarVisible)
                 .allowsHitTesting(!layout.overlayVisible).accessibilityHidden(layout.overlayVisible)
 
                 Color.black.opacity(layout.overlayVisible ? 0.2 : 0)
                     .contentShape(Rectangle()).onTapGesture { closeCompactSidebar() }
                     .allowsHitTesting(layout.overlayVisible).accessibilityHidden(true)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: layout.overlayVisible)
 
                 VStack(spacing: 0) {
                     HStack {
@@ -57,22 +65,22 @@ struct WorkspaceView: View {
                     sidebar
                 }
                 .frame(width: layout.sidebarWidth, height: geometry.size.height).background(theme.panel).clipped()
-                .opacity(layout.sidebarVisible ? 1 : 0)
+                .modifier(PanelSlide(x: layout.sidebarVisible ? 0 : -layout.sidebarWidth - 7, visible: layout.sidebarVisible))
                 .allowsHitTesting(layout.sidebarVisible).accessibilityHidden(!layout.sidebarVisible)
 
-                Rectangle().fill(theme.border).frame(width: 1).frame(width: 7).contentShape(Rectangle())
-                    .offset(x: layout.sidebarWidth)
+                ResizeHandle(enabled: layout.sidebarVisible && !layout.compact, color: NSColor(theme.border), activeColor: NSColor(theme.activeBorder), onDrag: { translation in
+                    if sidebarDragStart == nil { sidebarDragStart = sidebarWidth }
+                    sidebarWidth = min(320, max(240, (sidebarDragStart ?? sidebarWidth) + translation))
+                }, onEnd: { sidebarDragStart = nil })
+                    .frame(width: 7)
                     .opacity(layout.sidebarVisible && !layout.compact ? 1 : 0)
-                    .allowsHitTesting(layout.sidebarVisible && !layout.compact)
+                    .modifier(PanelSlide(x: layout.sidebarVisible ? layout.sidebarWidth : -7, visible: layout.sidebarVisible))
                     .accessibilityHidden(!layout.sidebarVisible || layout.compact)
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                        if sidebarDragStart == nil { sidebarDragStart = sidebarWidth }
-                        sidebarWidth = min(320, max(240, (sidebarDragStart ?? sidebarWidth) + value.translation.width))
-                    }.onEnded { _ in sidebarDragStart = nil })
                     .accessibilityLabel("Resize sidebar")
                     .accessibilityValue("\(Int(sidebarWidth)) points")
                     .accessibilityAdjustableAction { direction in sidebarWidth = min(320, max(240, sidebarWidth + (direction == .increment ? 20 : -20))) }
             }
+            .clipped()
             .onChange(of: geometry.size.width, initial: true) { _, width in windowWidth = width }
         }
         .onChange(of: layout.compact) { _, _ in compactSidebarOpen = false }
@@ -125,7 +133,7 @@ struct WorkspaceView: View {
     private func layout(at width: CGFloat) -> WorkspaceLayout {
         WorkspaceLayout(width: width, sidebarWidth: sidebarWidth, sidebarOpen: sidebarOpen, compactSidebarOpen: compactSidebarOpen)
     }
-    private var singleReview: Bool { layout.detailWidth < 737 && store.showingReview && !store.showingTerminal }
+    private var singleReview: Bool { store.isProjectChat && layout.detailWidth < 737 && store.showingReview && !store.showingTerminal }
     private func toggleSidebar() {
         NativeWorkspaceFocus.clear()
         if layout.compact { compactSidebarOpen.toggle() } else { sidebarOpen.toggle() }
@@ -145,11 +153,15 @@ struct WorkspaceView: View {
     }
     private var reviewKey: String { (store.project?.id.uuidString ?? "") + (store.thread?.workingDirectory ?? "") }
     private func refresh() async {
-        guard let project = store.project else { return }
+        guard let project = store.project, store.isProjectChat else { return }
         await review.refresh(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
     }
     private func openMarkdownFile(_ url: URL) {
         guard let project = store.project else { return }
+        guard store.isProjectChat else {
+            store.error = "Code review is available in project chats."
+            return
+        }
         let root = store.thread?.workingDirectory ?? project.rootPath
         guard let link = MarkdownFileLink(url: url, checkout: root) else {
             store.error = "This link does not point to a file inside this thread's checkout."
@@ -169,10 +181,10 @@ struct WorkspaceView: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.showingTerminal ? "\(store.project?.name ?? "Octo") · Terminal" : store.thread?.title ?? "Welcome to Octo").font(.headline).lineLimit(1)
-                Text(store.showingTerminal ? "Project terminal workspace" : "\(store.project?.name ?? "Local development")  /  \(review.branch)").font(.system(size: 13)).foregroundStyle(theme.secondary).lineLimit(1).truncationMode(.middle)
+                Text(store.showingTerminal ? "Project terminal workspace" : store.project?.isChatCollection == true ? "Chats" : "\(store.project?.name ?? "Local development")  /  \(review.branch)").font(.system(size: 13)).foregroundStyle(theme.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer()
-            if store.project != nil && !store.showingTerminal {
+            if store.isProjectChat && !store.showingTerminal {
                 Button { store.showingReview.toggle() } label: { Image(systemName: "sidebar.right") }
                     .hoverFeedback().shortcutHint("review")
                     .help(store.showingReview ? "Hide review panel" : "Show review panel")
@@ -180,15 +192,15 @@ struct WorkspaceView: View {
 
             }
             if store.showingTerminal { Button { store.focusComposer() } label: { Image(systemName: "bubble.left") }.hoverFeedback().shortcutHint("terminal").help("Back to thread").accessibilityLabel("Back to thread") }
-            else if let project = store.project { Button { store.openTerminal(project) } label: { Image(systemName: "terminal") }.hoverFeedback().shortcutHint("terminal").help("Terminal").accessibilityLabel("Terminal") }
+            else if let project = store.project, store.isProjectChat { Button { store.openTerminal(project) } label: { Image(systemName: "terminal") }.hoverFeedback().shortcutHint("terminal").help("Terminal").accessibilityLabel("Terminal") }
         }.padding(.horizontal, 12).padding(.vertical, 13)
     }
     @ViewBuilder private var threadWorkspace: some View {
         if let project = store.project {
-            ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.showingReview, singleColumnWhenNarrow: true) {
+            ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.isProjectChat && store.showingReview, singleColumnWhenNarrow: true) {
                 ChatPane(store: store, isVisible: !store.showingTerminal && !singleReview && !layout.overlayVisible && palette == nil && store.error == nil, openFile: openMarkdownFile)
             } trailing: {
-                reviewPane(project)
+                if !project.isChatCollection { reviewPane(project) }
             }
         } else {
             ContentUnavailableView {
@@ -350,6 +362,36 @@ private struct ProjectSidebar: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                    if let chats = store.archive.chats {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 2) {
+                                sectionHeader("Chats", collapsed: chats.isCollapsed,
+                                              unread: chats.threads.filter(\.hasUnreadCompletion).count,
+                                              toggle: { store.toggleProjectCollapse(chats.id) })
+                                Button { didNavigate(); store.newChat() } label: {
+                                    Image(systemName: "plus").frame(width: 26, height: 28)
+                                }.buttonStyle(HoverButtonStyle(padded: false))
+                                    .shortcutHint("newThread", active: store.project?.isChatCollection == true)
+                                    .help("New chat").accessibilityLabel("New chat")
+                            }
+                            if !chats.isCollapsed {
+                                ForEach(chats.orderedThreads) { thread in
+                                    SidebarThreadRow(thread: thread, projectName: "Chats", running: store.running.contains(thread.id),
+                                                     selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
+                                                     select: { didNavigate(); store.selectThread(thread, project: chats) },
+                                                     togglePin: { store.toggleThreadPin(thread.id) })
+                                        .contextMenu { threadMenu(thread, project: chats) }
+                                }
+                                if chats.threads.isEmpty {
+                                    Button { didNavigate(); store.newChat() } label: {
+                                        Label("Start a chat", systemImage: "bubble.left")
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }.buttonStyle(HoverButtonStyle()).font(.system(size: 13))
+                                }
+                            }
+                        }
+                        Divider().padding(.horizontal, 8)
+                    }
                     HStack(spacing: 2) {
                         sectionHeader("Projects", collapsed: store.archive.projectsSectionCollapsed == true,
                                       unread: unreadCount, toggle: store.toggleProjectsSection)
@@ -362,8 +404,8 @@ private struct ProjectSidebar: View {
                     }
                     if store.archive.projectsSectionCollapsed != true {
                         projectRows
-                        if store.archive.projects.isEmpty {
-                            Text("Add a project to start a conversation.")
+                        if store.archive.orderedProjects.isEmpty {
+                            Text("Add a project to work with your code.")
                                 .font(.system(size: 12)).foregroundStyle(theme.secondary).padding(8)
                         }
                     }
@@ -430,7 +472,7 @@ private struct ProjectSidebar: View {
             Text(removing?.threadID == nil ? "This removes the project and its saved conversations from Octo. Files on disk are kept. Stop agents and close this project's terminal tabs first." : "This permanently deletes the saved conversation and its draft from Octo. Files on disk and CLI history are kept.")
         }
     }
-    private var unreadCount: Int { store.archive.projects.reduce(0) { $0 + $1.threads.filter(\.hasUnreadCompletion).count } }
+    private var unreadCount: Int { store.archive.orderedProjects.reduce(0) { $0 + $1.threads.filter(\.hasUnreadCompletion).count } }
 
     private func sectionHeader(_ title: String, collapsed: Bool, unread: Int, toggle: @escaping () -> Void) -> some View {
         Button(action: toggle) {
@@ -519,7 +561,7 @@ private struct ProjectSidebar: View {
     @ViewBuilder private func threadMenu(_ thread: WorkspaceThread, project: WorkspaceProject) -> some View {
         Button(thread.isPinned ? "Unpin Thread" : "Pin Thread") { store.toggleThreadPin(thread.id) }
         Button("Rename…") { name = thread.title; renaming = SidebarTarget(projectID: project.id, threadID: thread.id) }
-        Button("New Thread in Project") { store.newThread(projectID: project.id) }
+        Button(project.isChatCollection ? "New Chat" : "New Thread in Project") { store.newThread(projectID: project.id) }
         Divider()
         Button("Delete Thread…", role: .destructive) { removing = SidebarTarget(projectID: project.id, threadID: thread.id) }
             .disabled(store.running.contains(thread.id))
@@ -927,7 +969,7 @@ struct WorkspaceLayout {
 
 /// SwiftUI's nested NSSplitViews can retain oversized children during window resizing.
 /// Clamp both columns to the available width on every layout pass, including while dragging.
-private struct ResizableColumns<Leading: View, Trailing: View>: View {
+struct ResizableColumns<Leading: View, Trailing: View>: View {
     @Environment(\.octoTheme) private var theme
     var minLeading: CGFloat
     var maxLeading: CGFloat = .greatestFiniteMagnitude
@@ -939,7 +981,7 @@ private struct ResizableColumns<Leading: View, Trailing: View>: View {
     @ViewBuilder var trailing: () -> Trailing
     @State private var fraction: CGFloat?
     @State private var dragStart: CGFloat?
-    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
@@ -951,36 +993,67 @@ private struct ResizableColumns<Leading: View, Trailing: View>: View {
             let split = trailingVisible && !single
             let leadingVisible = !trailingVisible || !single
             ZStack(alignment: .leading) {
-                leading().frame(width: split ? width : geometry.size.width, height: geometry.size.height).clipped()
+                leading().frame(height: geometry.size.height)
+                    .modifier(PanelFrame(width: split ? width : geometry.size.width))
                     .opacity(leadingVisible ? 1 : 0).allowsHitTesting(leadingVisible).accessibilityHidden(!leadingVisible)
-                Rectangle().fill(hovering || dragStart != nil ? theme.activeBorder : theme.border)
-                    .frame(width: 1).frame(width: 7).contentShape(Rectangle()).offset(x: width)
-                    .opacity(split ? 1 : 0).allowsHitTesting(split).accessibilityHidden(!split)
-                    .onHover { hovering = $0 }
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            if dragStart == nil { dragStart = width }
-                            let next = min(upper, max(lower, (dragStart ?? width) + value.translation.width))
-                            fraction = next / max(1, available)
-                        }
-                        .onEnded { _ in dragStart = nil })
+                ResizeHandle(enabled: split, color: NSColor(theme.border), activeColor: NSColor(theme.activeBorder), onDrag: { translation in
+                    if dragStart == nil { dragStart = width }
+                    let next = min(upper, max(lower, (dragStart ?? width) + translation))
+                    fraction = next / max(1, available)
+                }, onEnd: { dragStart = nil })
+                    .frame(width: 7).offset(x: width)
+                    .opacity(split ? 1 : 0).accessibilityHidden(!split)
                     .accessibilityLabel("Resize panels")
                     .accessibilityValue("\(Int(width)) points")
                     .accessibilityAdjustableAction { direction in
                         let next = min(upper, max(lower, width + (direction == .increment ? 20 : -20)))
                         fraction = next / max(1, available)
                     }
-                trailing().frame(width: single ? geometry.size.width : max(0, available - width), height: geometry.size.height).clipped()
-                    .offset(x: split ? width + 7 : 0)
-                    .opacity(trailingVisible ? 1 : 0).allowsHitTesting(trailingVisible).accessibilityHidden(!trailingVisible)
+                trailing().frame(height: geometry.size.height).background(theme.background)
+                    .modifier(PanelFrame(width: single ? geometry.size.width : max(0, available - width),
+                                         x: trailingVisible ? (split ? width + 7 : 0) : geometry.size.width))
+                    .allowsHitTesting(trailingVisible).accessibilityHidden(!trailingVisible)
             }
+            // Offsets don't contribute to ZStack's measured width. The clip
+            // must cover both columns, not just the wider individual child.
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+            .clipped()
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: trailingVisible)
         }
+    }
+}
+
+/// Recompute layout proposals at the interpolated width. Animating a plain frame
+/// can animate its drawing while native descendants receive only the final size.
+struct PanelFrame: AnimatableModifier {
+    var width: CGFloat
+    var x: CGFloat = 0
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(width, x) }
+        set { width = newValue.first; x = newValue.second }
+    }
+    func body(content: Content) -> some View {
+        content.transaction { $0.animation = nil }.frame(width: width).clipped().offset(x: x)
+    }
+}
+
+/// Size and position share the visibility transaction, so adjacent content
+/// expands continuously with the panel. Divider drags remain immediate.
+struct PanelSlide: ViewModifier {
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    let visible: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content.offset(x: x, y: y)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: visible)
     }
 }
 
 extension WorkspaceView {
     private func requestFileAction(_ kind: FileAction.Kind, path: String) {
-        guard let project = store.project else { return }
+        guard let project = store.project, store.isProjectChat else { return }
         let root = store.thread?.workingDirectory ?? project.rootPath
         guard path.isEmpty || review.represents(projectID: project.id, root: root) else { return }
         NativeWorkspaceFocus.clear()
@@ -1000,6 +1073,7 @@ extension WorkspaceView {
         else { store.composerFocus += 1 }
     }
     private func revealReview(files: Bool) {
+        guard store.isProjectChat else { return }
         store.showingTerminal = false; store.showingReview = true; review.browsingFiles = files
         if let project = store.project {
             Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
@@ -1012,10 +1086,12 @@ extension WorkspaceView {
     }
     private var commands: [AppCommand] {
         let project = store.project, thread = store.thread
-        let hasProject = project != nil, hasThread = thread != nil
+        let hasProject = store.isProjectChat, hasThread = thread != nil
         let idle = thread.map { !store.running.contains($0.id) } ?? false
         var result: [AppCommand] = [
-            .init(id: "newThread", title: "New Thread", group: "Create", key: "n", enabled: hasProject) { store.newThread() },
+            .init(id: "newThread", title: "New Thread", group: "Create", key: "n") { store.newThread() },
+            .init(id: "newChat", title: "New Chat Without a Project", group: "Create") { store.newChat() },
+            .init(id: "openChats", title: "Go to Chats", group: "Navigate") { store.openChats() },
             .init(id: "addProject", title: "Add Project…", group: "Create", key: "o", modifiers: [.command, .shift]) { store.chooseProject() },
             .init(id: "chats", title: "Search Chats…", group: "Navigate", key: "k") { NativeWorkspaceFocus.clear(); palette = .chats },
             .init(id: "projects", title: "Switch Project…", group: "Navigate", key: "k", modifiers: [.command, .shift]) { NativeWorkspaceFocus.clear(); palette = .projects },
@@ -1042,21 +1118,21 @@ extension WorkspaceView {
             .init(id: "stop", title: "Stop Agent", group: "Conversation", key: ".", enabled: !idle && hasThread, terminalAllowed: false) { if let thread { store.stop(thread.id) } },
             .init(id: "refresh", title: "Refresh Changes and Files", group: "Review", key: "r", modifiers: [.command, .shift], enabled: hasProject) { Task { await refresh() } },
             .init(id: "newFile", title: "New File…", group: "Review", enabled: hasProject) { requestFileAction(.create, path: "") },
-            .init(id: "saveFile", title: "Save File", group: "Review", key: "s", enabled: review.browsingFiles && review.editor != nil && store.showingReview && !review.loadingSnapshot, terminalAllowed: false) {
+            .init(id: "saveFile", title: "Save File", group: "Review", key: "s", enabled: hasProject && review.browsingFiles && review.editor != nil && store.showingReview && !review.loadingSnapshot, terminalAllowed: false) {
                 if let editor = review.editor { Task { await editor.save() } }
             },
-            .init(id: "deleteFile", title: "Delete File…", group: "Review", enabled: review.browsingFiles && review.selectedPath != nil && !review.loadingSnapshot) {
+            .init(id: "deleteFile", title: "Delete File…", group: "Review", enabled: hasProject && review.browsingFiles && review.selectedPath != nil && !review.loadingSnapshot) {
                 if let path = review.selectedPath { requestFileAction(.delete, path: path) }
             },
-            .init(id: "focusReview", title: "Focus Code Preview", group: "Review", key: "4", enabled: review.snapshot != nil && !review.loadingSnapshot) {
+            .init(id: "focusReview", title: "Focus Code Preview", group: "Review", key: "4", enabled: hasProject && review.snapshot != nil && !review.loadingSnapshot) {
                 compactSidebarOpen = false
                 store.showingTerminal = false; store.showingReview = true
                 DispatchQueue.main.async { reviewFocus += 1 }
             },
-            .init(id: "attach", title: "Attach Selected Code to Draft", group: "Review", key: "a", modifiers: [.command, .shift], enabled: review.selection != nil && !review.loadingSnapshot && store.showingReview, terminalAllowed: false) {
+            .init(id: "attach", title: "Attach Selected Code to Draft", group: "Review", key: "a", modifiers: [.command, .shift], enabled: hasProject && review.selection != nil && !review.loadingSnapshot && store.showingReview, terminalAllowed: false) {
                 if let selection = review.selection { store.attach(selection); store.focusComposer() }
             },
-            .init(id: "editor", title: "Open Selected File in LazyVim", group: "Review", key: "e", modifiers: [.command, .shift], enabled: review.snapshot?.notice == nil && review.snapshot != nil && !review.loadingSnapshot) {
+            .init(id: "editor", title: "Open Selected File in LazyVim", group: "Review", key: "e", modifiers: [.command, .shift], enabled: hasProject && review.snapshot?.notice == nil && review.snapshot != nil && !review.loadingSnapshot) {
                 if let snapshot = review.snapshot { store.openInEditor(snapshot, selection: review.selection) }
             },
             .init(id: "scope", title: "Toggle Working / Staged Changes", group: "Review", enabled: hasProject && !review.browsingFiles) { review.scope = review.scope == .working ? .staged : .working },
@@ -1076,7 +1152,7 @@ extension WorkspaceView {
             .init(id: "collapseProject", title: project?.isCollapsed == true ? "Expand Project" : "Collapse Project", group: "Project", enabled: hasProject) { if let project { showSidebar(); store.toggleProjectCollapse(project.id) } },
             .init(id: "renameProject", title: "Rename Project…", group: "Project", enabled: hasProject) { editSidebar(.rename, thread: false) },
             .init(id: "revealProject", title: "Reveal Project in Finder", group: "Project", enabled: hasProject) { if let project { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.rootPath) } },
-            .init(id: "removeProject", title: "Remove Project…", group: "Project", enabled: project.map { p in !p.threads.contains { store.running.contains($0.id) } && !store.terminal.tabs.contains { $0.projectID == p.id } } ?? false) { editSidebar(.remove, thread: false) }
+            .init(id: "removeProject", title: "Remove Project…", group: "Project", enabled: hasProject && (project.map { p in !p.threads.contains { store.running.contains($0.id) } && !store.terminal.tabs.contains { $0.projectID == p.id } } ?? false)) { editSidebar(.remove, thread: false) }
         ]
         for project in store.archive.orderedProjects {
             result.append(.init(id: "project-\(project.id)", title: "Switch to Project: \(project.name)", group: "Project") { store.selectProject(project) })
@@ -1128,12 +1204,13 @@ extension WorkspaceView {
             PaletteEntry(id: item.id, title: item.title, detail: item.group, shortcut: item.shortcut, enabled: item.enabled, action: item.action)
         }
         case .chats:
-            return store.archive.orderedProjects.flatMap { project in project.orderedThreads.map { thread in
-                PaletteEntry(id: thread.id.uuidString, title: thread.title, detail: project.name,
+            return store.archive.searchableThreads.map { entry in
+                let project = entry.project, thread = entry.thread
+                return PaletteEntry(id: thread.id.uuidString, title: thread.title, detail: project.name,
                              searchText: thread.messages.map(\.text).joined(separator: "\n")) { store.selectThread(thread, project: project) }
-            } }
+            }
         case .files:
-            guard let project = store.project else { return [] }
+            guard let project = store.project, store.isProjectChat else { return [] }
             func leaves(_ nodes: [FileNode]) -> [String] { nodes.flatMap { $0.children.map(leaves) ?? [$0.id] } }
             return leaves(review.tree).map { path in
                 PaletteEntry(id: path, title: path, detail: project.name) {
@@ -1183,5 +1260,90 @@ private struct FileTreeRows: View {
                     }
             }
         }
+    }
+}
+
+/// The same native surface owns hit testing, cursor updates and dragging.
+/// A non-hit-testing background cannot reliably override SwiftUI's cursor owner.
+struct ResizeHandle: NSViewRepresentable {
+    let enabled: Bool
+    let color: NSColor
+    let activeColor: NSColor
+    let onDrag: (CGFloat) -> Void
+    let onEnd: () -> Void
+    func makeNSView(context: Context) -> ResizeCursorView { ResizeCursorView() }
+    func updateNSView(_ view: ResizeCursorView, context: Context) {
+        view.enabled = enabled
+        view.color = color
+        view.activeColor = activeColor
+        view.onDrag = onDrag
+        view.onEnd = onEnd
+        view.needsDisplay = true
+    }
+}
+
+class ResizeCursorView: NSView {
+    var color: NSColor = .separatorColor
+    var activeColor: NSColor = .controlAccentColor
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onEnd: () -> Void = {}
+    private var dragOrigin: CGFloat?
+    private var hovered = false
+    private var cursorTracking: NSTrackingArea?
+    var enabled = false {
+        didSet {
+            guard enabled != oldValue else { return }
+            if !enabled { finishDrag(); hovered = false }
+            discardCursorRects()
+            window?.invalidateCursorRects(for: self)
+            updateTrackingAreas()
+        }
+    }
+    override var acceptsFirstResponder: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { enabled ? super.hitTest(point) : nil }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if enabled && cursorTracking == nil {
+            let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .cursorUpdate], owner: self)
+            addTrackingArea(area); cursorTracking = area
+        } else if !enabled, let area = cursorTracking {
+            removeTrackingArea(area); cursorTracking = nil
+        }
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if enabled && !visibleRect.isEmpty { addCursorRect(visibleRect, cursor: .resizeLeftRight) }
+    }
+    override func cursorUpdate(with event: NSEvent) { if enabled { NSCursor.resizeLeftRight.set() } }
+    override func mouseEntered(with event: NSEvent) {
+        guard enabled else { return }
+        hovered = true; needsDisplay = true; NSCursor.resizeLeftRight.set()
+    }
+    override func mouseExited(with event: NSEvent) {
+        hovered = false; needsDisplay = true
+        if dragOrigin == nil { NSCursor.arrow.set() }
+    }
+    override func mouseDown(with event: NSEvent) {
+        guard enabled else { return }
+        dragOrigin = event.locationInWindow.x
+        NSCursor.resizeLeftRight.set(); onDrag(0); needsDisplay = true
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard enabled, let origin = dragOrigin else { return }
+        NSCursor.resizeLeftRight.set(); onDrag(event.locationInWindow.x - origin)
+    }
+    override func mouseUp(with event: NSEvent) { finishDrag() }
+    private func finishDrag() {
+        guard dragOrigin != nil else { return }
+        dragOrigin = nil; onEnd(); needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+    }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { finishDrag() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        (hovered || dragOrigin != nil ? activeColor : color).setFill()
+        NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height).fill()
     }
 }

@@ -9,13 +9,33 @@ import SwiftUI
     private var threadID: UUID?
     private var suspended = false
     private var tracking = false
+    private var wheelActive = false
+    private var wheelMonitor: Any?
+    private var wheelIdleTask: Task<Void, Never>?
+    private var observedDocumentSize: NSSize?
+    private var observedViewportSize: NSSize?
+    private var needsScroll = false
+    private var forceScroll = false
     private var scrollTask: Task<Void, Never>?
-    private var scrollToEnd: (() -> Void)?
+    private var performScrollToEnd: (() -> Void)?
 
     func connect(_ scroll: NSScrollView, threadID: UUID, suspended: Bool, searching: Bool, scrollToEnd: @escaping () -> Void) {
-        if scrollView !== scroll {
+        let connectionChanged = scrollView !== scroll
+        let threadChanged = self.threadID != threadID
+        let wasSuspended = self.suspended
+        if connectionChanged {
             disconnect()
             scrollView = scroll
+            observedDocumentSize = scroll.documentView?.frame.size
+            observedViewportSize = scroll.contentView.bounds.size
+            wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self, weak scroll] event in
+                guard let self, let scroll, event.window === scroll.window,
+                      let content = event.window?.contentView,
+                      let hit = content.hitTest(content.convert(event.locationInWindow, from: nil)),
+                      hit === scroll || hit.isDescendant(of: scroll) else { return event }
+                self.receivedWheelEvent()
+                return event
+            }
             let center = NotificationCenter.default
             center.addObserver(self, selector: #selector(userWillScroll), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
             center.addObserver(self, selector: #selector(userDidScroll), name: NSScrollView.didLiveScrollNotification, object: scroll)
@@ -29,7 +49,7 @@ import SwiftUI
                 center.addObserver(self, selector: #selector(layoutChanged), name: NSView.frameDidChangeNotification, object: document)
             }
         }
-        self.scrollToEnd = scrollToEnd
+        self.performScrollToEnd = scrollToEnd
         if self.threadID != threadID {
             cancelScroll()
             self.threadID = threadID
@@ -39,27 +59,70 @@ import SwiftUI
         self.suspended = suspended || searching
         if searching { setFollowing(false) }
         if self.suspended { cancelScroll() }
-        else { scheduleScroll() }
+        else if connectionChanged || threadChanged || wasSuspended {
+            requestScroll(force: connectionChanged || threadChanged)
+        }
     }
 
     func disconnect() {
         cancelScroll()
         NotificationCenter.default.removeObserver(self)
         scrollView = nil
-        scrollToEnd = nil
+        performScrollToEnd = nil
+        if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
+        wheelMonitor = nil
+        wheelIdleTask?.cancel(); wheelIdleTask = nil; wheelActive = false
         tracking = false
+        needsScroll = false
+        forceScroll = false
+        observedDocumentSize = nil
+        observedViewportSize = nil
     }
 
     func resumeFollowing() {
         setFollowing(true)
+        requestScroll(force: true)
+    }
+
+    func contentChanged() { requestScroll() }
+
+    /// All transcript turns are measured. Move the native clip directly instead
+    /// of asking ScrollViewReader to realize/re-anchor its content on every delta.
+    func scrollToEnd() {
+        guard let scroll = scrollView, let document = scroll.documentView else { return }
+        let clip = scroll.contentView
+        let y = document.isFlipped ? max(document.bounds.minY, document.bounds.maxY - clip.bounds.height) : document.bounds.minY
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: y))
+            scroll.reflectScrolledClipView(clip)
+        }
+    }
+
+    /// Track wheel and momentum events before AppKit moves the viewport. A short
+    /// quiet interval covers both legacy wheels and the finger-to-momentum gap.
+    func receivedWheelEvent() {
+        wheelActive = true
+        cancelScroll()
+        wheelIdleTask?.cancel()
+        wheelIdleTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+            guard let self else { return }
+            self.wheelActive = false; self.wheelIdleTask = nil
+            self.userDidScroll()
+        }
+    }
+
+    private func requestScroll(force: Bool = false) {
+        guard isFollowing, !suspended else { return }
+        needsScroll = true
+        forceScroll = forceScroll || force
         scheduleScroll()
     }
 
-    func contentChanged() { scheduleScroll() }
-
     private func setFollowing(_ value: Bool) {
         if isFollowing != value { isFollowing = value }
-        if !value { cancelScroll() }
+        if !value { cancelScroll(); needsScroll = false; forceScroll = false }
     }
 
     private func cancelScroll() { scrollTask?.cancel(); scrollTask = nil }
@@ -78,7 +141,15 @@ import SwiftUI
         tracking = false
         userDidScroll()
     }
-    @objc private func layoutChanged() { scheduleScroll() }
+    @objc private func layoutChanged() {
+        guard let scroll = scrollView else { return }
+        let documentSize = scroll.documentView?.frame.size
+        let viewportSize = scroll.contentView.bounds.size
+        guard documentSize != observedDocumentSize || viewportSize != observedViewportSize else { return }
+        observedDocumentSize = documentSize
+        observedViewportSize = viewportSize
+        requestScroll()
+    }
 
     private var distanceFromEnd: CGFloat? {
         guard let scroll = scrollView, let document = scroll.documentView else { return nil }
@@ -87,23 +158,31 @@ import SwiftUI
     }
 
     private func scheduleScroll() {
-        guard isFollowing, !suspended, !tracking, scrollTask == nil, scrollView != nil else { return }
+        guard needsScroll, isFollowing, !suspended, !tracking, !wheelActive, scrollTask == nil, scrollView != nil else { return }
         // Defer/coalesce scrolling beyond SwiftUI's current layout transaction.
         scrollTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+            do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
             guard let self else { return }
             self.scrollTask = nil
-            guard self.isFollowing, !self.suspended, !self.tracking else { return }
-            // SwiftUI must own the jump so LazyVStack realizes its bottom target.
-            self.scrollToEnd?()
+            guard self.isFollowing, !self.suspended, !self.tracking, !self.wheelActive else { return }
+            let force = self.forceScroll
+            self.needsScroll = false
+            self.forceScroll = false
+            // At/past the end, let AppKit finish its elastic bounce untouched.
+            guard force || (self.distanceFromEnd ?? 0) > 1 else { return }
+            self.performScrollToEnd?()
         }
     }
 
-    deinit { scrollTask?.cancel(); NotificationCenter.default.removeObserver(self) }
+    deinit {
+        scrollTask?.cancel(); wheelIdleTask?.cancel()
+        if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
+        NotificationCenter.default.removeObserver(self)
+    }
 }
 
 /// Observes the enclosing native scroll view without replacing SwiftUI's transcript,
-/// search targets, selection handling or lazy layout. Configuration is deferred so
+/// search targets or selection handling. Configuration is deferred so
 /// native view updates never synchronously publish SwiftUI state.
 struct TranscriptScrollProbe: NSViewRepresentable {
     let controller: TranscriptScrollController

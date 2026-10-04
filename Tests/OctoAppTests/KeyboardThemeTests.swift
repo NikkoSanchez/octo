@@ -4,6 +4,33 @@ import OctoCore
 @testable import OctoApp
 
 @MainActor final class KeyboardThemeTests: XCTestCase {
+    func testComposerReturnSendsShiftReturnAddsLineAndMarkedTextDoesNotSend() throws {
+        let editor = ScreenshotTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.isRichText = false
+        var sends = 0
+        editor.onSend = { sends += 1 }
+        func event(_ flags: NSEvent.ModifierFlags = [], code: UInt16 = 36, repeated: Bool = false) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: repeated, keyCode: code))
+        }
+        editor.string = "Draft"
+        editor.setSelectedRange(NSRange(location: 5, length: 0))
+        editor.keyDown(with: try event())
+        XCTAssertEqual(sends, 1)
+        XCTAssertEqual(editor.string, "Draft")
+        editor.keyDown(with: try event(.shift))
+        XCTAssertEqual(editor.string, "Draft\n")
+        XCTAssertEqual(sends, 1)
+        editor.keyDown(with: try event(.capsLock, code: 76))
+        editor.keyDown(with: try event(.command))
+        XCTAssertEqual(sends, 3)
+        editor.keyDown(with: try event(repeated: true))
+        XCTAssertEqual(sends, 3)
+        editor.setMarkedText("仮", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(editor.hasMarkedText())
+        editor.keyDown(with: try event())
+        XCTAssertEqual(sends, 3, "Return must remain with the input method during composition")
+    }
+
     func testProjectPickerShortcutIsDistinctFromChatSearchAndWorksInTerminal() throws {
         let projects = AppCommand(id: "projects", title: "Switch Project", group: "Navigate", key: "k", modifiers: [.command, .shift]) {}
         let chats = AppCommand(id: "chats", title: "Search Chats", group: "Navigate", key: "k") {}

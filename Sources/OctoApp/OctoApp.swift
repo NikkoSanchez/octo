@@ -66,12 +66,13 @@ struct SettingsView: View {
                 Picker("Appearance", selection: $store.theme) {
                     ForEach(AppTheme.allCases) { theme in Text(theme.title).tag(theme) }
                 }.pickerStyle(.radioGroup)
-                HStack(spacing: 12) {
-                    ForEach([AppTheme.latte, .mocha]) { theme in
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 12)], spacing: 12) {
+                    ForEach(AppTheme.allCases.filter { $0.palette != nil }) { theme in
+                        let syntax = theme.syntax!
                         Button { store.theme = theme } label: {
                             VStack(alignment: .leading, spacing: 14) {
                                 HStack { Circle().fill(theme.accent).frame(width: 10, height: 10); Text(theme.title).font(.headline); Spacer() }
-                                (Text("let ").foregroundColor(theme.accent) + Text("idea = ").foregroundColor(theme.foreground) + Text("\"Hello, Octo\"").foregroundColor(theme.green)).font(.system(size: 12, design: .monospaced))
+                                (Text("let ").foregroundColor(Color(nsColor: NSColor(themeHex: syntax.keyword))) + Text("idea = ").foregroundColor(theme.foreground) + Text("\"Hello, Octo\"").foregroundColor(Color(nsColor: NSColor(themeHex: syntax.string)))).font(.system(size: 12, design: .monospaced))
                                 Text(store.theme == theme ? "Selected" : "Select theme").font(.system(size: 12)).foregroundStyle(theme.secondary)
                             }.padding(18).frame(maxWidth: .infinity).foregroundStyle(theme.foreground)
                                 .background(theme.background, in: RoundedRectangle(cornerRadius: 10))

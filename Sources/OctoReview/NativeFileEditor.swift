@@ -124,7 +124,7 @@ public struct NativeFileEditor: NSViewRepresentable {
             let foreground = NativeDiffView.color(parent.theme.palette?.text, fallback: .textColor)
             view.backgroundColor = NativeDiffView.color(parent.theme.palette?.base, fallback: .textBackgroundColor)
             view.insertionPointColor = NativeDiffView.color(parent.theme.palette?.rosewater, fallback: .textColor)
-            view.selectedTextAttributes = [.backgroundColor: parent.theme.palette.map { NativeDiffView.color($0.overlay2, fallback: .selectedTextBackgroundColor).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor]
+            view.selectedTextAttributes = [.backgroundColor: parent.theme.palette.map { NativeDiffView.color($0.selectionBackground, fallback: .selectedTextBackgroundColor).withAlphaComponent($0.selectionOpacity) } ?? .selectedTextBackgroundColor]
             let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground]
             let rendered = NSMutableAttributedString(string: view.string, attributes: attributes)
             ReviewSyntax.apply(to: rendered, document: ReviewDocument(source: document), theme: parent.theme)

@@ -85,6 +85,8 @@ import OctoCore
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .latte)
         store.theme = .mocha
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .mocha)
+        store.theme = .dracula
+        XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .dracula)
         store.theme = .system
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .system)
         preferences.set("future-theme", forKey: "appearanceTheme")

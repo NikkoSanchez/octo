@@ -56,6 +56,7 @@ public enum AgentPermissionMode: String, Codable, CaseIterable, Identifiable, Se
 public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var title: String
+    public var isTitleManuallySet = false
     public var harness: HarnessID
     public var workingDirectory: String
     public var remoteSessionID: String?
@@ -72,12 +73,13 @@ public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
 
     public var agentSettings = AgentSettings()
 
-    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned, conversationUsage, lastCompaction, lastVisitedAt, lastActivityAt, unreadCompletedAt }
+    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, isTitleManuallySet, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned, conversationUsage, lastCompaction, lastVisitedAt, lastActivityAt, unreadCompletedAt }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
         agentSettings = try values.decodeIfPresent(AgentSettings.self, forKey: .agentSettings) ?? AgentSettings()
         title = try values.decode(String.self, forKey: .title)
+        isTitleManuallySet = try values.decodeIfPresent(Bool.self, forKey: .isTitleManuallySet) ?? false
         harness = try values.decode(HarnessID.self, forKey: .harness)
         workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
         remoteSessionID = try values.decodeIfPresent(String.self, forKey: .remoteSessionID)

@@ -23,7 +23,7 @@ extension AppTheme {
     var red: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.red)) } ?? .red }
     var yellow: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.yellow)) } ?? .orange }
     var selection: Color { Color(nsColor: selectionColor) }
-    var selectionColor: NSColor { palette.map { NSColor(themeHex: $0.overlay2).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor }
+    var selectionColor: NSColor { palette.map { NSColor(themeHex: $0.selectionBackground).withAlphaComponent($0.selectionOpacity) } ?? .selectedTextBackgroundColor }
     var cursorColor: NSColor { palette.map { NSColor(themeHex: $0.rosewater) } ?? .textColor }
     var onAccent: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.base)) } ?? .white }
     var border: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.overlay0)) } ?? Color.primary.opacity(0.12) }

@@ -32,13 +32,20 @@ enum ReviewSyntax {
             }
             for (range, hex) in spans {
                 // System appearance also benefits from lexical isolation, using native colors.
-                if let hex { result.addAttribute(.foregroundColor, value: NativeDiffView.color(hex, fallback: .labelColor), range: NSRange(location: segment.contentRange.location + range.location, length: range.length)) }
+                if let hex {
+                    let target = NSRange(location: segment.contentRange.location + range.location, length: range.length)
+                    result.addAttribute(.foregroundColor, value: NativeDiffView.color(hex, fallback: .labelColor), range: target)
+                    if theme == .dracula && (hex == theme.syntax?.comment || hex == theme.palette?.accent) {
+                        let font = NSFontManager.shared.convert(NSFont.monospacedSystemFont(ofSize: 14, weight: .regular), toHaveTrait: .italicFontMask)
+                        result.addAttribute(.font, value: font, range: target)
+                    }
+                }
             }
         }
     }
 
     private static func scan(_ text: String, state: inout State, python: Bool, json: Bool, theme: AppTheme) -> [(NSRange, String?)] {
-        let source = text as NSString, p = theme.palette
+        let source = text as NSString, p = theme.palette, colors = theme.syntax
         var offset = 0, spans: [(NSRange, String?)] = []
         func append(_ range: NSRange, _ color: String?) { spans.append((range, color)) }
         func nextCharacter() -> unichar? {
@@ -47,8 +54,8 @@ enum ReviewSyntax {
             return index < source.length ? source.character(at: index) : nil
         }
         func string(_ range: NSRange) {
-            append(range, p?.green)
-            for escape in escapes.matches(in: text, range: range) { append(escape.range, p?.pink) }
+            append(range, colors?.string)
+            for escape in escapes.matches(in: text, range: range) { append(escape.range, colors?.escape) }
         }
         while offset < source.length {
             let remaining = NSRange(location: offset, length: source.length - offset)
@@ -58,7 +65,7 @@ enum ReviewSyntax {
                 let nested = open.location != NSNotFound && (close.location == NSNotFound || open.location < close.location)
                 let boundary = nested ? open : close
                 let end = boundary.location == NSNotFound ? source.length : NSMaxRange(boundary)
-                append(NSRange(location: offset, length: end - offset), p?.overlay2)
+                append(NSRange(location: offset, length: end - offset), colors?.comment)
                 if boundary.location != NSNotFound { state.blockDepth += nested ? 1 : -1 }
                 offset = end; continue
             }
@@ -78,21 +85,22 @@ enum ReviewSyntax {
             let value = source.substring(with: match.range)
             offset = NSMaxRange(match.range)
             let color: String?
-            if !python && value == "/*" { state.blockDepth = 1; color = p?.overlay2 }
-            else if (!python && value.hasPrefix("//")) || (python && value.hasPrefix("#")) { color = p?.overlay2 }
-            else if value == "\"\"\"" || (python && value == "'''") || (!python && value == "`") { state.stringDelimiter = value; color = p?.green }
+            if !python && value == "/*" { state.blockDepth = 1; color = colors?.comment }
+            else if (!python && value.hasPrefix("//")) || (python && value.hasPrefix("#")) { color = colors?.comment }
+            else if value == "\"\"\"" || (python && value == "'''") || (!python && value == "`") { state.stringDelimiter = value; color = colors?.string }
             else if value.hasPrefix("\"") || value.hasPrefix("'") {
-                if json && nextCharacter() == 58 { color = p?.blue }
+                if json && nextCharacter() == 58 { color = colors?.key }
                 else { string(match.range); continue }
             }
-            else if value.first?.isNumber == true { color = p?.peach }
-            else if ["true", "false", "nil", "null", "None", "True", "False"].contains(value) { color = p?.peach }
-            else if keywords.contains(value) { color = p?.accent ?? "af52de" }
+            else if value.first?.isNumber == true { color = colors?.number }
+            else if ["true", "false", "nil", "null", "None", "True", "False"].contains(value) { color = colors?.number }
+            else if theme == .dracula && ["this", "self", "super"].contains(value) { color = p?.accent }
+            else if keywords.contains(value) { color = colors?.keyword ?? "af52de" }
             else if value.first?.isLetter == true || value.hasPrefix("_") {
-                color = nextCharacter() == 40 ? p?.blue : nil
+                color = nextCharacter() == 40 ? colors?.function : nil
             }
-            else if value.rangeOfCharacter(from: CharacterSet(charactersIn: "{}[](),;.:")) != nil { color = p?.overlay2 }
-            else { color = p?.sky }
+            else if value.rangeOfCharacter(from: CharacterSet(charactersIn: "{}[](),;.:")) != nil { color = colors?.punctuation }
+            else { color = colors?.operatorColor }
             append(match.range, color)
         }
         return spans

@@ -24,10 +24,10 @@ struct ChatPane: View {
                 HStack {
                     Image(systemName: "bubble.left.and.text.bubble.right"); Text(thread.harness.title).fontWeight(.medium)
                     Spacer()
-                    Button { showingUsage.toggle() } label: { Image(systemName: "chart.bar") }
+                    Button { showingUsage.toggle() } label: { Image(systemName: "chart.bar.xaxis") }
                         .buttonStyle(HoverButtonStyle()).accessibilityLabel("Account usage limits").help("Account usage limits")
                         .popover(isPresented: $showingUsage, arrowEdge: .top) { usageView(thread).id(store.usageKey(thread)) }
-                    if store.running.contains(thread.id) { ProgressView().controlSize(.small) } else { Text("Local").foregroundStyle(theme.secondary) }
+                    if store.running.contains(thread.id) { ProgressView().controlSize(.small) }
                 }.font(.system(size: 15)).padding(13)
                 Divider()
                 findBar.frame(height: store.findingThread ? 50 : 0).clipped()
@@ -312,7 +312,10 @@ struct ChatPane: View {
                 }
                 if let error = store.usageErrors[key] { Text(error).font(.caption).foregroundStyle(theme.secondary) }
                 HStack {
-                    Button("Refresh usage") { Task { await store.loadUsage(thread) } }.disabled(store.loadingUsage.contains(key))
+                    Button { Task { await store.loadUsage(thread) } } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }.hoverFeedback().help("Refresh usage").accessibilityLabel("Refresh usage")
+                        .disabled(store.loadingUsage.contains(key))
                     if store.loadingUsage.contains(key) { ProgressView().controlSize(.small) }
                 }
             }

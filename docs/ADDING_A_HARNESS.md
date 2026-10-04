@@ -24,3 +24,7 @@ Extend the existing adapter; no plugin framework or SwiftUI provider switch is n
 7. Record selected-executable schema/version evidence and explicit experimental opt-ins. Add fake-process fixtures for the supported schemas and lifecycle, including app identity and each access scope. Test concurrency, malformed constraints, provider resolution and backward-compatible persistence. Native fixture smoke tests must use a separate app identity/archive and no real authorization changes.
 
 See [the current Codex bridge and protocol references](CLI_MCP.md). `Scripts/fixtures/codex-interactions.py` is an offline app-server stand-in, not an MCP server or model. Claude's inherited print workflow remains unchanged; it must not advertise interactive forms until its adapter implements and verifies a corresponding provider protocol.
+
+## Optional chat titles
+
+Register an optional `ThreadTitleConfiguration` (model and reasoning effort) and generation implementation in `HarnessRegistry`; leave configuration nil to retain first-message titles. Provider wire formats and model choices belong in OctoAgents. Return a validated short title or nil on unavailable capability, preserve managed permissions, use bounded cancellable processes, and keep this auxiliary request separate from the conversation session. Tests must inject a generator or use an offline executable. AppStore owns fallback, persistence, manual-rename protection and cancellation; views only render the title and hover scrolling. Codex currently configures `gpt-6-luna` / `low`; Claude has no title generator yet.

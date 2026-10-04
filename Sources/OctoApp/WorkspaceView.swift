@@ -31,7 +31,7 @@ struct WorkspaceView: View {
             let layout = layout(at: geometry.size.width)
             ZStack(alignment: .leading) {
                 VStack(spacing: 0) {
-                    titlebar
+                    titlebar(showSidebarToggle: !layout.sidebarVisible)
                     Divider()
                     ZStack {
                         threadWorkspace.opacity(store.showingTerminal ? 0 : 1).allowsHitTesting(!store.showingTerminal).accessibilityHidden(store.showingTerminal)
@@ -52,7 +52,7 @@ struct WorkspaceView: View {
                         Text("Octo").font(.headline)
                         Spacer()
                         Button(action: toggleSidebar) { Image(systemName: "sidebar.left") }
-                            .hoverFeedback().help("Hide sidebar (⌘B)").accessibilityLabel("Hide sidebar")
+                            .hoverFeedback().shortcutHint("sidebar").help("Hide sidebar (⌘B)").accessibilityLabel("Hide sidebar")
                     }.padding(12)
                     sidebar
                 }
@@ -161,10 +161,12 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         ProjectSidebar(store: store, switchProject: { NativeWorkspaceFocus.clear(); palette = .projects }, didNavigate: { compactSidebarOpen = false })
     }
-    private var titlebar: some View {
+    private func titlebar(showSidebarToggle: Bool) -> some View {
         HStack {
-            Button(action: toggleSidebar) { Image(systemName: "sidebar.left") }
-                .hoverFeedback().shortcutHint("sidebar").help("Toggle sidebar (⌘B)").accessibilityLabel("Toggle sidebar")
+            if showSidebarToggle {
+                Button(action: toggleSidebar) { Image(systemName: "sidebar.left") }
+                    .hoverFeedback().shortcutHint("sidebar").help("Show sidebar (⌘B)").accessibilityLabel("Show sidebar")
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.showingTerminal ? "\(store.project?.name ?? "Octo") · Terminal" : store.thread?.title ?? "Welcome to Octo").font(.headline).lineLimit(1)
                 Text(store.showingTerminal ? "Project terminal workspace" : "\(store.project?.name ?? "Local development")  /  \(review.branch)").font(.system(size: 13)).foregroundStyle(theme.secondary).lineLimit(1).truncationMode(.middle)
@@ -375,7 +377,7 @@ private struct ProjectSidebar: View {
                                     .font(.system(size: 12)).foregroundStyle(theme.secondary).padding(8)
                             }
                             ForEach(store.archive.recentThreads) { entry in
-                                SidebarThreadRow(thread: entry.thread, projectName: entry.project.name,
+                                SidebarThreadRow(thread: entry.thread, projectName: entry.project.name, showsProjectName: true,
                                                  running: store.running.contains(entry.id),
                                                  selected: store.archive.selectedThreadID == entry.id && !store.showingTerminal,
                                                  select: { didNavigate(); store.selectThread(entry.thread, project: entry.project) },
@@ -469,7 +471,7 @@ private struct ProjectSidebar: View {
                                     .help("\(unread) completed, unread \(unread == 1 ? "thread" : "threads")")
                             }
                             if project.isPinned { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(theme.secondary) }
-                        }.font(.system(size: 15, weight: .semibold)).padding(.horizontal, 10)
+                        }.font(.system(size: 14, weight: .semibold)).padding(.horizontal, 10)
                             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(HoverButtonStyle(padded: false, selected: store.project?.id == project.id && project.isCollapsed)).help(project.rootPath)
                         .accessibilityLabel("\(project.isCollapsed ? "Expand" : "Collapse") \(project.name)")
@@ -482,7 +484,7 @@ private struct ProjectSidebar: View {
                 if !project.isCollapsed {
                     VStack(spacing: 3) {
                         ForEach(project.orderedThreads) { thread in
-                            SidebarThreadRow(thread: thread, running: store.running.contains(thread.id),
+                            SidebarThreadRow(thread: thread, projectName: project.name, running: store.running.contains(thread.id),
                                              selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
                                              select: { didNavigate(); store.selectThread(thread, project: project) },
                                              togglePin: { store.toggleThreadPin(thread.id) })
@@ -524,9 +526,107 @@ private struct ProjectSidebar: View {
     }
 }
 
+/// Animation stays in Core Animation; it never drives SwiftUI layout on every frame.
+private struct HoverScrollingTitle: NSViewRepresentable {
+    let title: String
+    let hovering: Bool
+    let weight: Font.Weight
+    @Environment(\.octoTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
+    func makeNSView(context: Context) -> MarqueeTitleView { MarqueeTitleView() }
+    func updateNSView(_ view: MarqueeTitleView, context: Context) {
+        view.update(title: title, emphasized: weight == .semibold, color: theme.textColor,
+                    animate: hovering && !reduceMotion && phase == .active)
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: MarqueeTitleView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? nsView.textWidth, height: 18)
+    }
+    static func dismantleNSView(_ view: MarqueeTitleView, coordinator: ()) { view.stopAnimation() }
+}
+
+final class MarqueeTitleView: NSView {
+    // Own the text layer directly: translating an NSTextField's backing layer can
+    // slide its AppKit-clipped backing contents out of view instead of revealing text.
+    private let textLayer = CATextLayer()
+    private var title = "", emphasized = false, animate = false
+    private var renderedSize: CGSize?
+    private(set) var textWidth: CGFloat = 0
+    var isAnimating: Bool { textLayer.animation(forKey: "marquee") != nil }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true; layer?.masksToBounds = true
+        textLayer.isWrapped = false
+        layer?.addSublayer(textLayer)
+    }
+    required init?(coder: NSCoder) { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    func update(title: String, emphasized: Bool, color: NSColor, animate: Bool) {
+        let displayed = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let changed = self.title != displayed || self.emphasized != emphasized || self.animate != animate
+        let font = NSFont.systemFont(ofSize: 14, weight: emphasized ? .semibold : .regular)
+        let text = NSAttributedString(string: displayed, attributes: [.font: font, .foregroundColor: color])
+        if !(textLayer.string as? NSAttributedString == text) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            textLayer.font = font
+            textLayer.fontSize = font.pointSize
+            textLayer.foregroundColor = color.cgColor
+            textLayer.string = text
+            CATransaction.commit()
+        }
+        guard changed else { return }
+        self.title = displayed; self.emphasized = emphasized; self.animate = animate
+        textWidth = ceil(text.size().width) + 2
+        renderedSize = nil; needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        guard renderedSize != bounds.size else { return }
+        renderedSize = bounds.size
+        textLayer.removeAnimation(forKey: "marquee")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textLayer.transform = CATransform3DIdentity
+        let overflow = max(0, textWidth - bounds.width)
+        let moving = animate && overflow > 1 && window != nil
+        textLayer.contentsScale = window?.backingScaleFactor ?? 2
+        textLayer.truncationMode = moving ? .none : .end
+        textLayer.frame = NSRect(x: 0, y: max(0, (bounds.height - 18) / 2), width: moving ? textWidth : bounds.width, height: 18)
+        textLayer.transform = CATransform3DMakeTranslation(moving ? -overflow : 0, 0, 0)
+        CATransaction.commit()
+        guard moving else { return }
+        let travel = Double(overflow) / 30, duration = 1 + travel
+        // Keep the final position in the model layer after the one-shot animation ends.
+        let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        animation.values = [0, 0, -overflow]
+        animation.keyTimes = [0, NSNumber(value: 1 / duration), 1]
+        animation.duration = duration
+        textLayer.add(animation, forKey: "marquee")
+    }
+    func stopAnimation() {
+        textLayer.removeAnimation(forKey: "marquee")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textLayer.transform = CATransform3DIdentity
+        CATransaction.commit()
+        animate = false; renderedSize = nil; needsLayout = true
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { stopAnimation() }
+        else { renderedSize = nil; needsLayout = true }
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        textLayer.contentsScale = window?.backingScaleFactor ?? 2
+    }
+}
+
 private struct SidebarThreadRow: View {
     let thread: WorkspaceThread
-    var projectName: String? = nil
+    let projectName: String
+    var showsProjectName = false
     let running: Bool
     let selected: Bool
     let select: () -> Void
@@ -534,30 +634,31 @@ private struct SidebarThreadRow: View {
     @Environment(\.octoTheme) private var theme
     @State private var hovering = false
     @FocusState private var pinFocused: Bool
+    private var showsPin: Bool { hovering || thread.isPinned || pinFocused }
 
     var body: some View {
-        HStack(spacing: 0) {
+        ZStack(alignment: .trailing) {
             Button(action: select) {
                 HStack(spacing: 9) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(thread.title).fontWeight(thread.hasUnreadCompletion ? .semibold : .regular).lineLimit(1)
-                        if let projectName {
+                        HoverScrollingTitle(title: thread.title, hovering: hovering, weight: thread.hasUnreadCompletion ? .semibold : .regular)
+                        if showsProjectName {
                             Text(projectName).font(.system(size: 11)).foregroundStyle(theme.secondary).lineLimit(1)
                         }
-                    }.padding(.vertical, projectName == nil ? 0 : 5)
-                    Spacer(minLength: 0)
+                    }.padding(.vertical, showsProjectName ? 5 : 0)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     if running { WorkingIndicator().frame(width: 16, height: 16).accessibilityHidden(true) }
                     else if thread.hasUnreadCompletion {
                         Label("New", systemImage: "checkmark.circle.fill")
                             .font(.system(size: 10, weight: .semibold)).foregroundStyle(theme.accent)
                             .fixedSize().help("Finished — unread")
-                    } else {
-                        Color.clear.frame(width: 16, height: 16)
                     }
                 }.font(.system(size: 14)).padding(.leading, 10).padding(.trailing, 6)
                     .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(HoverButtonStyle(padded: false)).help(thread.title + (thread.hasUnreadCompletion ? " — Finished, unread" : ""))
-                .accessibilityLabel(thread.title + (projectName.map { ", \($0)" } ?? ""))
+            }.buttonStyle(HoverButtonStyle(padded: false))
+                .padding(.trailing, showsPin ? 32 : 0)
+                .accessibilityLabel(thread.title + ", " + projectName)
+                .accessibilityHint("Last activity " + ThreadHoverDetails.activityDate(thread).formatted())
                 .accessibilityValue(running ? "Working" : thread.hasUnreadCompletion ? "Finished, unread" : "Read")
             Button(action: togglePin) {
                 Image(systemName: thread.isPinned ? "pin.fill" : "pin")
@@ -565,12 +666,169 @@ private struct SidebarThreadRow: View {
                     .frame(width: 28, height: 30)
             }.buttonStyle(HoverButtonStyle(padded: false))
                 .focused($pinFocused)
-                .opacity(hovering || thread.isPinned || pinFocused ? 1 : 0)
+                .opacity(showsPin ? 1 : 0)
+                .allowsHitTesting(showsPin)
                 .help(thread.isPinned ? "Unpin thread" : "Pin thread")
                 .accessibilityLabel("\(thread.isPinned ? "Unpin" : "Pin") \(thread.title)")
                 .padding(.trailing, 4)
         }.background(selected ? theme.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle()).onHover { hovering = $0 }
+            .contentShape(Rectangle())
+            .background(ThreadHoverAnchor(thread: thread, projectName: projectName, theme: theme, onHover: { hovering = $0 }))
+    }
+}
+
+enum ThreadHoverDetails {
+    static func activityDate(_ thread: WorkspaceThread) -> Date {
+        max(thread.createdAt, thread.lastActivityAt ?? .distantPast,
+            thread.messages.last.map { $0.completedAt ?? $0.createdAt } ?? .distantPast)
+    }
+    static func age(since date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "now" }
+        if seconds < 3_600 { return "\(Int(seconds / 60))m" }
+        if seconds < 86_400 { return "\(Int(seconds / 3_600))h" }
+        if seconds < 31_536_000 { return "\(Int(seconds / 86_400))d" }
+        return "\(Int(seconds / 31_536_000))y"
+    }
+}
+
+struct ThreadHoverContent: Equatable {
+    let title: String
+    let projectName: String
+    let activityDate: Date
+    let theme: AppTheme
+}
+
+/// Native labels avoid a second SwiftUI graph feeding layout/hover invalidations
+/// back into the sidebar. Only display metadata crosses this boundary.
+final class ThreadHoverCardView: NSView {
+    private let titleLabel = NSTextField(wrappingLabelWithString: "")
+    private let ageLabel = NSTextField(labelWithString: "")
+    private let projectLabel = NSTextField(labelWithString: "")
+    private let folder = NSImageView()
+    init(content: ThreadHoverContent, now: Date = Date()) {
+        super.init(frame: .zero)
+        wantsLayer = true; layer?.cornerRadius = 12; layer?.borderWidth = 1
+        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        ageLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        projectLabel.font = .systemFont(ofSize: 13); projectLabel.lineBreakMode = .byTruncatingTail
+        folder.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Project")
+        [titleLabel, ageLabel, projectLabel, folder].forEach(addSubview)
+        update(content, now: now)
+    }
+    required init?(coder: NSCoder) { nil }
+    func update(_ content: ThreadHoverContent, now: Date = Date()) {
+        titleLabel.stringValue = content.title
+        ageLabel.stringValue = ThreadHoverDetails.age(since: content.activityDate, now: now)
+        projectLabel.stringValue = content.projectName
+        let theme = content.theme
+        titleLabel.textColor = theme.textColor
+        let secondary = theme.palette.map { NSColor(themeHex: $0.secondary) } ?? .secondaryLabelColor
+        ageLabel.textColor = secondary; projectLabel.textColor = secondary; folder.contentTintColor = secondary
+        layer?.backgroundColor = (theme.palette.map { NSColor(themeHex: $0.base) } ?? .windowBackgroundColor).cgColor
+        layer?.borderColor = (theme.palette.map { NSColor(themeHex: $0.overlay0).withAlphaComponent(0.5) } ?? .separatorColor).cgColor
+        let ageWidth = ceil(ageLabel.fittingSize.width), titleWidth = 320 - 24 - 14 - ageWidth
+        let titleHeight = max(18, ceil(titleLabel.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: titleWidth, height: 10_000)).height))
+        frame.size = NSSize(width: 320, height: titleHeight + 50)
+        titleLabel.frame = NSRect(x: 12, y: 38, width: titleWidth, height: titleHeight)
+        ageLabel.frame = NSRect(x: 308 - ageWidth, y: frame.height - 29, width: ageWidth, height: 17)
+        folder.frame = NSRect(x: 12, y: 12, width: 16, height: 17)
+        projectLabel.frame = NSRect(x: 36, y: 12, width: 272, height: 17)
+    }
+}
+
+private struct ThreadHoverAnchor: NSViewRepresentable {
+    let thread: WorkspaceThread
+    let projectName: String
+    let theme: AppTheme
+    let onHover: (Bool) -> Void
+    func makeNSView(context: Context) -> ThreadHoverAnchorView { ThreadHoverAnchorView() }
+    func updateNSView(_ view: ThreadHoverAnchorView, context: Context) {
+        view.onHover = onHover
+        view.update(content: .init(title: thread.title, projectName: projectName,
+                                   activityDate: ThreadHoverDetails.activityDate(thread), theme: theme))
+    }
+    static func dismantleNSView(_ view: ThreadHoverAnchorView, coordinator: ()) { view.dismiss() }
+}
+
+final class ThreadHoverAnchorView: NSView {
+    var onHover: ((Bool) -> Void)?
+    private var tracking: NSTrackingArea?
+    private var hovered = false
+    private var hoverRevision = 0
+    private(set) var panel: NSPanel?
+    private var content: ThreadHoverContent?
+    private var eventMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window == nil { dismiss() } }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        // inVisibleRect follows geometry automatically. Replacing this area on every
+        // layout synthesizes exit/enter events and can feed back into SwiftUI layout.
+        guard tracking == nil else { return }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area); tracking = area
+    }
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseMoved(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { dismiss() }
+    func update(content: ThreadHoverContent) {
+        guard self.content != content else { return }
+        self.content = content
+        if let card = panel?.contentView as? ThreadHoverCardView {
+            card.update(content); panel?.setContentSize(card.frame.size)
+        }
+    }
+    func setHovered(_ hovering: Bool) {
+        guard hovering != hovered else { return }
+        dismiss()
+        guard hovering else { return }
+        hovered = true; publishHover()
+        observeDismissal()
+    }
+    private func publishHover() {
+        hoverRevision += 1
+        let revision = hoverRevision
+        // Tracking callbacks can run during native layout. Never mutate SwiftUI state
+        // synchronously from them, and drop queued transitions superseded by an exit.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.hoverRevision == revision else { return }
+            self.onHover?(self.hovered)
+            if self.hovered { self.present() }
+        }
+    }
+    private func present() {
+        guard panel == nil, hovered, let content, let window, window.isKeyWindow, !visibleRect.isEmpty,
+              let screen = window.screen else { return }
+        let card = ThreadHoverCardView(content: content)
+        let size = card.frame.size
+        let anchor = window.convertToScreen(convert(bounds, to: nil))
+        let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        let x = min(max(visible.minX, anchor.maxX + 8), visible.maxX - size.width)
+        let y = min(max(visible.minY, anchor.midY - size.height / 2), visible.maxY - size.height)
+        let panel = NSPanel(contentRect: NSRect(origin: NSPoint(x: x, y: y), size: size),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false; panel.isOpaque = false; panel.backgroundColor = .clear
+        panel.hasShadow = true; panel.ignoresMouseEvents = true; panel.hidesOnDeactivate = true
+        panel.contentView = card; self.panel = panel
+        window.addChildWindow(panel, ordered: .above); panel.orderFront(nil)
+    }
+    private func observeDismissal() {
+        guard let window else { return }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] event in
+            self?.dismiss(); return event
+        }
+        resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+            self?.dismiss()
+        }
+    }
+    func dismiss() {
+        if hovered { hovered = false; publishHover() }
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor); self.eventMonitor = nil }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver); self.resignObserver = nil }
+        // Clear ownership before closing, since AppKit can deliver callbacks while closing.
+        if let old = panel { panel = nil; old.parent?.removeChildWindow(old); old.orderOut(nil); old.close() }
     }
 }
 

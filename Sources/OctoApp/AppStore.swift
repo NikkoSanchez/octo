@@ -74,6 +74,10 @@ import OctoTerminal
     let git = GitService()
     private let storage: WorkspaceStore
     private var canSave = true
+    typealias TitleGenerator = @MainActor (HarnessID, String, URL?) async throws -> String?
+    private let titleGenerator: TitleGenerator
+    private var titleTasks: [UUID: Task<Void, Never>] = [:]
+    private var titleRequests: [UUID: UUID] = [:]
     private var harnesses: [UUID: any AgentHarness] = [:]
     private var turnClocks: [UUID: TimeInterval] = [:]
     private var runIDs: [UUID: UUID] = [:]
@@ -84,7 +88,9 @@ import OctoTerminal
     private var pendingTextBytes = 0
     var project: WorkspaceProject? { archive.projects.first { $0.id == archive.selectedProjectID } }
     var thread: WorkspaceThread? { project?.threads.first { $0.id == archive.selectedThreadID } }
-    init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard) {
+    init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard,
+         titleGenerator: @escaping TitleGenerator = { try await HarnessRegistry.generateTitle($0, text: $1, codexExecutable: $2) }) {
+        self.titleGenerator = titleGenerator
         self.storage = storage; self.preferences = preferences
         theme = AppTheme(rawValue: preferences.string(forKey: "appearanceTheme") ?? "") ?? .system
         terminal.applyTheme(theme)
@@ -235,10 +241,12 @@ import OctoTerminal
     func renameThread(_ id: UUID, title: String) {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
-        mutate(id) { $0.title = title }
+        cancelTitle(id)
+        mutate(id) { $0.title = title; $0.isTitleManuallySet = true }
     }
     func deleteThread(_ id: UUID, projectID: UUID) {
         guard !running.contains(id) else { error = "Stop the running agent before deleting this thread."; return }
+        cancelTitle(id)
         harnesses.removeValue(forKey: id)?.shutdown()
         drafts[id] = nil; draftImages[id] = nil; attachments[id] = nil; approvals[id] = nil; interactions[id] = nil
         archive.removeThread(id, projectID: projectID); saveSoon()
@@ -279,6 +287,7 @@ import OctoTerminal
         }
         // Idle connections must be recreated with the same binary used by discovery.
         for thread in archive.projects.flatMap(\.threads) where thread.harness == .codex {
+            cancelTitle(thread.id)
             harnesses.removeValue(forKey: thread.id)?.shutdown()
         }
         codexExecutablePath = path
@@ -415,8 +424,8 @@ import OctoTerminal
         guard !text.isEmpty || !images.isEmpty else { return }
         let id = thread.id
         let prompt = text + (selections.isEmpty ? "" : "\n\nSelected code context (captured snapshots):\n" + selections.map(\.promptContext).joined(separator: "\n\n"))
+        prepareThreadTitle(thread, text: text)
         mutate(id) {
-            if $0.messages.isEmpty && $0.title == "New thread" { $0.title = text.isEmpty ? "Screenshot discussion" : String(text.prefix(52)) }
             $0.messages.append(ChatMessage(role: .user, text: text, attachments: selections, images: images))
         }
         drafts[id] = ""; attachments[id] = []; draftImages[id] = []; beginWork(id)
@@ -430,6 +439,30 @@ import OctoTerminal
             do { try await harness.send(prompt: prompt, sessionID: thread.remoteSessionID, directory: thread.workingDirectory, settings: thread.agentSettings, images: images) }
             catch { if runIDs[id] == runID { receive(.failed(error.localizedDescription), threadID: id) } }
         }
+    }
+    /// Called only on explicit send; opening saved chats never makes a title request.
+    func prepareThreadTitle(_ thread: WorkspaceThread, text: String) {
+        guard thread.messages.isEmpty, thread.title == "New thread", !thread.isTitleManuallySet else { return }
+        let fallback = text.isEmpty ? "Screenshot discussion" : String(text.prefix(52))
+        mutate(thread.id) { $0.title = fallback }
+        guard !text.isEmpty, HarnessRegistry.titleConfiguration(thread.harness) != nil else { return }
+        cancelTitle(thread.id)
+        let request = UUID(), executable = codexExecutable, generate = titleGenerator
+        titleRequests[thread.id] = request
+        titleTasks[thread.id] = Task { [weak self] in
+            let result = try? await generate(thread.harness, String(text.prefix(4_000)), executable)
+            guard !Task.isCancelled, let self, self.titleRequests[thread.id] == request else { return }
+            self.titleTasks[thread.id] = nil; self.titleRequests[thread.id] = nil
+            guard let result, let title = ThreadTitles.validated(result) else { return }
+            self.mutate(thread.id) {
+                guard !$0.isTitleManuallySet, $0.title == fallback, $0.harness == thread.harness else { return }
+                $0.title = title
+            }
+        }
+    }
+    private func cancelTitle(_ id: UUID) {
+        titleRequests[id] = nil
+        titleTasks.removeValue(forKey: id)?.cancel()
     }
     func beginWork(_ id: UUID) {
         guard !running.contains(id) else { return }
@@ -460,6 +493,7 @@ import OctoTerminal
         }
     }
     func stop(_ id: UUID) {
+        cancelTitle(id)
         guard running.contains(id) else { return }
         flushStreamText()
         endCompaction(id)
@@ -607,6 +641,7 @@ import OctoTerminal
         }
     }
     func shutdown() {
+        for id in Array(titleTasks.keys) { cancelTitle(id) }
         flushStreamText()
         for id in Array(turnClocks.keys) { finishWork(id, outcome: .interrupted) }
         harnesses.values.forEach { $0.shutdown() }; saveTask?.cancel(); saveNow()

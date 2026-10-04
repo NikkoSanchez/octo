@@ -75,7 +75,7 @@ public struct NativeDiffView: NSViewRepresentable {
         text.theme = theme
         text.backgroundColor = color(theme.palette?.base, fallback: .textBackgroundColor)
         text.insertionPointColor = color(theme.palette?.rosewater, fallback: .labelColor)
-        let selectionColor = theme.palette.map { color($0.overlay2, fallback: .selectedTextBackgroundColor).withAlphaComponent(0.25) } ?? .selectedTextBackgroundColor
+        let selectionColor = theme.palette.map { color($0.selectionBackground, fallback: .selectedTextBackgroundColor).withAlphaComponent($0.selectionOpacity) } ?? .selectedTextBackgroundColor
         text.selectedTextAttributes = [.backgroundColor: selectionColor, .foregroundColor: color(theme.palette?.text, fallback: .selectedTextColor)]
     }
     public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -111,7 +111,7 @@ public struct NativeDiffView: NSViewRepresentable {
             if segment.line.kind == .header {
                 let line = segment.line.text
                 let hex = line.hasPrefix("@@") ? theme.palette?.peach : line.hasPrefix("diff ") ? theme.palette?.blue : (line.hasPrefix("---") || line.hasPrefix("+++")) ? theme.palette?.pink : theme.palette?.overlay2
-                result.addAttribute(.foregroundColor, value: color(hex, fallback: .secondaryLabelColor), range: segment.contentRange)
+                result.addAttribute(.foregroundColor, value: color(theme == .dracula ? theme.syntax?.comment : hex, fallback: .secondaryLabelColor), range: segment.contentRange)
             }
         }
         ReviewSyntax.apply(to: result, document: document, theme: theme)
@@ -284,7 +284,8 @@ final class ReviewTextView: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if let hoveredLineRect {
-            NativeDiffView.color(theme.palette?.text, fallback: .labelColor).withAlphaComponent(0.10).setFill()
+            NativeDiffView.color(theme == .dracula ? theme.syntax?.comment : theme.palette?.text, fallback: .labelColor)
+                .withAlphaComponent(theme == .dracula ? 0.25 : 0.10).setFill()
             hoveredLineRect.intersection(dirtyRect).fill()
         }
     }

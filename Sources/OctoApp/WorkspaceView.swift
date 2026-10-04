@@ -26,7 +26,6 @@ struct WorkspaceView: View {
     @Environment(\.openSettings) private var openSettings
     @Environment(\.octoTheme) private var theme
     @Environment(\.scenePhase) private var phase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geometry in
             let layout = layout(at: geometry.size.width)
@@ -39,7 +38,7 @@ struct WorkspaceView: View {
                             threadWorkspace.opacity(store.showingTerminal ? 0 : 1).allowsHitTesting(!store.showingTerminal).accessibilityHidden(store.showingTerminal)
                             TerminalPane(store: store, terminal: store.terminal, visible: store.showingTerminal && !layout.overlayVisible)
                                 .background(theme.background)
-                                .modifier(PanelSlide(y: store.showingTerminal ? 0 : contentGeometry.size.height, visible: store.showingTerminal))
+                                .offset(y: store.showingTerminal ? 0 : contentGeometry.size.height)
                                 .allowsHitTesting(store.showingTerminal).accessibilityHidden(!store.showingTerminal)
                         }
                         .clipped()
@@ -47,13 +46,11 @@ struct WorkspaceView: View {
                 }
                 .frame(height: geometry.size.height).background(theme.background)
                 .modifier(PanelFrame(width: layout.detailWidth, x: layout.detailOffset))
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: layout.sidebarVisible)
                 .allowsHitTesting(!layout.overlayVisible).accessibilityHidden(layout.overlayVisible)
 
                 Color.black.opacity(layout.overlayVisible ? 0.2 : 0)
                     .contentShape(Rectangle()).onTapGesture { closeCompactSidebar() }
                     .allowsHitTesting(layout.overlayVisible).accessibilityHidden(true)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: layout.overlayVisible)
 
                 VStack(spacing: 0) {
                     HStack {
@@ -65,7 +62,7 @@ struct WorkspaceView: View {
                     sidebar
                 }
                 .frame(width: layout.sidebarWidth, height: geometry.size.height).background(theme.panel).clipped()
-                .modifier(PanelSlide(x: layout.sidebarVisible ? 0 : -layout.sidebarWidth - 7, visible: layout.sidebarVisible))
+                .offset(x: layout.sidebarVisible ? 0 : -layout.sidebarWidth - 7)
                 .allowsHitTesting(layout.sidebarVisible).accessibilityHidden(!layout.sidebarVisible)
 
                 ResizeHandle(enabled: layout.sidebarVisible && !layout.compact, color: NSColor(theme.border), activeColor: NSColor(theme.activeBorder), onDrag: { translation in
@@ -74,7 +71,7 @@ struct WorkspaceView: View {
                 }, onEnd: { sidebarDragStart = nil })
                     .frame(width: 7)
                     .opacity(layout.sidebarVisible && !layout.compact ? 1 : 0)
-                    .modifier(PanelSlide(x: layout.sidebarVisible ? layout.sidebarWidth : -7, visible: layout.sidebarVisible))
+                    .offset(x: layout.sidebarVisible ? layout.sidebarWidth : -7)
                     .accessibilityHidden(!layout.sidebarVisible || layout.compact)
                     .accessibilityLabel("Resize sidebar")
                     .accessibilityValue("\(Int(sidebarWidth)) points")
@@ -981,7 +978,6 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
     @ViewBuilder var trailing: () -> Trailing
     @State private var fraction: CGFloat?
     @State private var dragStart: CGFloat?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
@@ -1018,36 +1014,16 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
             // must cover both columns, not just the wider individual child.
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
             .clipped()
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: trailingVisible)
         }
     }
 }
 
-/// Recompute layout proposals at the interpolated width. Animating a plain frame
-/// can animate its drawing while native descendants receive only the final size.
-struct PanelFrame: AnimatableModifier {
+/// Apply the destination geometry immediately while keeping native descendants mounted.
+struct PanelFrame: ViewModifier {
     var width: CGFloat
     var x: CGFloat = 0
-    var animatableData: AnimatablePair<CGFloat, CGFloat> {
-        get { AnimatablePair(width, x) }
-        set { width = newValue.first; x = newValue.second }
-    }
     func body(content: Content) -> some View {
-        content.transaction { $0.animation = nil }.frame(width: width).clipped().offset(x: x)
-    }
-}
-
-/// Size and position share the visibility transaction, so adjacent content
-/// expands continuously with the panel. Divider drags remain immediate.
-struct PanelSlide: ViewModifier {
-    var x: CGFloat = 0
-    var y: CGFloat = 0
-    let visible: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        content.offset(x: x, y: y)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: visible)
+        content.frame(width: width).clipped().offset(x: x)
     }
 }
 

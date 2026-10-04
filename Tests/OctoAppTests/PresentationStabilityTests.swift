@@ -77,7 +77,7 @@ import OctoCore
         }
     }
 
-    func testReviewToggleInterpolatesChatWidthAndPreservesFullClip() async throws {
+    func testReviewToggleImmediatelyResizesChatAndPreservesFullClip() async throws {
         let input = Input(), widths = Widths()
         let host = NSHostingView(rootView: Panels(input: input, widths: widths))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 600),
@@ -96,8 +96,8 @@ import OctoCore
             }
             let expected: CGFloat = visible ? 993 * 0.42 : 1_000
             XCTAssertFalse(widths.values.isEmpty)
-            XCTAssertTrue(widths.values.contains { $0 > 993 * 0.42 + 2 && $0 < 998 },
-                          "Chat width must interpolate with the panel rather than snap to its endpoint: \(widths.values)")
+            XCTAssertFalse(widths.values.contains { $0 > 993 * 0.42 + 2 && $0 < 998 },
+                           "Chat width must change immediately without intermediate animation frames: \(widths.values)")
             XCTAssertEqual(widths.values.last ?? 0, expected, accuracy: 1)
             if visible {
                 let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))

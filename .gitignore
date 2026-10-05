@@ -26,3 +26,6 @@ workspace-*.json
 __pycache__/
 *.pyc
 .octo-workspace-*
+
+# Generated only from the pinned official Ghostty source.
+/Sources/OctoGhostty/Resources/Runtime/

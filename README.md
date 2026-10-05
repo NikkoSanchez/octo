@@ -6,7 +6,7 @@ A native macOS workspace for coding agents: projects and nested chat threads on 
 
 ## Run
 
-On a new Mac, install **full Xcode with Swift 6** and launch it once. Select its Command Line Tools in Xcode Settings → Locations. macOS 14 or newer is required.
+On a new Mac, install **full Xcode 26 or newer with Swift 6 and the macOS 26 SDK** and launch it once. Select its Command Line Tools in Xcode Settings → Locations. Octo targets macOS 14 or newer; this source build was verified on macOS 26. Install the Metal compiler with `xcodebuild -downloadComponent MetalToolchain` if `make doctor` reports it missing.
 
 Clone your private repository using your authenticated GitHub CLI, then run:
 
@@ -27,7 +27,7 @@ The app bundle is `build/Octo.app`. Packaging uses the Xcode app target so depen
 open build/Octo.app --args --project /absolute/path/to/repository
 ```
 
-The first build downloads a pinned community Ghostty wrapper and binary framework. `Package.resolved` locks transitive dependencies. The bundle is signed ad hoc for local development; distribution signing and notarization are not configured.
+The first build downloads pinned official Ghostty source and a checksum-verified Zig compiler, then builds our local framework. Octo owns the Swift/AppKit host in `Sources/OctoGhostty`; it no longer depends on libghostty-spm or MSDisplayLink. `Vendor/Ghostty.lock.json` and the generated build manifest record its provenance. See [Ghostty setup, migration-cache notes and validation limits](docs/GHOSTTY.md). The bundle is signed ad hoc for local development; distribution signing and notarization are not configured.
 
 Install and authenticate the agent CLIs separately (`codex`, optionally `claude`). Octo uses their local credentials and configuration. It never collects API keys. Codex automatically prefers the CLI bundled with the ChatGPT/Codex desktop app, then falls back to PATH (including common Homebrew and local CLI directories). Settings shows its exact executable path and version; Choose Executable selects a different installation, and Use Automatic restores discovery. The selection applies to both model discovery and agent turns. Stop active Codex turns before changing installations.
 
@@ -58,7 +58,8 @@ Codex supports streaming, resume, stop, command/file approvals, and selectable p
 | `Sources/OctoAgents` | Harness contract, registry, subprocess protocols, Codex/Claude adapters |
 | `Sources/OctoGit` | Git status, staged/working snapshots, unified diff parser |
 | `Sources/OctoReview` | AppKit/TextKit 2 selectable native diff surface |
-| `Sources/OctoTerminal` | Embedded Ghostty surfaces, tab lifecycle, Neovim routing |
+| `Sources/OctoTerminal` | Project terminal tabs, lifecycle and Neovim routing |
+| `Sources/OctoGhostty` | Octo-owned Swift/AppKit host for the source-built Ghostty C interface |
 | `Tests` | Selection, persistence, Git integration, agent protocol fixtures |
 | `Scripts` | Local app bundle packaging |
 | `docs` | Architecture, decisions, provider guide, status and historical concept |
@@ -83,4 +84,4 @@ See [security findings and remediation](docs/SECURITY_AUDIT.md). Setup configure
 
 ## Dependencies and attribution
 
-The native terminal uses [Lakr233/libghostty-spm](https://github.com/Lakr233/libghostty-spm), pinned to `b7f888e3baf8585ea9d590ab1a45b49475e00d1c`, wrapping [Ghostty](https://github.com/ghostty-org/ghostty). This is a community integration, not a stable official embedding SDK. Audit its licenses and binary supply chain before distribution. The application source has no distribution license selected yet.
+The native terminal compiles [official Ghostty](https://github.com/ghostty-org/ghostty/tree/332b2aefc6e72d363aa93ab6ecfc86eeeeb5ed28) **1.3.1** at `332b2aefc6e72d363aa93ab6ecfc86eeeeb5ed28`, using its internal full macOS embedding interface behind Octo’s own wrapper. This interface is not a stable public SDK. See [source/build provenance and notices](Vendor/Ghostty-NOTICES.md); redistribution review and hardware compatibility testing remain outstanding. The application source has no distribution license selected yet.

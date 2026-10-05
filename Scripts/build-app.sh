@@ -6,6 +6,7 @@ case "${1:-debug}" in
   release) configuration=Release ;;
   *) echo 'Usage: Scripts/build-app.sh [debug|release]' >&2; exit 1 ;;
 esac
+./Scripts/build-ghostty.sh
 # Xcode places package resource bundles under Contents/Resources and generates
 # the matching accessor; copying a swift-build executable alone does not.
 xcodebuild -quiet -project Octo.xcodeproj -scheme Octo \

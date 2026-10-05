@@ -1,7 +1,9 @@
-.PHONY: build test app run release setup doctor privacy
-build:
+.PHONY: build test app run release setup doctor privacy ghostty
+ghostty:
+	./Scripts/build-ghostty.sh
+build: ghostty
 	swift build
-test:
+test: ghostty
 	swift test
 app:
 	./Scripts/build-app.sh

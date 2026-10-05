@@ -5,7 +5,7 @@ permissions:
 jobs:
   test:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-09-26
         with:
@@ -15,7 +15,16 @@ jobs:
       - name: Privacy check tests
         run: python3 -m unittest discover -s Tests/PrivacyChecks
       - name: Toolchain
-        run: swift --version
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          test -n "$xcode"
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -downloadComponent MetalToolchain
+          ./Scripts/setup.sh --check
+      - name: Build official Ghostty source
+        run: ./Scripts/build-ghostty.sh
+      - name: Ghostty build verification tests
+        run: python3 -m unittest discover -s Tests/GhosttyBuild
       - name: Test
         run: swift test
       - name: Package native app

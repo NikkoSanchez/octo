@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import GhosttyTerminal
+import OctoGhostty
 import OctoCore
 
 @MainActor public final class TerminalTab: ObservableObject, Identifiable {
@@ -12,13 +12,11 @@ import OctoCore
     private var editorMonitor: Task<Void, Never>?
     @Published public var label: String
     @Published public var exited = false
-    public let state: TerminalViewState
+    public let state: GhosttySession
     init(projectID: UUID, directory: String, label: String, command: String? = nil, editorSession: EditorSession? = nil) {
         self.projectID = projectID; self.directory = directory; self.label = label; self.editorSession = editorSession
-        let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/ghostty/config").path
-        state = TerminalViewState(configFilePath: FileManager.default.fileExists(atPath: config) ? config : nil)
-        state.configuration = TerminalSurfaceOptions(backend: .exec, fontSize: 13, workingDirectory: directory,
-            envVars: ["PATH": Executables.searchPath, "OCTO_PROJECT_ID": projectID.uuidString], command: command, waitAfterCommand: true)
+        state = GhosttySession(options: .init(directory: directory,
+            environment: ["PATH": Executables.searchPath, "OCTO_PROJECT_ID": projectID.uuidString], command: command))
         state.onClose = { [weak self] _ in
             self?.exited = true; self?.editorSession = nil; self?.editorMonitor?.cancel()
         }
@@ -33,6 +31,7 @@ import OctoCore
         }
     }
     deinit { editorMonitor?.cancel() }
+    func close() { editorMonitor?.cancel(); editorSession = nil; state.close() }
 
     func refreshEditorSession() {
         guard editorSession?.hasExited == true else { return }
@@ -54,16 +53,15 @@ import OctoCore
         return succeeded
     }
     @discardableResult private func applyTheme(to tab: TerminalTab) -> Bool {
-        var config = TerminalConfiguration()
+        var colors: GhosttyColors?
         if let palette = theme.palette {
-            config = config.background(palette.base).foreground(palette.text)
-                .cursorColor(palette.rosewater).cursorText(palette.cursorText)
-                .selectionBackground(palette.terminalSelectionBackground).selectionForeground(palette.text)
-            for (index, color) in palette.ansi.enumerated() { config = config.palette(index, color: color) }
-            config = config.palette(16, color: palette.peach).palette(17, color: palette.rosewater)
+            colors = GhosttyColors(background: palette.base, foreground: palette.text,
+                cursor: palette.rosewater, cursorText: palette.cursorText,
+                selectionBackground: palette.terminalSelectionBackground, selectionForeground: palette.text,
+                palette: palette.ansi + [palette.peach, palette.rosewater])
         }
         // Live config updates preserve the surface, PTY, editor and scrollback.
-        return tab.state.setTheme(TerminalTheme(light: config, dark: config))
+        return tab.state.setColors(colors)
     }
     public func focusSelected(projectID: UUID) {
         tabs.first { $0.id == selectedTabs[projectID] }?.state.requestFocus()
@@ -82,7 +80,12 @@ import OctoCore
         if !tabs.contains(where: { $0.projectID == projectID }) { newTab(projectID: projectID, directory: directory) }
     }
     public func select(_ tab: TerminalTab) { selectedTabs[tab.projectID] = tab.id; tab.state.requestFocus() }
-    public func close(_ tab: TerminalTab) { tabs.removeAll { $0.id == tab.id }; selectedTabs[tab.projectID] = tabs.last(where: { $0.projectID == tab.projectID })?.id }
+    public func close(_ tab: TerminalTab) {
+        tab.close()
+        tabs.removeAll { $0.id == tab.id }
+        selectedTabs[tab.projectID] = tabs.last(where: { $0.projectID == tab.projectID })?.id
+    }
+    public func shutdown() { tabs.forEach { $0.close() }; tabs.removeAll(); selectedTabs.removeAll() }
     public func openInEditor(projectID: UUID, directory: String, relativePath: String, line: Int = 1) async throws {
         guard let nvim = Executables.find("nvim") else { throw ProcessFailure.missing("nvim (LazyVim uses your existing Neovim configuration)") }
         let root = URL(fileURLWithPath: directory).resolvingSymlinksInPath()
@@ -130,7 +133,7 @@ public struct TerminalSurfaces: View {
         @ObservedObject var tab: TerminalTab
         var visible: Bool
         var body: some View {
-            TerminalSurfaceView(context: tab.state)
+            GhosttyTerminalSurface(session: tab.state)
                 .opacity(visible ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
                 .onAppear { tab.state.isSurfaceVisible = visible; if visible { tab.state.requestFocus() } }
                 .onChange(of: visible) { _, value in tab.state.isSurfaceVisible = value; if value { tab.state.requestFocus() } }

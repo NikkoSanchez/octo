@@ -729,6 +729,7 @@ import OctoTerminal
         }
     }
     func shutdown() {
+        terminal.shutdown()
         for id in Array(titleTasks.keys) { cancelTitle(id) }
         flushStreamText()
         for id in Array(turnClocks.keys) { finishWork(id, outcome: .interrupted) }

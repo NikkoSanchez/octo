@@ -10,21 +10,25 @@ let package = Package(
         .library(name: "OctoAgents", targets: ["OctoAgents"]),
         .library(name: "OctoGit", targets: ["OctoGit"]),
         .library(name: "OctoReview", targets: ["OctoReview"]),
-        .library(name: "OctoTerminal", targets: ["OctoTerminal"])
+        .library(name: "OctoTerminal", targets: ["OctoTerminal"]),
+        .library(name: "OctoGhostty", targets: ["OctoGhostty"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/Lakr233/libghostty-spm.git", revision: "b7f888e3baf8585ea9d590ab1a45b49475e00d1c")
-    ],
+    dependencies: [],
     targets: [
         .target(name: "OctoCore"),
         .target(name: "OctoGit", dependencies: ["OctoCore"]),
         .target(name: "OctoAgents", dependencies: ["OctoCore"]),
         .target(name: "OctoReview", dependencies: ["OctoCore"]),
-        .target(name: "OctoTerminal", dependencies: ["OctoCore", .product(name: "GhosttyTerminal", package: "libghostty-spm")]),
+        // Scripts/build-ghostty.sh creates this from Vendor/Ghostty.lock.json.
+        .binaryTarget(name: "GhosttyKit", path: ".build/ghostty/GhosttyKit.xcframework"),
+        .target(name: "OctoGhostty", dependencies: ["GhosttyKit"], resources: [.copy("Resources/Runtime")],
+                linkerSettings: [.linkedLibrary("c++"), .linkedFramework("Carbon")]),
+        .target(name: "OctoTerminal", dependencies: ["OctoCore", "OctoGhostty"]),
         .executableTarget(name: "OctoApp", dependencies: ["OctoCore", "OctoGit", "OctoAgents", "OctoReview", "OctoTerminal"]),
         .testTarget(name: "OctoAppTests", dependencies: ["OctoApp"]),
         .testTarget(name: "OctoReviewTests", dependencies: ["OctoReview"]),
         .testTarget(name: "OctoTerminalTests", dependencies: ["OctoTerminal"]),
+        .testTarget(name: "OctoGhosttyTests", dependencies: ["OctoGhostty"]),
         .testTarget(name: "OctoCoreTests", dependencies: ["OctoCore"]),
         .testTarget(name: "OctoGitTests", dependencies: ["OctoGit"]),
         .testTarget(name: "OctoAgentsTests", dependencies: ["OctoAgents"])

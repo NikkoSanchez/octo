@@ -55,7 +55,7 @@ Dracula's supported lexical tokens use Pink keywords/operators, Yellow strings/e
 
 Source highlighting is lexical, not a full grammar: it supports common C-family languages, Swift, JavaScript/TypeScript, Python, and JSON. Raw strings, interpolation, regex literals, semantic types/parameters, and missing lexical context before a diff hunk are not fully resolved. Other file types remain plain text. Deleted and added lines maintain independent multiline state, reset at each hunk. Theme rendering does not change source ranges or attachments.
 
-Named themes update mounted terminal surfaces in place, including inactive tabs. Shells, editors and scrollback remain alive. System follows macOS light/dark appearance and removes Octo's terminal color override, using the existing Ghostty configuration where supported by the pinned wrapper. It does not install missing Ghostty theme resources. Neovim retains its installed configuration and colorscheme. Theme changes preserve code-preview selection.
+Named themes update mounted terminal surfaces in place, including inactive tabs. Shells, editors and scrollback remain alive. System follows macOS light/dark appearance and removes Octo's terminal color override, using the existing Ghostty configuration where supported by the Octo-owned host. Matching upstream theme resources are bundled. Neovim retains its installed configuration and colorscheme. Theme changes preserve code-preview selection.
 
 Current limits: fixed shortcut defaults (no remapping UI), no full transcript indexing or occurrence-level search, no code-preview find UI, and no automatic Neovim theme synchronization. International keyboard layouts, IME, and VoiceOver need broader validation.
 

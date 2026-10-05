@@ -15,6 +15,13 @@ if ! xcodebuild -version >/dev/null 2>&1; then
   echo 'Install full Xcode, launch it once, and select it in Xcode > Settings > Locations > Command Line Tools.' >&2
   exit 1
 fi
+xcode_major="$(xcodebuild -version | sed -nE 's/^Xcode ([0-9]+).*/\1/p')"
+if [[ -z "$xcode_major" ]] || (( xcode_major < 26 )); then
+  echo 'The pinned Ghostty source build requires Xcode 26 or newer with the macOS 26 SDK.' >&2; exit 1
+fi
+if ! xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+  echo 'Install the Apple Metal compiler: xcodebuild -downloadComponent MetalToolchain' >&2; exit 1
+fi
 swift_major="$(swift --version 2>/dev/null | sed -nE 's/.*Swift version ([0-9]+).*/\1/p' | head -1)"
 if [[ -z "$swift_major" ]] || (( swift_major < 6 )); then
   echo 'Select an Xcode installation with Swift 6 or newer.' >&2; exit 1

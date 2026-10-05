@@ -10,7 +10,7 @@ struct MarkdownResponseView: View {
     @State private var rendered: RenderedMarkdown?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 16) {
             // Publish complete parsed snapshots only. A literal tail in its own
             // Text creates a temporary extra paragraph on every streamed update,
             // then removes it after parsing, making layout and follow-scroll bounce.
@@ -21,6 +21,7 @@ struct MarkdownResponseView: View {
             }
         }
         .font(.system(size: 15)).foregroundStyle(theme.foreground)
+        .lineSpacing(6)
         .textSelection(.enabled).tint(theme.blue)
         .task(id: source) {
             let source = source
@@ -62,10 +63,11 @@ struct MarkdownResponseView: View {
                     Spacer()
                     Button { copyResponseText(text) } label: { Label("Copy", systemImage: "doc.on.doc") }
                         .buttonStyle(HoverButtonStyle()).accessibilityLabel("Copy code")
-                }.font(.system(size: 12)).foregroundStyle(theme.secondary).padding(8)
+                }.font(.system(size: 12)).lineSpacing(0).foregroundStyle(theme.secondary).padding(8)
                 Divider()
                 ScrollView(.horizontal) {
                     Text(verbatim: text).font(.system(size: 13, design: .monospaced))
+                        .lineSpacing(3)
                         .fixedSize(horizontal: true, vertical: true).padding(10)
                 }
             }.background(theme.panel, in: RoundedRectangle(cornerRadius: 7))

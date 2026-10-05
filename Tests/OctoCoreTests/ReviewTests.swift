@@ -112,7 +112,7 @@ final class ReviewTests: XCTestCase {
         second.isPinned = true
         var archive = WorkspaceArchive(projects: [first, second], selectedProjectID: first.id, selectedThreadID: first.threads[0].id)
         XCTAssertEqual(archive.orderedProjects.map(\.id), [second.id, first.id])
-        XCTAssertEqual(first.orderedThreads.map(\.id), [first.threads[1].id, first.threads[0].id, first.threads[2].id])
+        XCTAssertEqual(first.orderedThreads.map(\.id), [first.threads[1].id, first.threads[2].id, first.threads[0].id])
         archive.removeThread(first.threads[2].id, projectID: first.id)
         XCTAssertEqual(archive.selectedThreadID, first.threads[0].id)
         archive.removeThread(first.threads[0].id, projectID: first.id)
@@ -123,6 +123,32 @@ final class ReviewTests: XCTestCase {
         archive.removeProject(second.id)
         XCTAssertNil(archive.selectedProjectID)
     }
+    func testNewestFirstThreadsPreserveArchiveOrderAndPinsAcrossReload() throws {
+        for isChatCollection in [false, true] {
+            var project = WorkspaceProject(name: "Conversations", rootPath: "/tmp", threads:
+                (0..<4).map { WorkspaceThread(title: "Thread \($0)", workingDirectory: "/tmp") })
+            project.isChatCollection = isChatCollection
+            project.threads[0].isPinned = true
+            project.threads[2].isPinned = true
+            // Activity on an older thread must not move it within its pin group.
+            project.threads[1].lastActivityAt = Date.distantFuture
+            let originalIDs = project.threads.map(\.id)
+            let data = try JSONEncoder().encode(WorkspaceArchive(projects: [project]))
+            var archive = try JSONDecoder().decode(WorkspaceArchive.self, from: data)
+            XCTAssertEqual(archive.projects[0].threads.map(\.id), originalIDs)
+            XCTAssertEqual(archive.projects[0].orderedThreads.map(\.title), ["Thread 2", "Thread 0", "Thread 3", "Thread 1"])
+            archive.projects[0].threads[0].isPinned = false
+            archive.projects[0].threads[2].isPinned = false
+            XCTAssertEqual(archive.projects[0].orderedThreads.map(\.title), ["Thread 3", "Thread 2", "Thread 1", "Thread 0"])
+            let newest = WorkspaceThread(title: "Newest", workingDirectory: "/tmp")
+            archive.projects[0].threads.append(newest)
+            XCTAssertEqual(archive.projects[0].orderedThreads.first?.id, newest.id)
+            archive.selectedThreadID = newest.id
+            archive.removeThread(newest.id, projectID: project.id)
+            XCTAssertEqual(archive.selectedThreadID, originalIDs[3])
+        }
+    }
+
     func testImageMessageRoundTripAndLegacyDecoding() throws {
         let image = ImageAttachment(pngData: Data([1, 2, 3]))
         let message = ChatMessage(role: .user, text: "Look at this", images: [image])

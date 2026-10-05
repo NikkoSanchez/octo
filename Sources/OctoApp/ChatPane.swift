@@ -220,6 +220,7 @@ struct ChatPane: View {
                         } else {
                             Text(verbatim: message.text)
                                 .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                                .lineSpacing(message.role == .user ? 6 : 0)
                                 .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
                                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                         }

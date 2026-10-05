@@ -9,7 +9,12 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
     public var isCollapsed = false
     /// The built-in home for conversations without a user-selected repository.
     public var isChatCollection = false
-    public var orderedThreads: [WorkspaceThread] { threads.filter(\.isPinned) + threads.filter { !$0.isPinned } }
+    public var orderedThreads: [WorkspaceThread] {
+        // Threads are appended on creation. Reverse presentation only, retaining
+        // archive order and keeping pins ahead of the remaining conversations.
+        let newestFirst = threads.reversed()
+        return newestFirst.filter(\.isPinned) + newestFirst.filter { !$0.isPinned }
+    }
 
     private enum CodingKeys: String, CodingKey { case id, name, rootPath, threads, isPinned, isCollapsed, isChatCollection }
     public init(from decoder: Decoder) throws {

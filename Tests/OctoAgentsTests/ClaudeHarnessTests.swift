@@ -264,4 +264,91 @@ import OctoCore
         XCTAssertNil(unknown.buckets[0].windows[0].usedPercent)
         XCTAssertNil(unknown.buckets[0].windows[0].durationMinutes)
     }
+    func testContextUsageDecodingKeepsUnknownsUnknown() throws {
+        let api: [String: Any] = ["input_tokens": 2, "output_tokens": 400, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 60000]
+        let response: [String: Any] = ["totalTokens": 61002, "maxTokens": 1_000_000, "autoCompactThreshold": 967_000, "isAutoCompactEnabled": true, "apiUsage": api]
+        let session = TokenCounts(total: 9)
+        let usage = try XCTUnwrap(ClaudeHarness.decodeContextUsage(response, session: session))
+        XCTAssertEqual(usage.usedTokens, 61002, "Occupied context comes from Claude's own accounting, not the response total")
+        XCTAssertEqual(usage.latest, TokenCounts(total: 61402, input: 61002, cachedInput: 60000, cacheWriteInput: 1000, output: 400))
+        XCTAssertEqual(usage.session, session)
+        XCTAssertEqual(usage.contextWindow, 1_000_000)
+        XCTAssertEqual(usage.percentUsed, 6)
+        XCTAssertEqual(usage.autoCompactThreshold, 967_000)
+        XCTAssertNil(ClaudeHarness.decodeContextUsage(response.merging(["apiUsage": NSNull()]) { $1 }, session: nil), "No response yet")
+        for invalid: Any in [-1, true, "61002", 1.5] {
+            XCTAssertNil(ClaudeHarness.decodeContextUsage(response.merging(["totalTokens": invalid]) { $1 }, session: nil))
+        }
+        let unknown = try XCTUnwrap(ClaudeHarness.decodeContextUsage(response.merging(["maxTokens": 0, "isAutoCompactEnabled": false]) { $1 }, session: nil))
+        XCTAssertNil(unknown.usedFraction)
+        XCTAssertNil(unknown.autoCompactThreshold, "A disabled automatic compaction has no threshold")
+        XCTAssertNil(unknown.session)
+        let huge = try XCTUnwrap(ClaudeHarness.decodeContextUsage(response.merging(["apiUsage": ["input_tokens": Int.max, "output_tokens": Int.max]]) { $1 }, session: nil))
+        XCTAssertEqual(huge.latest.total, Int.max, "Untrusted counts saturate instead of overflowing")
+    }
+    func testSessionTotalsReadOnlyTheNamedMainTranscript() throws {
+        let projects = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: projects) }
+        try writeTranscript(in: projects)
+        let other = projects.appendingPathComponent("-other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try #"{"type":"assistant","timestamp":"2026-10-16T10:00:00Z","message":{"id":"x","usage":{"input_tokens":999}}}"#
+            .write(to: other.appendingPathComponent("another-session.jsonl"), atomically: true, encoding: .utf8)
+        let totals = try XCTUnwrap(ClaudeTranscriptUsage.sessionTotals(session: "fixture-session", projectsDirectory: projects))
+        XCTAssertEqual(totals, TokenCounts(total: 61557, input: 61107, cachedInput: 60000, cacheWriteInput: 1100, output: 450))
+        for session in ["", "../-project/fixture-session", ".hidden", "missing"] {
+            XCTAssertNil(ClaudeTranscriptUsage.sessionTotals(session: session, projectsDirectory: projects))
+        }
+    }
+    func testContextUsageAndCompactionStatusAreReported() async throws {
+        let projects = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: projects) }
+        try writeTranscript(in: projects)
+        let harness = ClaudeHarness(executable: fixture, projectsDirectory: projects)
+        defer { harness.shutdown() }
+        for (prompt, expected) in [("context", ContextCompaction.State.completed), ("compact-failed", .interrupted), ("compact-unfinished", .interrupted)] {
+            let done = expectation(description: "\(prompt) finished"), final = expectation(description: "\(prompt) final usage")
+            var snapshots: [ConversationUsage] = [], states: [ContextCompaction.State] = [], ids = Set<String>()
+            harness.onEvent = { event in
+                switch event {
+                case .conversationUsage(let usage):
+                    snapshots.append(usage)
+                    if snapshots.count == 1 { final.fulfill() }
+                case .compaction(let compaction): states.append(compaction.state); ids.insert(compaction.id)
+                case .finished: done.fulfill()
+                case .failed(let error): XCTFail(error); done.fulfill()
+                default: break
+                }
+            }
+            try await harness.send(prompt: prompt, sessionID: nil, directory: "/tmp")
+            await fulfillment(of: [done, final], timeout: 10)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(states, [.compacting, expected], "\(prompt): duplicate and late status events are ignored")
+            XCTAssertEqual(ids.count, 1)
+            let usage = try XCTUnwrap(snapshots.last)
+            XCTAssertEqual(usage.usedTokens, prompt == "context" ? 12000 : 61002)
+            XCTAssertEqual(usage.contextWindow, 1_000_000)
+            XCTAssertEqual(usage.autoCompactThreshold, 967_000)
+            XCTAssertEqual(usage.session?.total, 61557)
+            XCTAssertEqual(usage.latest.total, prompt == "context" ? 155 : 61402)
+        }
+        let quiet = expectation(description: "no response turn")
+        var reported = 0
+        harness.onEvent = { event in
+            if case .conversationUsage = event { reported += 1 }
+            if case .finished = event { quiet.fulfill() }
+        }
+        try await harness.send(prompt: "permissions", sessionID: "fixture-session", directory: "/tmp")
+        await fulfillment(of: [quiet], timeout: 5)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(reported, 0, "A process that has not reported a response has no context usage")
+    }
+    private func writeTranscript(in projects: URL) throws {
+        let project = projects.appendingPathComponent("-tmp-project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let first = #"{"type":"assistant","sessionId":"fixture-session","requestId":"r1","timestamp":"2026-10-16T10:00:00Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":60000,"cache_creation_input_tokens":1000,"output_tokens":400}}}"#
+        let second = #"{"type":"assistant","sessionId":"fixture-session","requestId":"r2","timestamp":"2026-10-16T10:01:00Z","message":{"id":"m2","model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":100,"output_tokens":50}}}"#
+        try [first, first, #"{"type":"user","message":{"content":"usage"}}"#, second].joined(separator: "\n")
+            .write(to: project.appendingPathComponent("fixture-session.jsonl"), atomically: true, encoding: .utf8)
+    }
 }

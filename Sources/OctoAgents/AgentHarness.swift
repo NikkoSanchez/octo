@@ -66,9 +66,9 @@ public enum AgentEvent {
                permissionOptions: CodexHarness.permissionOptions, defaultPermissionMode: .ask, supportsModels: true, supportsImages: true, supportsUsageLimits: true, supportsUsageRefresh: true,
                supportsConversationUsage: true, supportsCompactionStatus: true, capabilities: .codex),
          .init(id: .claude, executable: Executables.find("claude"), supportsApprovals: true,
-               detail: "CLI SDK stream · models, effort, images, tool activity, approvals and single-choice questions. Sign in with claude auth login. Account limits update after responses; context usage and active steering are unavailable.",
+               detail: "CLI SDK stream · models, effort, images, tool activity, approvals and single-choice questions. Sign in with claude auth login. Account limits and context usage update after responses; active steering is unavailable.",
                permissionOptions: ClaudeHarness.permissionOptions, defaultPermissionMode: .autoReview, supportsModels: true, supportsImages: true,
-               supportsUsageLimits: true, capabilities: .claude)]
+               supportsUsageLimits: true, supportsConversationUsage: true, supportsCompactionStatus: true, capabilities: .claude)]
     }
     public static func make(_ id: HarnessID, codexExecutable: URL? = nil) -> any AgentHarness {
         switch id { case .codex: return CodexHarness(executable: codexExecutable); case .claude: return ClaudeHarness() }

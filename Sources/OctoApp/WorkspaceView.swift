@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import OctoCore
 import OctoGit
 import OctoAgents
@@ -366,10 +367,103 @@ private struct TerminalTabTitle: View {
     var body: some View { Text(tab.label) }
 }
 
-private struct ProjectSidebar: View {
-    @ObservedObject var store: AppStore
+struct ProjectSidebar: View {
+    let store: AppStore
     let switchProject: () -> Void
     let didNavigate: () -> Void
+    @StateObject private var observation: SidebarObservation
+    init(store: AppStore, switchProject: @escaping () -> Void, didNavigate: @escaping () -> Void) {
+        self.store = store; self.switchProject = switchProject; self.didNavigate = didNavigate
+        _observation = StateObject(wrappedValue: SidebarObservation(store))
+    }
+    var body: some View {
+        ProjectSidebarContent(store: store, switchProject: switchProject, didNavigate: didNavigate,
+                              presentation: observation.presentation).equatable()
+    }
+}
+
+@MainActor private final class SidebarObservation: ObservableObject {
+    @Published private(set) var presentation: SidebarPresentation
+    private weak var store: AppStore?
+    private var subscription: AnyCancellable?
+    private var updateScheduled = false
+    init(_ store: AppStore) {
+        self.store = store; presentation = SidebarPresentation(store)
+        subscription = store.objectWillChange.sink { [weak self] in self?.scheduleUpdate() }
+    }
+    private func scheduleUpdate() {
+        guard !updateScheduled else { return }
+        updateScheduled = true
+        // objectWillChange arrives before mutation. Capture the settled values
+        // once per UI cycle, and never publish from a native layout callback.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.updateScheduled = false
+            guard let store = self.store else { return }
+            let next = SidebarPresentation(store)
+            if self.presentation != next { self.presentation = next }
+        }
+    }
+}
+
+/// Capture values before the next archive publication. Comparing the live store
+/// itself would compare the same reference and miss navigation/status changes.
+private struct SidebarPresentation: Equatable {
+    struct Thread: Equatable {
+        let id: UUID
+        let title: String
+        let pinned: Bool
+        let unread: Bool
+        let hasMessages: Bool
+        let activityDate: Date
+        let recentAt: Date
+    }
+    struct Project: Equatable {
+        let id: UUID
+        let name: String
+        let root: String
+        let pinned: Bool
+        let collapsed: Bool
+        let chats: Bool
+        let threads: [Thread]
+    }
+    let projects: [Project]
+    let selectedProject: UUID?
+    let selectedThread: UUID?
+    let projectsCollapsed: Bool
+    let recentCollapsed: Bool
+    let terminalVisible: Bool
+    let terminalProjects: Set<UUID>
+    let running: Set<UUID>
+    let edit: UUID?
+
+    @MainActor init(_ store: AppStore) {
+        projects = store.archive.projects.map { project in
+            Project(id: project.id, name: project.name, root: project.rootPath, pinned: project.isPinned,
+                    collapsed: project.isCollapsed, chats: project.isChatCollection,
+                    threads: project.threads.map { thread in
+                        Thread(id: thread.id, title: thread.title, pinned: thread.isPinned,
+                               unread: thread.hasUnreadCompletion, hasMessages: !thread.messages.isEmpty,
+                               activityDate: ThreadHoverDetails.activityDate(thread), recentAt: thread.recentAt)
+                    })
+        }
+        selectedProject = store.archive.selectedProjectID; selectedThread = store.archive.selectedThreadID
+        projectsCollapsed = store.archive.projectsSectionCollapsed == true
+        recentCollapsed = store.archive.recentSectionCollapsed == true
+        terminalVisible = store.showingTerminal
+        terminalProjects = Set(store.terminal.tabs.map(\.projectID))
+        running = store.running; edit = store.sidebarEdit?.id
+    }
+}
+
+private struct ProjectSidebarContent: View, Equatable {
+    let store: AppStore
+    let switchProject: () -> Void
+    let didNavigate: () -> Void
+    let presentation: SidebarPresentation
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.store === rhs.store && lhs.presentation == rhs.presentation
+    }
     @Environment(\.octoTheme) private var theme
     @State private var renaming: SidebarTarget?
     @State private var removing: SidebarTarget?

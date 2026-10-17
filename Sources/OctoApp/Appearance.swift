@@ -51,12 +51,61 @@ struct ThemedContent: ViewModifier {
 struct WorkingIndicator: View {
     @Environment(\.octoTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
     var symbol = "circle.fill"
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: symbol == "circle.fill" ? 8 : 13))
-            .foregroundStyle(theme.accent)
-            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+        NativeActivityPulse(symbol: symbol, color: theme.palette.map { NSColor(themeHex: $0.accent) } ?? .controlAccentColor,
+                            animate: !reduceMotion && phase == .active)
+            .frame(width: symbol == "circle.fill" ? 8 : 13, height: symbol == "circle.fill" ? 8 : 13)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel("Working")
     }
+}
+
+/// Animate only the native layer. SwiftUI symbol effects can repeatedly invalidate
+/// the whole window graph, including sidebar placement, even with no new output.
+private struct NativeActivityPulse: NSViewRepresentable {
+    let symbol: String
+    let color: NSColor
+    let animate: Bool
+    func makeNSView(context: Context) -> ActivityPulseView { ActivityPulseView() }
+    func updateNSView(_ view: ActivityPulseView, context: Context) {
+        view.update(symbol: symbol, color: color, animate: animate)
+    }
+    static func dismantleNSView(_ view: ActivityPulseView, coordinator: ()) { view.stopAnimation() }
+}
+
+final class ActivityPulseView: NSImageView {
+    private var symbol = ""
+    private var animate = false
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        imageScaling = .scaleProportionallyDown
+    }
+    required init?(coder: NSCoder) { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    func update(symbol: String, color: NSColor, animate: Bool) {
+        if self.symbol != symbol {
+            self.symbol = symbol
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Working")
+        }
+        if contentTintColor != color { contentTintColor = color }
+        self.animate = animate
+        updateAnimation()
+    }
+    private func updateAnimation() {
+        guard animate, window != nil, !isHiddenOrHasHiddenAncestor else { stopAnimation(); return }
+        guard layer?.animation(forKey: "activityPulse") == nil else { return }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1; pulse.toValue = 0.35
+        pulse.duration = 0.8; pulse.autoreverses = true; pulse.repeatCount = .infinity
+        pulse.beginTime = CACurrentMediaTime()
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(pulse, forKey: "activityPulse")
+    }
+    func stopAnimation() { layer?.removeAnimation(forKey: "activityPulse") }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateAnimation() }
+    override func viewDidHide() { super.viewDidHide(); updateAnimation() }
+    override func viewDidUnhide() { super.viewDidUnhide(); updateAnimation() }
 }

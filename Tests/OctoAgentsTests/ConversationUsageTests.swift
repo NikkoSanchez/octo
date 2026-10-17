@@ -13,7 +13,7 @@ final class ConversationUsageTests: XCTestCase {
         ], capacity: 200_000))
         XCTAssertEqual(usage.percentUsed, 40)
         XCTAssertEqual(usage.remainingTokens, 120_000)
-        XCTAssertEqual(usage.session.total, 900_000)
+        XCTAssertEqual(usage.session?.total, 900_000)
         XCTAssertEqual(usage.latest.total, 80_000, "Do not add cached or reasoning subsets to total")
         XCTAssertNil(usage.latest.cacheWriteInput)
         for capacity: Any in [NSNull(), 0, -1] {
@@ -59,7 +59,7 @@ final class ConversationUsageTests: XCTestCase {
                 try await harness.send(prompt: prompt, sessionID: session, directory: fixture.deletingLastPathComponent().path)
                 await fulfillment(of: [done, finalUsage], timeout: 10)
                 XCTAssertEqual(snapshots.map(\.latest.total), [184_000, 184_000, 184_000, 32_000])
-                XCTAssertEqual(snapshots.last?.session.total, 854_000)
+                XCTAssertEqual(snapshots.last?.session?.total, 854_000)
                 XCTAssertEqual(snapshots.last?.contextWindow, prompt == "unknown" ? nil : 200_000)
                 XCTAssertEqual(states, [.compacting, .completed], "Ignore duplicates, stale and wrong-owner lifecycle events")
             }

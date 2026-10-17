@@ -26,9 +26,14 @@ models = [dict(value='default', displayName='Default', supportsEffort=True, supp
           dict(value='sonnet', displayName='Sonnet', supportsEffort=True, supportedEffortLevels=['low','high']),
           dict(value='haiku', displayName='Haiku')]
 mode = None
+# Claude Code 2.1.302 get_context_usage reply; empty (no apiUsage) until a mode reports a response.
+context = {}
 for line in sys.stdin:
     obj = json.loads(line)
     trace(obj)
+    if obj['type'] == 'control_request' and obj['request'].get('subtype') == 'get_context_usage':
+        emit(dict(type='control_response', response=dict(subtype='success', request_id=obj['request_id'], response=context)))
+        continue
     if obj['type'] == 'control_request':
         emit(dict(type='control_response', response=dict(subtype='success', request_id=obj['request_id'], response=dict(models=models, commands=[dict(name='fixture-review', description='Review fixture files', argumentHint='[path]')], current_permission_mode=reported_mode))))
         continue
@@ -47,6 +52,22 @@ for line in sys.stdin:
             emit(dict(type='rate_limit_event', session_id='fixture-session', uuid='a', rate_limit_info=dict(status='allowed_warning', rateLimitType='seven_day', utilization=0.82, resetsAt=1800000000)))
             emit(dict(type='rate_limit_event', session_id='fixture-session', uuid='b', rate_limit_info=dict(status='allowed', unifiedWindows=dict(five_hour=dict(utilization=0.25, resetsAt=1790000000)))))
             emit(dict(type='rate_limit_event', session_id='fixture-session', uuid='c', rate_limit_info=dict(status='allowed')))
+            emit(dict(type='result', session_id='fixture-session', is_error=False))
+            continue
+        if mode in ('context', 'compact-failed', 'compact-unfinished'):
+            api = dict(input_tokens=2, output_tokens=400, cache_creation_input_tokens=1000, cache_read_input_tokens=60000)
+            context.update(totalTokens=61002, maxTokens=1000000, rawMaxTokens=1000000, autoCompactThreshold=967000,
+                           isAutoCompactEnabled=True, percentage=6, apiUsage=api, gridRows=[[]])
+            emit(dict(type='assistant', session_id='fixture-session', message=dict(id='ctx-1', usage=api, content=[dict(type='text', text='Working')])))
+            emit(dict(type='system', subtype='status', session_id='fixture-session', status='compacting'))
+            emit(dict(type='system', subtype='status', session_id='fixture-session', status='compacting'))
+            if mode == 'context':
+                context.update(totalTokens=12000, apiUsage=dict(input_tokens=5, output_tokens=50, cache_creation_input_tokens=100, cache_read_input_tokens=0))
+                emit(dict(type='system', subtype='compact_boundary', session_id='fixture-session', compact_metadata=dict(trigger='auto', pre_tokens=61002)))
+                emit(dict(type='system', subtype='status', session_id='fixture-session', status=None, compact_result='success'))
+            elif mode == 'compact-failed':
+                emit(dict(type='system', subtype='status', session_id='fixture-session', status=None, compact_result='failed', compact_error='fixture'))
+                emit(dict(type='system', subtype='status', session_id='fixture-session', status=None, compact_result='success'))
             emit(dict(type='result', session_id='fixture-session', is_error=False))
             continue
         if mode == 'disconnect': sys.exit(0)

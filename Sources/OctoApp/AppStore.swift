@@ -826,8 +826,7 @@ import OctoTerminal
         case .conversationUsage(let usage):
             mutate(threadID) {
                 // Provider totals are authoritative replacements, including decreases after reset.
-                guard $0.conversationUsage?.latest != usage.latest || $0.conversationUsage?.session != usage.session ||
-                      $0.conversationUsage?.contextWindow != usage.contextWindow else { return }
+                guard usage.differsInCounts(from: $0.conversationUsage) else { return }
                 $0.conversationUsage = usage
             }
         case .compaction(let compaction):

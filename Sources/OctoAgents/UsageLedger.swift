@@ -81,6 +81,26 @@ public enum ClaudeTranscriptUsage {
         }
         return TranscriptLines.aggregate(records)
     }
+    public static func projectsDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        let root = environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+        return root.appendingPathComponent("projects")
+    }
+    /// Totals for one session's main transcript (`projects/<project>/<session>.jsonl`). Subagent
+    /// transcripts are separate contexts and are not included. Blocking file I/O: call off the main actor.
+    public static func sessionTotals(session: String, projectsDirectory: URL) -> TokenCounts? {
+        guard !session.isEmpty, session.count <= 128, !session.contains("/"), !session.hasPrefix(".") else { return nil }
+        func modified(_ url: URL) -> Date { (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
+        let candidates = ((try? FileManager.default.contentsOfDirectory(at: projectsDirectory, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [])
+            .map { $0.appendingPathComponent(session + ".jsonl") }
+            .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+        guard let file = candidates.max(by: { modified($0) < modified($1) }),
+              let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return nil }
+        var sum = UsageRecord(provider: .claude, model: "", session: session, hour: .distantPast)
+        records(data, session: session).forEach { sum.add($0) }
+        let input = sum.uncachedInput + sum.cachedInput + sum.cacheWrite
+        return TokenCounts(total: input + sum.output, input: input, cachedInput: sum.cachedInput, cacheWriteInput: sum.cacheWrite, output: sum.output)
+    }
 }
 
 /// Codex rollouts (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, checked with CLI 0.133–0.158):
@@ -139,10 +159,9 @@ public actor UsageLedger {
 
     public static func defaultSources(environment: [String: String] = ProcessInfo.processInfo.environment) -> [Source] {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let claude = environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) } ?? home.appendingPathComponent(".claude")
         let codex = environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) } ?? home.appendingPathComponent(".codex")
         return [Source(provider: .codex, directories: [codex.appendingPathComponent("sessions"), codex.appendingPathComponent("archived_sessions")]),
-                Source(provider: .claude, directories: [claude.appendingPathComponent("projects")])]
+                Source(provider: .claude, directories: [ClaudeTranscriptUsage.projectsDirectory(environment: environment)])]
     }
 
     /// Records from files modified at or after `since`; a file last written earlier cannot contain newer usage.

@@ -18,7 +18,7 @@ struct ContextUsageView: View {
     private var label: String {
         if compaction?.state == .compacting { return "Compacting context" }
         if let percent = usage?.percentUsed { return "Context \(percent)% used" }
-        if let usage { return "Context \(usage.latest.total.formatted()) tokens used; capacity unavailable" }
+        if let usage { return "Context \(usage.usedTokens.formatted()) tokens used; capacity unavailable" }
         return supportsUsage ? "Context and token usage: awaiting report" : "Context and token usage unavailable"
     }
     var body: some View {
@@ -60,7 +60,7 @@ struct ContextUsageView: View {
                         ProgressView(value: fraction).tint(tint).accessibilityLabel("Context window usage")
                     }
                     HStack(alignment: .firstTextBaseline) {
-                        Text(tokens(usage.latest.total)).font(.system(size: 23, weight: .medium, design: .rounded))
+                        Text(tokens(usage.usedTokens)).font(.system(size: 23, weight: .medium, design: .rounded))
                         Text(usage.contextWindow.map { "of \(tokens($0)) tokens" } ?? "tokens · capacity unavailable")
                             .font(.system(size: 12)).foregroundStyle(theme.secondary)
                     }
@@ -79,14 +79,14 @@ struct ContextUsageView: View {
                         Text("Last response")
                         Text("Session total")
                     }.foregroundStyle(theme.secondary)
-                    tokenRow("Total processed", usage.latest.total, usage.session.total, emphasized: true)
-                    tokenRow("Input", usage.latest.input, usage.session.input)
-                    tokenRow("Cached input", usage.latest.cachedInput, usage.session.cachedInput)
-                    if usage.latest.cacheWriteInput != nil || usage.session.cacheWriteInput != nil {
-                        tokenRow("Cache writes", usage.latest.cacheWriteInput, usage.session.cacheWriteInput)
+                    tokenRow("Total processed", usage.latest.total, usage.session?.total, emphasized: true)
+                    tokenRow("Input", usage.latest.input, usage.session?.input)
+                    tokenRow("Cached input", usage.latest.cachedInput, usage.session?.cachedInput)
+                    if usage.latest.cacheWriteInput != nil || usage.session?.cacheWriteInput != nil {
+                        tokenRow("Cache writes", usage.latest.cacheWriteInput, usage.session?.cacheWriteInput)
                     }
-                    tokenRow("Output", usage.latest.output, usage.session.output)
-                    tokenRow("Reasoning", usage.latest.reasoning, usage.session.reasoning)
+                    tokenRow("Output", usage.latest.output, usage.session?.output)
+                    tokenRow("Reasoning", usage.latest.reasoning, usage.session?.reasoning)
                 }.font(.system(size: 11)).monospacedDigit()
                 Text("Cache counts are included in input; reasoning is included in output. Session totals can exceed the context window.")
                     .font(.system(size: 11)).foregroundStyle(theme.secondary).fixedSize(horizontal: false, vertical: true)
@@ -105,11 +105,16 @@ struct ContextUsageView: View {
                     Text(date.formatted(date: .abbreviated, time: .standard)).font(.system(size: 11)).foregroundStyle(theme.secondary)
                 }
             }
-            Text(supportsCompaction
-                 ? "Compaction is handled by \(provider). The exact automatic threshold is not reported."
-                 : "Compaction status is not available through this adapter.")
+            Text(compactionNote)
                 .font(.system(size: 11)).foregroundStyle(theme.secondary).fixedSize(horizontal: false, vertical: true)
         }.padding(18).frame(width: 370).foregroundStyle(theme.foreground).background(theme.panel)
+    }
+    private var compactionNote: String {
+        guard supportsCompaction else { return "Compaction status is not available through this adapter." }
+        if let threshold = usage?.autoCompactThreshold {
+            return "Compaction is handled by \(provider), which reports compacting automatically at \(tokens(threshold)) tokens."
+        }
+        return "Compaction is handled by \(provider). The exact automatic threshold is not reported."
     }
     private func tokens(_ value: Int?) -> String { value.map { $0.formatted() } ?? "—" }
     private func tokenRow(_ title: String, _ latest: Int?, _ session: Int?, emphasized: Bool = false) -> some View {

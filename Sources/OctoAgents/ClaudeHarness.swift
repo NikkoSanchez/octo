@@ -24,8 +24,18 @@ import OctoCore
         let interaction: AgentInteraction
     }
     private var questions: [UUID: Question] = [:]
+    private let projectsDirectory: URL
+    private var compaction: ContextCompaction?
+    private var contextQueryActive = false
+    private var contextQueryPending = false
+    /// Only the most recently started context query may report, so a slow reply cannot replace a newer one.
+    private var contextEpoch = 0
+    /// A finished turn's connection, kept open only for its final context query.
+    private var draining: ClaudeConnection?
 
-    public init(executable: URL? = nil) { executableOverride = executable }
+    public init(executable: URL? = nil, projectsDirectory: URL = ClaudeTranscriptUsage.projectsDirectory()) {
+        executableOverride = executable; self.projectsDirectory = projectsDirectory
+    }
     public static let permissionOptions: [AgentPermissionOption] = [
         .init(mode: .ask, title: "Manual", detail: "Claude follows its permission rules and asks before operations that require approval."),
         .init(mode: .autoReview, title: "Auto", detail: "Claude reviews actions automatically and asks when its permission rules require you. Availability depends on the CLI, model and managed policies.")
@@ -70,6 +80,7 @@ import OctoCore
         let owner = UUID(), client = ClaudeConnection()
         generation = owner; active = true; ready = false; connection = client; remoteSession = sessionID; confirmedPermissionMode = nil
         streamedBlocks.removeAll(); thinkingBlocks.removeAll(); completedMessages.removeAll(); seenRequests.removeAll(); tools.removeAll()
+        compaction = nil; contextQueryActive = false; contextQueryPending = false
         client.onObject = { [weak self] object in
             guard let self, self.generation == owner, self.active else { return }
             self.receive(object)
@@ -142,6 +153,7 @@ import OctoCore
         case "assistant":
             guard let message = object["message"] as? [String: Any] else { return }
             if let id = message["id"] as? String, !completedMessages.insert(id).inserted { return }
+            refreshContext()
             for (index, block) in (message["content"] as? [[String: Any]] ?? []).enumerated() {
                 switch block["type"] as? String {
                 case "text": if !streamedBlocks.contains(index), let text = block["text"] as? String { onEvent?(.message(text)) }
@@ -167,8 +179,8 @@ import OctoCore
             if let denials = object["permission_denials"] as? [Any], !denials.isEmpty { onEvent?(.activity("Claude declined \(denials.count) operation(s) under its permission policy.")) }
             if object["is_error"] as? Bool == true {
                 let detail = object["result"] as? String ?? (object["errors"] as? [String])?.joined(separator: "\n") ?? "Claude reported an error."
-                end(.failed(AgentToolDetails.text(detail)))
-            } else { end(.finished) }
+                end(.failed(AgentToolDetails.text(detail)), reportContext: true)
+            } else { end(.finished, reportContext: true) }
         case "system":
             if object["subtype"] as? String == "init", let mode = object["permissionMode"] as? String {
                 let normalized = mode == "manual" ? "default" : mode
@@ -178,7 +190,18 @@ import OctoCore
                 }
                 confirmedPermissionMode = normalized
             }
-            if object["subtype"] as? String == "compact_boundary" { onEvent?(.activity("Claude compacted the conversation.")) }
+            switch object["subtype"] as? String {
+            case "status":
+                if object["status"] as? String == "compacting" { compact(.compacting) }
+                else if compaction?.state == .compacting, let result = object["compact_result"] as? String {
+                    compact(result == "success" ? .completed : .interrupted)
+                }
+            case "compact_boundary":
+                // Completes a reported compaction, or one from a CLI that sent no status (e.g. a manual /compact).
+                if compaction == nil || compaction?.state == .compacting { compact(.completed) }
+                onEvent?(.activity("Claude compacted the conversation."))
+            default: break
+            }
         case "rate_limit_event":
             if let usage = Self.decodeRateLimit(object["rate_limit_info"] as? [String: Any] ?? [:]) { onEvent?(.usage(usage)) }
         default: break
@@ -216,6 +239,57 @@ import OctoCore
         let order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included", "overage"]
         let sorted = windows.values.sorted { (order.firstIndex(of: $0.id) ?? order.count, $0.id) < (order.firstIndex(of: $1.id) ?? order.count, $1.id) }
         return AgentUsage(buckets: [AgentUsageBucket(id: "claude", title: "Claude subscription", windows: sorted)], fetchedAt: date)
+    }
+    /// Claude Code 2.1.302 `get_context_usage` control response, the accounting behind `/context`:
+    /// `totalTokens` is occupied context, `maxTokens` the model window, `autoCompactThreshold` the
+    /// automatic-compaction point and `apiUsage` the last API response, whose `input_tokens` excludes
+    /// cache reads and writes. Nil before the session has a response.
+    static func decodeContextUsage(_ response: [String: Any], session: TokenCounts?, at date: Date = Date()) -> ConversationUsage? {
+        func count(_ value: Any?) -> Int? {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            // Integer-typed numbers are read exactly; floating values must be whole.
+            let value = CFNumberIsFloatType(number) ? Int(exactly: number.doubleValue) : number.intValue
+            return value.flatMap { $0 >= 0 ? $0 : nil }
+        }
+        func sum(_ values: Int...) -> Int { values.reduce(0) { $0.addingReportingOverflow($1).overflow ? Int.max : $0 + $1 } }
+        guard let occupied = count(response["totalTokens"]), let api = response["apiUsage"] as? [String: Any],
+              let uncached = count(api["input_tokens"]), let output = count(api["output_tokens"]) else { return nil }
+        let cached = count(api["cache_read_input_tokens"]) ?? 0, written = count(api["cache_creation_input_tokens"]) ?? 0
+        let input = sum(uncached, cached, written)
+        let threshold = response["isAutoCompactEnabled"] as? Bool == true ? count(response["autoCompactThreshold"]).flatMap { $0 > 0 ? $0 : nil } : nil
+        return ConversationUsage(latest: TokenCounts(total: sum(input, output), input: input, cachedInput: cached, cacheWriteInput: written, output: output),
+                                 session: session, contextWindow: count(response["maxTokens"]).flatMap { $0 > 0 ? $0 : nil },
+                                 contextTokens: occupied, autoCompactThreshold: threshold, updatedAt: date)
+    }
+    /// One query in flight per turn; responses that arrive meanwhile schedule a single follow-up.
+    private func refreshContext() {
+        guard let client = connection, let session = remoteSession else { return }
+        guard !contextQueryActive else { contextQueryPending = true; return }
+        contextQueryActive = true
+        let owner = generation
+        Task { [weak self] in
+            await self?.reportContext(from: client, session: session)
+            guard let self, self.generation == owner else { return }
+            self.contextQueryActive = false
+            if self.contextQueryPending { self.contextQueryPending = false; self.refreshContext() }
+        }
+    }
+    private func reportContext(from client: ClaudeConnection, session: String) async {
+        contextEpoch += 1
+        let epoch = contextEpoch, projects = projectsDirectory
+        guard let response = try? await client.request(["subtype": "get_context_usage"], timeout: .seconds(10)) else { return }
+        let totals = await Task.detached(priority: .utility) { ClaudeTranscriptUsage.sessionTotals(session: session, projectsDirectory: projects) }.value
+        guard epoch == contextEpoch, let usage = Self.decodeContextUsage(response, session: totals) else { return }
+        onEvent?(.conversationUsage(usage))
+    }
+    private func compact(_ state: ContextCompaction.State) {
+        let current = compaction?.state == .compacting ? compaction : nil
+        if state == .compacting, current != nil { return }
+        var next = current ?? ContextCompaction(id: "\(generation):\(UUID().uuidString)", state: state)
+        next.state = state
+        if state != .compacting { next.endedAt = Date() }
+        compaction = next; onEvent?(.compaction(next))
+        if state == .completed { refreshContext() }
     }
     private func stream(_ event: [String: Any]) {
         if event["type"] as? String == "message_start" { streamedBlocks.removeAll(); thinkingBlocks.removeAll() }
@@ -305,16 +379,30 @@ import OctoCore
         approvals.removeAll(); questions.removeAll()
         approvalIDs.forEach { onEvent?(.approvalResolved($0)) }; questionIDs.forEach { onEvent?(.interactionResolved($0)) }
     }
-    private func end(_ event: AgentEvent) {
+    private func end(_ event: AgentEvent, reportContext: Bool = false) {
         guard active else { return }
         active = false; ready = false; invalidateRequests()
         for (id, var tool) in tools where tool.state == .running {
             tool.state = .interrupted; tools[id] = tool; onEvent?(.toolActivity(tool))
         }
+        if var pending = compaction, pending.state == .compacting {
+            pending.state = .interrupted; pending.endedAt = Date(); compaction = pending; onEvent?(.compaction(pending))
+        }
         let client = connection; connection = nil
-        if case .finished = event { client?.finish() } else { client?.close() }
+        if reportContext, let client, let session = remoteSession {
+            // Final accounting arrives after the result, like Codex's late usage notification.
+            draining?.close(); draining = client
+            Task { [weak self] in
+                await self?.reportContext(from: client, session: session)
+                if case .finished = event { client.finish() } else { client.close() }
+                if self?.draining === client { self?.draining = nil }
+            }
+        } else if case .finished = event { client?.finish() } else { client?.close() }
         onEvent?(event)
     }
     public func interrupt() async { end(.interrupted) }
-    public func shutdown() { if active { end(.interrupted) }; connection?.close(); connection = nil; generation = UUID() }
+    public func shutdown() {
+        if active { end(.interrupted) }
+        connection?.close(); connection = nil; draining?.close(); draining = nil; generation = UUID()
+    }
 }

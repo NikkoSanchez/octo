@@ -34,7 +34,7 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
 
 public enum HarnessID: String, Codable, CaseIterable, Sendable {
     case codex, claude
-    public var title: String { self == .codex ? "Codex" : "Claude Code" }
+    public var title: String { self == .codex ? "Codex" : "Claude Agent" }
 }
 
 /// Optional overrides; older threads continue using their provider's session defaults.
@@ -124,12 +124,14 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var text: String
     public var attachments: [CodeAttachment]
     public var images: [ImageAttachment]
+    public var browserAnnotations: [BrowserAnnotation] = []
     public var createdAt: Date
     public var completedAt: Date?
     /// Recorded on the initiating user message. Absent on legacy conversations.
     public var toolActivity: ToolActivity?
     public var work: TurnWork?
-    private enum CodingKeys: String, CodingKey { case id, role, text, attachments, images, createdAt, completedAt, work, toolActivity }
+    public var isSteering: Bool? = nil
+    private enum CodingKeys: String, CodingKey { case id, role, text, attachments, images, browserAnnotations, createdAt, completedAt, work, toolActivity, isSteering }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -137,13 +139,16 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         text = try values.decode(String.self, forKey: .text)
         attachments = try values.decode([CodeAttachment].self, forKey: .attachments)
         images = try values.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
+        browserAnnotations = try values.decodeIfPresent([BrowserAnnotation].self, forKey: .browserAnnotations) ?? []
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         completedAt = try values.decodeIfPresent(Date.self, forKey: .completedAt)
         work = try values.decodeIfPresent(TurnWork.self, forKey: .work)
         toolActivity = try values.decodeIfPresent(ToolActivity.self, forKey: .toolActivity)
+        isSteering = try values.decodeIfPresent(Bool.self, forKey: .isSteering)
     }
-    public init(id: UUID = UUID(), role: Role, text: String, attachments: [CodeAttachment] = [], images: [ImageAttachment] = []) {
-        self.id = id; self.role = role; self.text = text; self.attachments = attachments; self.images = images; self.createdAt = Date()
+    public init(id: UUID = UUID(), role: Role, text: String, attachments: [CodeAttachment] = [], images: [ImageAttachment] = [], browserAnnotations: [BrowserAnnotation] = []) {
+        self.id = id; self.role = role; self.text = text; self.attachments = attachments; self.images = images
+        self.browserAnnotations = browserAnnotations; self.createdAt = Date()
     }
 }
 
@@ -179,11 +184,11 @@ public struct ChatTurn: Identifiable {
     public var messages: [ChatMessage]
     public var user: ChatMessage? { messages.first?.role == .user ? messages.first : nil }
     public var details: [ChatMessage] { messages.filter { $0.role == .reasoning || $0.role == .activity } }
-    public var responses: [ChatMessage] { messages.filter { $0.role == .assistant || $0.role == .error } }
+    public var responses: [ChatMessage] { messages.filter { $0.role == .assistant || $0.role == .error || $0.isSteering == true } }
     public static func turns(_ messages: [ChatMessage]) -> [ChatTurn] {
         var turns: [ChatTurn] = []
         for message in messages {
-            if message.role == .user || turns.isEmpty { turns.append(ChatTurn(messages: [message])) }
+            if (message.role == .user && message.isSteering != true) || turns.isEmpty { turns.append(ChatTurn(messages: [message])) }
             else { turns[turns.count - 1].messages.append(message) }
         }
         return turns

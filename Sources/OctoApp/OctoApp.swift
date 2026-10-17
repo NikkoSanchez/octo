@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import OctoCore
 import OctoAgents
+import OctoTerminal
 
 @main struct OctoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -26,6 +27,9 @@ import OctoAgents
         }
         .defaultSize(width: 1380, height: 880)
         .commands { WorkspaceCommandMenu() }
+        Window("Usage", id: UsageDashboardWindow.id) {
+            UsageDashboardView(store: store).modifier(ThemedContent(theme: store.theme)).frame(minWidth: 820, minHeight: 560)
+        }.defaultSize(width: 1180, height: 860)
         Settings { SettingsView(store: store).frame(width: 680, height: 600).modifier(ThemedContent(theme: store.theme)) }
     }
 }
@@ -53,12 +57,19 @@ import OctoAgents
 }
 struct SettingsView: View {
     @ObservedObject var store: AppStore
+    @State private var loginSession: CLISetupSession?
     var body: some View {
         TabView {
             appearance.tabItem { Label("Appearance", systemImage: "paintpalette") }
             shortcuts.tabItem { Label("Keyboard", systemImage: "keyboard") }
             agents.tabItem { Label("Agents", systemImage: "terminal") }
         }.padding(16)
+            .sheet(item: $loginSession, onDismiss: {
+                store.claudeSetupClosed()
+                Task { await store.refreshClaudeAuth() }
+            }) { session in
+                ClaudeSignInView(session: session, store: store) { loginSession = nil }
+            }
     }
     private var appearance: some View {
         Form {
@@ -134,6 +145,24 @@ struct SettingsView: View {
                         .font(.system(size: 12)).foregroundStyle(store.theme.secondary)
                 }.padding(.vertical, 4)
             }
+            Section("Claude CLI sign-in") {
+                Text(Executables.find("claude")?.path ?? "Claude CLI not found")
+                    .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                Text(store.checkingClaudeAuth ? "Checking sign-in…" : store.claudeAuthStatus?.title ?? "Sign-in status unavailable")
+                    .foregroundStyle(store.claudeAuthStatus?.loggedIn == true ? store.theme.green : store.theme.secondary)
+                if let error = store.claudeAuthError { Text(error).font(.caption).foregroundStyle(store.theme.secondary) }
+                HStack {
+                    Button("Open CLI sign-in…") {
+                        guard !store.claudeIsRunning, let executable = Executables.find("claude") else { return }
+                        loginSession = CLISetupSession(executable: executable, arguments: ClaudeCLI.loginArguments,
+                                                       directory: FileManager.default.homeDirectoryForCurrentUser.path)
+                    }.disabled(Executables.find("claude") == nil || store.claudeIsRunning)
+                    Button("Refresh status") { Task { await store.refreshClaudeAuth() } }.disabled(store.checkingClaudeAuth)
+                    Link("Authentication guide", destination: URL(string: "https://code.claude.com/docs/en/authentication")!)
+                }
+                Text(store.claudeIsRunning ? "Stop Claude turns before signing in again." : "Opens the installed Claude CLI’s browser sign-in flow. Choose your account there; the CLI stores and refreshes its credentials.")
+                    .font(.system(size: 13)).foregroundStyle(store.theme.secondary)
+            }
             Section("CLI-owned integrations") {
                 Text("Configure and authenticate integrations with your selected CLI, including in Octo’s terminal. Octo inherits its launch environment; shell-only variables may differ. Use the executable shown above and the same project. No credentials or MCP settings are copied into Octo.").font(.system(size: 13)).foregroundStyle(store.theme.secondary)
                 Text("Missing tools, service connection failures, macOS permissions, app authorization, and unsupported forms are separate issues. Follow the owning CLI’s setup/login workflow; app approval does not repair a transport or OS permission failure.").font(.system(size: 13)).foregroundStyle(store.theme.secondary)
@@ -141,5 +170,27 @@ struct SettingsView: View {
             Section("Local workspace") { Text("Uses your installed CLI authentication and Neovim configuration. Terminal tabs survive navigation, but do not survive app exit.").font(.system(size: 13)).foregroundStyle(store.theme.secondary) }
         }.formStyle(.grouped).scrollContentBackground(.hidden)
             .task(id: store.codexConfigurationID) { await store.refreshCodexVersion() }
+            .task { await store.refreshClaudeAuth() }
+    }
+}
+
+private struct ClaudeSignInView: View {
+    @ObservedObject var session: CLISetupSession
+    @ObservedObject var store: AppStore
+    let close: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sign in through Claude CLI").font(.title2.bold())
+            Text("Follow the CLI instructions and finish sign-in in your browser. If it asks for a code, paste it in the terminal below.")
+                .font(.callout).foregroundStyle(store.theme.secondary)
+            CLISetupTerminal(session: session).frame(minWidth: 560, minHeight: 340)
+            HStack {
+                Text(session.exited ? "CLI finished. Close to refresh sign-in status." : "Closing ends this sign-in process.")
+                    .font(.caption).foregroundStyle(store.theme.secondary)
+                Spacer()
+                Button("Close") { session.close(); close() }.keyboardShortcut(.cancelAction)
+            }
+        }.padding(20).frame(width: 640, height: 480)
+            .onChange(of: session.exited) { _, exited in if exited { Task { await store.refreshClaudeAuth() } } }
     }
 }

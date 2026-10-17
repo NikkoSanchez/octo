@@ -24,6 +24,7 @@ struct WorkspaceView: View {
     @State private var reviewFocus = 0
     @State private var showingShortcutHints = false
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.octoTheme) private var theme
     @Environment(\.scenePhase) private var phase
     var body: some View {
@@ -212,31 +213,50 @@ struct WorkspaceView: View {
                 HStack(spacing: 3) {
                     Button { revealReview(files: false) } label: {
                         Text("Changes (\(review.files.count))").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(padded: false, selected: !review.browsingFiles))
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: !review.browsingFiles && !store.showingBrowser))
                         .shortcutHint("changes")
-                        .accessibilityAddTraits(!review.browsingFiles ? .isSelected : [])
+                        .accessibilityAddTraits(!review.browsingFiles && !store.showingBrowser ? .isSelected : [])
                     Button { revealReview(files: true) } label: {
                         Text("Files").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles))
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles && !store.showingBrowser))
                         .shortcutHint("browseFiles")
-                        .accessibilityAddTraits(review.browsingFiles ? .isSelected : [])
+                        .accessibilityAddTraits(review.browsingFiles && !store.showingBrowser ? .isSelected : [])
+                    Button { revealBrowser() } label: {
+                        Text("Browser").frame(maxWidth: .infinity, minHeight: 28)
+                    }.buttonStyle(HoverButtonStyle(padded: false, selected: store.showingBrowser))
+                        .shortcutHint("browser")
+                        .accessibilityAddTraits(store.showingBrowser ? .isSelected : [])
                 }.padding(3).background(theme.surface, in: RoundedRectangle(cornerRadius: 8))
-                    .frame(maxWidth: 240)
+                    .frame(maxWidth: 330)
                 Spacer()
-                if !review.browsingFiles {
-                    Picker("Diff layout", selection: $review.diffLayout) {
-                        Text("Stacked").tag(DiffLayout.stacked)
-                        Text("Side by Side").tag(DiffLayout.sideBySide)
-                    }.labelsHidden().frame(width: 120).hoverFeedback().help("Diff layout")
-                }
-                ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
-                if review.browsingFiles {
-                    Button { requestFileAction(.create, path: "") } label: { Image(systemName: "doc.badge.plus") }
-                        .hoverFeedback().help("New file").accessibilityLabel("New file")
-                }
-                Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
+                if !store.showingBrowser { reviewControls }
             }.padding(12)
             Divider()
+            ZStack {
+                reviewContent(project).opacity(store.showingBrowser ? 0 : 1).allowsHitTesting(!store.showingBrowser).accessibilityHidden(store.showingBrowser)
+                // Mounted while hidden so the page, scroll position and dev-server session survive.
+                BrowserPane(session: store.browserSession(for: project.id)) { store.attachBrowserScreenshot($0, projectID: project.id) }
+                    .id(project.id)
+                    .opacity(store.showingBrowser ? 1 : 0).allowsHitTesting(store.showingBrowser).accessibilityHidden(!store.showingBrowser)
+            }
+        }
+    }
+    @ViewBuilder private var reviewControls: some View {
+        if !review.browsingFiles {
+            Picker("Diff layout", selection: $review.diffLayout) {
+                Text("Stacked").tag(DiffLayout.stacked)
+                Text("Side by Side").tag(DiffLayout.sideBySide)
+            }.labelsHidden().frame(width: 120).hoverFeedback().help("Diff layout")
+        }
+        ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
+        if review.browsingFiles {
+            Button { requestFileAction(.create, path: "") } label: { Image(systemName: "doc.badge.plus") }
+                .hoverFeedback().help("New file").accessibilityLabel("New file")
+        }
+        Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
+    }
+    private func reviewContent(_ project: WorkspaceProject) -> some View {
+        VStack(spacing: 0) {
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
                 ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3) {
                     ZStack {
@@ -1050,10 +1070,14 @@ extension WorkspaceView {
     }
     private func revealReview(files: Bool) {
         guard store.isProjectChat else { return }
-        store.showingTerminal = false; store.showingReview = true; review.browsingFiles = files
+        store.showingTerminal = false; store.showingReview = true; store.showingBrowser = false; review.browsingFiles = files
         if let project = store.project {
             Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
         }
+    }
+    private func revealBrowser() {
+        guard store.isProjectChat else { return }
+        store.showingTerminal = false; store.showingReview = true; store.showingBrowser = true
     }
     private func editSidebar(_ kind: SidebarEdit.Kind, thread: Bool) {
         guard let project = store.project else { return }
@@ -1080,6 +1104,8 @@ extension WorkspaceView {
             .init(id: "composer", title: "Focus Thread / Composer", group: "Panels", key: "1", enabled: hasThread) { store.focusComposer() },
             .init(id: "changes", title: "Show Changes", group: "Panels", key: "2", enabled: hasProject) { revealReview(files: false) },
             .init(id: "browseFiles", title: "Show Files", group: "Panels", key: "3", enabled: hasProject) { revealReview(files: true) },
+            .init(id: "browser", title: "Show Browser", group: "Panels", key: "5", enabled: hasProject) { revealBrowser() },
+            .init(id: "usageDashboard", title: "Usage Dashboard", group: "Panels") { openWindow(id: UsageDashboardWindow.id) },
             .init(id: "terminal", title: "Toggle Project Terminal", group: "Panels", key: "j", enabled: hasProject) {
                 if store.showingTerminal { store.focusComposer() } else if let project { store.openTerminal(project) }
             },
@@ -1090,7 +1116,7 @@ extension WorkspaceView {
             },
             .init(id: "findNext", title: "Next Matching Message", group: "Conversation", key: "g", enabled: store.findingThread, terminalAllowed: false) { store.findStep += 1 },
             .init(id: "findPrevious", title: "Previous Matching Message", group: "Conversation", key: "g", modifiers: [.command, .shift], enabled: store.findingThread, terminalAllowed: false) { store.findStep -= 1 },
-            .init(id: "send", title: "Send Message", group: "Conversation", key: "\r", enabled: thread.map { idle && store.canSend($0) } ?? false, terminalAllowed: false) { store.send() },
+            .init(id: "send", title: idle ? "Send Message" : "Queue Message", group: "Conversation", key: "\r", enabled: thread.map { store.canSend($0) } ?? false, terminalAllowed: false) { store.send() },
             .init(id: "stop", title: "Stop Agent", group: "Conversation", key: ".", enabled: !idle && hasThread, terminalAllowed: false) { if let thread { store.stop(thread.id) } },
             .init(id: "refresh", title: "Refresh Changes and Files", group: "Review", key: "r", modifiers: [.command, .shift], enabled: hasProject) { Task { await refresh() } },
             .init(id: "newFile", title: "New File…", group: "Review", enabled: hasProject) { requestFileAction(.create, path: "") },
@@ -1137,8 +1163,8 @@ extension WorkspaceView {
             for descriptor in store.harnessDescriptors {
                 result.append(.init(id: "provider-\(descriptor.id)", title: "Provider: \(descriptor.id.title)", group: "Agent", enabled: idle) { store.changeHarness(descriptor.id) })
             }
-            if thread.harness == .codex {
-                for model in store.modelCatalogs[thread.workingDirectory] ?? [] {
+            if store.supportsModels(thread.harness) {
+                for model in store.modelCatalogs[store.modelKey(thread)] ?? [] {
                     result.append(.init(id: "model-\(model.id)", title: "Model: \(model.displayName)", group: "Agent", enabled: idle) { store.selectModel(model) })
                     if model.model == thread.agentSettings.model {
                         for effort in model.supportedReasoningEfforts {
@@ -1146,7 +1172,7 @@ extension WorkspaceView {
                         }
                     }
                 }
-                result.append(.init(id: "refreshModels", title: "Refresh Models", group: "Agent", enabled: !store.loadingModels.contains(thread.workingDirectory)) { Task { await store.loadModels(directory: thread.workingDirectory, refresh: true) } })
+                result.append(.init(id: "refreshModels", title: "Refresh Models", group: "Agent", enabled: !store.loadingModels.contains(store.modelKey(thread))) { Task { await store.loadModels(directory: thread.workingDirectory, harness: thread.harness, refresh: true) } })
             }
             for approval in store.approvals[thread.id] ?? [] {
                 result.append(.init(id: "approval-\(approval.id)", title: "Review Approval: \(approval.title)", group: "Agent") {
@@ -1162,6 +1188,9 @@ extension WorkspaceView {
             }
             for attachment in store.attachments[thread.id] ?? [] {
                 result.append(.init(id: "removeCode-\(attachment.id)", title: "Remove Code Attachment: \(attachment.label)", group: "Draft") { store.attachments[thread.id]?.removeAll { $0.id == attachment.id } })
+            }
+            for annotation in store.browserAnnotations[thread.id] ?? [] {
+                result.append(.init(id: "removeAnnotation-\(annotation.id)", title: "Remove Browser Annotation: \(annotation.label)", group: "Draft") { store.browserAnnotations[thread.id]?.removeAll { $0.id == annotation.id } })
             }
             for image in store.draftImages[thread.id] ?? [] {
                 result.append(.init(id: "removeImage-\(image.id)", title: "Remove Screenshot: \(image.name)", group: "Draft") { store.draftImages[thread.id]?.removeAll { $0.id == image.id } })

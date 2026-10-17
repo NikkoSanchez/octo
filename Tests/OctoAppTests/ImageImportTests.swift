@@ -30,7 +30,7 @@ import OctoCore
         XCTAssertTrue(store.canSend(first))
     }
 
-    func testFileImportLimitsInvalidInputAndUnsupportedProvider() async throws {
+    func testFileImportLimitsInvalidInputAndClaudeSupport() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -51,8 +51,9 @@ import OctoCore
         store.draftImages[thread.id] = []
         store.changeHarness(.claude)
         await store.importImages([file], threadID: thread.id)
-        XCTAssertTrue(store.draftImages[thread.id]?.isEmpty == true)
-        XCTAssertTrue(store.error?.contains("Codex") == true)
+        XCTAssertEqual(store.draftImages[thread.id]?.count, 1)
+        XCTAssertTrue(store.running.isEmpty)
+        store.draftImages[thread.id] = []
         store.changeHarness(.codex)
         let invalid = directory.appendingPathComponent("invalid.png")
         try Data("not an image".utf8).write(to: invalid)

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 import OctoCore
 @testable import OctoApp
 
@@ -29,6 +30,26 @@ import OctoCore
         XCTAssertTrue(editor.hasMarkedText())
         editor.keyDown(with: try event())
         XCTAssertEqual(sends, 3, "Return must remain with the input method during composition")
+    }
+
+    func testAcceptedComposerInputClearsSynchronouslyAndRejectedInputStaysEditable() throws {
+        var draft = "first", accept = true
+        let parent = ComposerTextView(focusRequest: 0, theme: .system,
+            text: Binding(get: { draft }, set: { draft = $0 }), onPasteImage: { _ in false },
+            onSend: { if accept { draft = "" } })
+        let coordinator = parent.makeCoordinator()
+        let editor = ScreenshotTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 110))
+        editor.isRichText = false; editor.string = draft; editor.delegate = coordinator
+        editor.onSend = { coordinator.submit(editor) }
+        let enter = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        editor.keyDown(with: enter)
+        XCTAssertEqual(editor.string, "")
+        editor.insertText("second", replacementRange: editor.selectedRange())
+        XCTAssertEqual(draft, "second", "Typing immediately must not append to previously sent text")
+        accept = false; editor.keyDown(with: enter)
+        XCTAssertEqual(editor.string, "second")
+        XCTAssertEqual(draft, "second")
     }
 
     func testProjectPickerShortcutIsDistinctFromChatSearchAndWorksInTerminal() throws {

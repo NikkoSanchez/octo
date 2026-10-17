@@ -65,6 +65,7 @@ struct JSONLineFramer {
         guard let process else { throw ProcessFailure.exited("Agent process is not running.") }
         try process.send(Data(text.utf8), closeInput: true)
     }
+    func closeInput() { try? process?.send(Data(), closeInput: true) }
     func interrupt() { process?.interrupt() }
     func stop() { process?.stop() }
     deinit { process?.stop() }
@@ -83,14 +84,14 @@ struct JSONLineFramer {
         transport.onExit = { [weak self] _, detail in self?.disconnected(detail.isEmpty ? "Agent connection closed." : detail) }
     }
     func start(executable: URL, directory: String) throws { try transport.start(executable: executable, arguments: ["app-server"], directory: directory) }
-    func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+    func request(_ method: String, _ params: [String: Any], timeout: Duration = .seconds(45)) async throws -> [String: Any] {
         nextID += 1; let id = nextID
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             do { try transport.write(["id": id, "method": method, "params": params]) }
             catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(45))
+                try? await Task.sleep(for: timeout)
                 self?.pending.removeValue(forKey: id)?.resume(throwing: ProcessFailure.exited("Agent request timed out: \(method)"))
             }
         }

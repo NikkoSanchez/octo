@@ -120,10 +120,10 @@ final class InteractionTests: XCTestCase {
         XCTAssertThrowsError(try CodexInteraction.decode(["questions": [question, question]], questions: true))
     }
     func testBoundedRedactedResultDetailsAndCapabilities() throws {
-        let result = CodexToolDetails.result(["arguments": ["secret": "argument-secret"], "result": ["_meta": ["secret": "metadata-secret"], "content": [["type": "image", "data": "binary-secret"], ["type": "text", "text": "Bearer sensitive-token password=bad"]], "structuredContent": ["access_token": "structured-secret", "ok": "done"]]])
+        let result = AgentToolDetails.result(["arguments": ["secret": "argument-secret"], "result": ["_meta": ["secret": "metadata-secret"], "content": [["type": "image", "data": "binary-secret"], ["type": "text", "text": "Bearer sensitive-token password=bad"]], "structuredContent": ["access_token": "structured-secret", "ok": "done"]]])
         for secret in ["argument-secret", "metadata-secret", "binary-secret", "sensitive-token", "structured-secret", "password=bad"] { XCTAssertFalse(result.contains(secret)) }
         XCTAssertTrue(result.contains("done"))
-        XCTAssertLessThan(CodexToolDetails.text(String(repeating: "x", count: 100_000)).count, 8300)
+        XCTAssertLessThan(AgentToolDetails.text(String(repeating: "x", count: 100_000)).count, 8300)
     }
     private var fixture: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Scripts/fixtures/codex-interactions.py") }
 
@@ -145,7 +145,7 @@ final class InteractionTests: XCTestCase {
                 case .toolActivity(let activity): activities.append(activity)
                 case .interactionUnavailable: unavailable += 1
                 case .textDelta(let delta): output += delta
-                case .finished: done.fulfill()
+                case .finished, .interrupted: done.fulfill()
                 case .failed(let message): XCTFail(message); done.fulfill()
                 default: break
                 }
@@ -180,7 +180,7 @@ final class InteractionTests: XCTestCase {
                     } catch { XCTFail(error.localizedDescription) }
                     previous = request
                 case .textDelta(let delta): output += delta
-                case .finished: done.fulfill()
+                case .finished, .interrupted: done.fulfill()
                 case .failed(let message): XCTFail(message); done.fulfill()
                 default: break
                 }

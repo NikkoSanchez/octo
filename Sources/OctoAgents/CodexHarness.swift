@@ -20,6 +20,11 @@ import OctoCore
     private var connectionID = UUID()
     private var turnEpoch = UUID()
     private var acceptingRequests = false
+    private var computerUseActive = false
+    private var supportsComputerUseCleanup = false
+    private var cleanupTask: Task<Void, Never>?
+    private var closed = false
+    private var directory: String?
     private struct PendingInteraction {
         let wireID: Any
         let key: String
@@ -39,14 +44,17 @@ import OctoCore
         rpc.onDisconnect = { [weak self] detail in
             guard let self else { return }; self.initialized = false
             self.invalidateRequests(); self.endTools(); self.acceptingRequests = false
-            if self.busy { self.busy = false; self.onEvent?(.failed(CodexToolDetails.text(detail))) }
+            if self.busy { self.busy = false; self.onEvent?(.failed(AgentToolDetails.text(detail))) }
         }
     }
     public func send(prompt: String, sessionID: String?, directory: String, settings: AgentSettings = AgentSettings(), images: [ImageAttachment] = []) async throws {
+        if let cleanupTask { await cleanupTask.value }
+        guard !closed else { throw ProcessFailure.exited("This agent connection has closed.") }
         guard !busy else { throw ProcessFailure.exited("This thread already has a running turn.") }
         guard let executable = executableOverride ?? CodexExecutable.resolve() else { throw ProcessFailure.missing("codex") }
         busy = true; acceptingRequests = true; turnID = nil; turnEpoch = UUID()
         usageTurnID = nil; compactions.removeAll()
+        computerUseActive = false
         let epoch = turnEpoch
         do {
         let mode = settings.permissionMode ?? .ask
@@ -63,6 +71,7 @@ import OctoCore
             let version = (try? await CodexExecutable.version(of: executable)) ?? ""
             try requireActive(epoch)
             extendedInteractions = Self.supportsInteractionExtensions(version: version)
+            supportsComputerUseCleanup = Self.supportsComputerUseCleanup(version: version)
             try rpc.start(executable: executable, directory: directory)
             var initialize: [String: Any] = ["clientInfo": ["name": "octo", "title": "Octo", "version": "0.1.0"]]
             if extendedInteractions { initialize["capabilities"] = ["experimentalApi": true, "mcpServerOpenaiFormElicitation": true] }
@@ -71,6 +80,7 @@ import OctoCore
             try rpc.notify("initialized"); initialized = true; threadID = nil
         }
         guard initialized else { throw ProcessFailure.exited("Codex connection is not initialized.") }
+        self.directory = directory
         if threadID == nil {
             var params: [String: Any] = ["cwd": directory, "approvalPolicy": Self.approvalPolicy(mode),
                                        "approvalsReviewer": mode == .autoReview ? "auto_review" : "user", "sandbox": Self.sandboxMode(mode)]
@@ -86,7 +96,8 @@ import OctoCore
         streamedItems.removeAll()
         reasoningItems.removeAll()
         commentaryItems.removeAll()
-            var input: [[String: Any]] = prompt.isEmpty ? [] : [["type": "text", "text": prompt]]
+            var input = try await commandInput(prompt: prompt, directory: directory)
+            try requireActive(epoch)
             input += images.map { ["type": "image", "url": "data:image/png;base64," + $0.pngData.base64EncodedString()] }
             var params: [String: Any] = ["threadId": threadID, "input": input, "cwd": directory,
                                        "approvalPolicy": Self.approvalPolicy(mode),
@@ -106,6 +117,31 @@ import OctoCore
     }
     private func requireActive(_ epoch: UUID) throws {
         guard busy, acceptingRequests, turnEpoch == epoch else { throw ProcessFailure.exited("Turn startup was cancelled.") }
+    }
+    public func steer(prompt: String, images: [ImageAttachment] = []) async throws {
+        guard busy, acceptingRequests, !closed, let threadID, let turnID else {
+            throw ProcessFailure.exited("The turn is starting or has already ended. Your message remains queued.")
+        }
+        let expectedTurn = turnID, epoch = turnEpoch
+        var input = try await commandInput(prompt: prompt, directory: directory ?? "")
+        guard busy, acceptingRequests, self.turnID == expectedTurn, turnEpoch == epoch else {
+            throw ProcessFailure.exited("The turn ended during skill discovery. Your message remains queued.")
+        }
+        input += images.map { ["type": "image", "url": "data:image/png;base64," + $0.pngData.base64EncodedString()] }
+        let result = try await rpc.request("turn/steer", ["threadId": threadID, "expectedTurnId": turnID, "input": input])
+        guard result["turnId"] as? String == turnID else {
+            throw ProcessFailure.exited("The CLI did not confirm the expected turn. Check the conversation before retrying this message.")
+        }
+    }
+    private func commandInput(prompt: String, directory: String) async throws -> [[String: Any]] {
+        guard Self.commandName(in: prompt) != nil else { return prompt.isEmpty ? [] : [["type": "text", "text": prompt]] }
+        let commands = try Self.decodeCommands(await rpc.request("skills/list", ["cwds": [directory], "forceReload": true]), directory: directory)
+        return Self.commandInput(prompt: prompt, commands: commands)
+    }
+    static func supportsComputerUseCleanup(version: String) -> Bool {
+        guard let number = version.split(separator: " ").first(where: { $0.first?.isNumber == true }) else { return false }
+        let parts = number.split(separator: ".").prefix(2).compactMap { Int($0) }
+        return parts.count == 2 && (parts[0] > 0 || parts[1] >= 160)
     }
     /// Conservative implementation baseline, separately declared from permission support.
     public static func supportsInteractionExtensions(version: String) -> Bool { supportsAutoReview(version: version) }
@@ -186,6 +222,7 @@ import OctoCore
         return models
     }
     private func notification(_ method: String, _ p: [String: Any]) {
+        guard !closed else { return }
         if method == "thread/tokenUsage/updated" {
             guard let threadID, let usageTurnID, p["threadId"] as? String == threadID,
                   p["turnId"] as? String == usageTurnID,
@@ -200,7 +237,7 @@ import OctoCore
         case "item/mcpToolCall/progress":
             guard p["threadId"] as? String == threadID, p["turnId"] as? String == turnID,
                   let id = p["itemId"] as? String, var tool = tools[id], tool.state == .running else { return }
-            tool.detail = CodexToolDetails.text(p["message"] as? String ?? "")
+            tool.detail = AgentToolDetails.text(p["message"] as? String ?? "")
             if tools[id] != tool { tools[id] = tool; onEvent?(.toolActivity(tool)) }
         case "turn/started":
             if let id = (p["turn"] as? [String: Any])?["id"] as? String, turnID == nil || turnID == id { turnID = id; usageTurnID = id }
@@ -233,8 +270,13 @@ import OctoCore
                 guard p["threadId"] as? String == threadID, p["turnId"] as? String == turnID,
                       let id = item["id"] as? String, let server = item["server"] as? String, let name = item["tool"] as? String else { return }
                 if let previous = tools[id], previous.state != .running { return }
+                if server == "cua_repl" {
+                    if name == "turn_ended" {
+                        if method == "item/completed", item["status"] as? String == "completed" { computerUseActive = false }
+                    } else { computerUseActive = true }
+                }
                 let state: ToolActivity.State = item["status"] as? String == "failed" ? .failed : (method == "item/completed" ? .completed : .running)
-                let tool = ToolActivity(id: "\(connectionID):\(turnEpoch):\(id)", server: CodexToolDetails.text(server, limit: 256), tool: CodexToolDetails.text(name, limit: 256), state: state, detail: CodexToolDetails.result(item))
+                let tool = ToolActivity(id: "\(connectionID):\(turnEpoch):\(id)", server: AgentToolDetails.text(server, limit: 256), tool: AgentToolDetails.text(name, limit: 256), state: state, detail: AgentToolDetails.result(item))
                 if tools[id] != tool { tools[id] = tool; onEvent?(.toolActivity(tool)) }
             }
             if type == "agentMessage", item["phase"] as? String == "commentary", method == "item/started" {
@@ -253,11 +295,15 @@ import OctoCore
             if method == "item/completed", type == "fileChange" { onEvent?(.activity("Updated files")) }
         case "turn/completed":
             invalidateRequests(); endTools(); acceptingRequests = false
+            let completedTurnID = turnID
             busy = false; turnID = nil
             let turn = p["turn"] as? [String: Any] ?? [:]
+            let event: AgentEvent
             if turn["status"] as? String == "failed" {
-                let error = turn["error"] as? [String: Any]; onEvent?(.failed(error?["message"] as? String ?? "Codex turn failed."))
-            } else { onEvent?(.finished) }
+                let error = turn["error"] as? [String: Any]; event = .failed(error?["message"] as? String ?? "Codex turn failed.")
+            } else if turn["status"] as? String == "interrupted" { event = .interrupted }
+            else { event = .finished }
+            completeTurn(event, turn: completedTurnID, interrupted: turn["status"] as? String != "completed")
         case "serverRequest/resolved":
             guard let wireID = p["requestId"], let key = Self.requestKey(wireID) else { return }
             for (id, pending) in interactions where pending.key == key { interactions[id] = nil; onEvent?(.interactionResolved(id)) }
@@ -339,6 +385,31 @@ import OctoCore
             tool.state = .interrupted; tools[id] = tool; onEvent?(.toolActivity(tool))
         }
     }
+    /// The bundled unified-computer-use plugin's Stop/Interrupt hook. Keep this
+    /// inside the CLI's existing thread/MCP connection, with the original IDs.
+    private func cleanupParameters(turn: String?, interrupted: Bool) -> [String: Any]? {
+        guard computerUseActive, let threadID, let turn else { return nil }
+        computerUseActive = false
+        return ["threadId": threadID, "server": "cua_repl", "tool": "turn_ended",
+                "arguments": ["hook_event_name": interrupted ? "Interrupt" : "Stop", "session_id": threadID, "turn_id": turn]]
+    }
+    private func completeTurn(_ event: AgentEvent, turn: String?, interrupted: Bool) {
+        guard let params = cleanupParameters(turn: turn, interrupted: interrupted) else { onEvent?(event); return }
+        let epoch = turnEpoch
+        cleanupTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard self.supportsComputerUseCleanup else { throw ProcessFailure.exited("Requires Codex CLI 0.160 or newer.") }
+                let result = try await self.rpc.request("mcpServer/tool/call", params, timeout: .seconds(5))
+                if result["isError"] as? Bool == true { throw ProcessFailure.exited("The computer-use runtime rejected cleanup.") }
+            } catch {
+                if !self.closed { self.onEvent?(.interactionUnavailable("Computer Use cleanup could not be confirmed: \(error.localizedDescription)")) }
+            }
+            guard !self.closed, self.turnEpoch == epoch else { return }
+            self.cleanupTask = nil
+            self.onEvent?(event)
+        }
+    }
     public func interrupt() async {
         acceptingRequests = false; invalidateRequests(cancel: true); endTools()
         guard let threadID, let turnID else {
@@ -347,5 +418,22 @@ import OctoCore
         }
         _ = try? await rpc.request("turn/interrupt", ["threadId": threadID, "turnId": turnID])
     }
-    public func shutdown() { acceptingRequests = false; usageTurnID = nil; invalidateRequests(cancel: true); endTools(); busy = false; rpc.close() }
+    public func shutdown() {
+        guard !closed else { return }
+        closed = true; acceptingRequests = false; usageTurnID = nil
+        invalidateRequests(cancel: true); endTools()
+        let params = cleanupParameters(turn: turnID, interrupted: true)
+        let pending = cleanupTask, rpc = rpc, activeThread = threadID, activeTurn = turnID, wasBusy = busy
+        busy = false
+        if pending != nil || (params != nil && supportsComputerUseCleanup) {
+            Task {
+                if let pending { await pending.value }
+                if wasBusy, let activeThread, let activeTurn {
+                    _ = try? await rpc.request("turn/interrupt", ["threadId": activeThread, "turnId": activeTurn], timeout: .seconds(2))
+                }
+                if let params { _ = try? await rpc.request("mcpServer/tool/call", params, timeout: .seconds(2)) }
+                rpc.close()
+            }
+        } else { rpc.close() }
+    }
 }

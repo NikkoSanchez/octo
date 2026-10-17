@@ -23,7 +23,7 @@ Extend the existing adapter; no plugin framework or SwiftUI provider switch is n
 6. Keep configuration, MCP connections, authentication, execution and permission policies in the CLI. Launch the supplied executable with argument arrays in the supplied checkout/environment. Do not implement separate MCP transport or credentials in Octo, and do not restart active work to inspect configuration.
 7. Record selected-executable schema/version evidence and explicit experimental opt-ins. Add fake-process fixtures for the supported schemas and lifecycle, including app identity and each access scope. Test concurrency, malformed constraints, provider resolution and backward-compatible persistence. Native fixture smoke tests must use a separate app identity/archive and no real authorization changes.
 
-See [the current Codex bridge and protocol references](CLI_MCP.md). `Scripts/fixtures/codex-interactions.py` is an offline app-server stand-in, not an MCP server or model. Claude's inherited print workflow remains unchanged; it must not advertise interactive forms until its adapter implements and verifies a corresponding provider protocol.
+See [the current Codex bridge and protocol references](CLI_MCP.md). `Scripts/fixtures/codex-interactions.py` is an offline app-server stand-in, not an MCP server or model. Claude's SDK stream maps operation approvals and single-choice AskUserQuestion requests; generic MCP forms and app-access duration schemas remain unsupported. See CLI_MCP.md for its protocol evidence.
 
 ## Optional chat titles
 

@@ -3,11 +3,11 @@ import OctoCore
 
 /// Never renders arguments, auth metadata, binary payloads, or embedded app resources.
 /// Redaction is defensive, not a guarantee against secrets in arbitrary tool prose.
-enum CodexToolDetails {
+enum AgentToolDetails {
     static func text(_ text: String, limit: Int = 8192) -> String {
         var value = String(text.prefix(32768))
         for (index, pattern) in [#"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"#,
-                        #"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\s*[\"']?\s*[:=]\s*[\"']?)[^\s,\"'}]+"#,
+                        #"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization)\s*[\"']?\s*[:=]\s*[\"']?)[^\s,\"'}]+"#,
                         #"\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,})\b"#].enumerated() {
             value = value.replacingOccurrences(of: pattern, with: index < 2 ? "$1[redacted]" : "[redacted]", options: .regularExpression)
         }

@@ -4,6 +4,7 @@ import OctoCore
 /// Each capability describes implemented adapter/UI support, not installed tools or account access.
 public struct HarnessCapabilities: Equatable {
     public var toolActivity = false
+    public var steering = false
     public var textToolResults = false
     public var structuredToolResults = false
     public var toolInventory = false
@@ -12,8 +13,14 @@ public struct HarnessCapabilities: Equatable {
     public var appAccess = false
     public var urlElicitation = false
     public init() {}
+    public static var claude: Self {
+        var value = Self()
+        value.toolActivity = true; value.textToolResults = true; value.toolQuestions = true
+        return value
+    }
     public static var codex: Self {
         var value = Self()
+        value.steering = true
         value.toolActivity = true; value.textToolResults = true; value.structuredToolResults = true
         value.forms = true; value.toolQuestions = true; value.appAccess = true
         return value

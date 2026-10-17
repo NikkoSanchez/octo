@@ -42,8 +42,9 @@ import OctoAgents
         store.receive(.textDelta("Final"), threadID: a)
         store.receive(.finished, threadID: a)
         let messages = store.archive.projects[0].threads[0].messages
-        XCTAssertEqual(messages.map(\.text), ["One", "Thinking", "Answer", tool.text, "Commentary", "Final"])
-        XCTAssertEqual(messages[3].toolActivity, tool)
+        var interruptedTool = tool; interruptedTool.state = .interrupted
+        XCTAssertEqual(messages.map(\.text), ["One", "Thinking", "Answer", interruptedTool.text, "Commentary", "Final"])
+        XCTAssertEqual(messages[3].toolActivity, interruptedTool)
         XCTAssertNil(messages[4].toolActivity)
         XCTAssertNotNil(messages.last?.completedAt)
         XCTAssertEqual(messages[0].work?.outcome, .completed)

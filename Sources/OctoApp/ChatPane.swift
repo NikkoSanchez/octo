@@ -9,6 +9,7 @@ struct ChatPane: View {
     var openFile: (URL) -> Void = { _ in }
     @Environment(\.scenePhase) private var phase
     @Environment(\.octoTheme) private var theme
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var transcriptScroll = TranscriptScrollController()
     @State private var matchIndex = 0
     @State private var expandedDetails = Set<UUID>()
@@ -103,15 +104,16 @@ struct ChatPane: View {
                                 }.id(request.id)
                             }
                         }.padding(12)
-                    }.frame(maxHeight: 340)
+                    }.frame(maxHeight: (store.queuedMessages[thread.id] ?? []).isEmpty ? 340 : 180)
                 }
                 composer(thread)
                     .task(id: "\(thread.harness.rawValue):\(thread.workingDirectory):\(store.codexConfigurationID)") {
                         if thread.harness == .codex {
                             await store.refreshCodexVersion()
                             guard !Task.isCancelled else { return }
-                            await store.loadModels(directory: thread.workingDirectory)
                         }
+                        guard !Task.isCancelled else { return }
+                        await store.loadModels(directory: thread.workingDirectory, harness: thread.harness)
                     }
             } else { ContentUnavailableView {
                 Label("Start a chat", systemImage: "bubble.left")
@@ -229,11 +231,16 @@ struct ChatPane: View {
                             Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
                                 .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
                         }
+                        ForEach(message.browserAnnotations) { annotation in
+                            Label(annotation.label, systemImage: "cursorarrow.rays").font(.system(size: 12)).lineLimit(1).padding(6)
+                                .background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 4)).help(annotation.promptContext)
+                        }
                     }
                     .padding(message.role == .user ? 14 : 0)
                     .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
                     if message.role == .user || message.role == .assistant || message.role == .error {
                         HStack(spacing: 10) {
+                            if message.isSteering == true { Text("Steering message").font(.system(size: 11)) }
                             if message.role == .assistant {
                                 Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
                                     .buttonStyle(HoverButtonStyle()).help("Copy original response")
@@ -252,6 +259,7 @@ struct ChatPane: View {
     private func permissionsMenu(_ thread: WorkspaceThread, compact: Bool = false) -> some View {
         let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
         let selected = thread.agentSettings.permissionMode ?? descriptor?.defaultPermissionMode
+        let title = descriptor?.permissionOptions.first { $0.mode == selected }?.title ?? selected?.title ?? "CLI permissions"
         return Menu {
             if descriptor?.permissionOptions.isEmpty != false {
                 Text("Uses CLI defaults. Permission controls are unavailable in this adapter.")
@@ -263,25 +271,26 @@ struct ChatPane: View {
                         else { store.selectPermissions(option.mode, threadID: thread.id) }
                     } label: {
                         VStack(alignment: .leading) {
-                            if option.mode == selected { Label(option.mode.title, systemImage: "checkmark") }
-                            else { Text(option.mode.title) }
+                            if option.mode == selected { Label(option.title, systemImage: "checkmark") }
+                            else { Text(option.title) }
                             Text(option.detail).font(.caption)
                         }
                     }.help(option.detail)
                 }
             }
         } label: {
-            Label(selected?.title ?? "CLI permissions", systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
+            Label(title, systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
                 .labelStyle(PermissionLabelStyle(compact: compact))
                 .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
         }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
-            .help(selected?.title ?? "CLI permissions")
-            .accessibilityLabel("Permissions: \(selected?.title ?? "CLI defaults")")
+            .help(title)
+            .accessibilityLabel("Permissions: \(title)")
             .disabled(store.running.contains(thread.id))
     }
     private func usageView(_ thread: WorkspaceThread) -> some View {
         let key = store.usageKey(thread)
-        let supported = store.harnessDescriptors.first { $0.id == thread.harness }?.supportsUsageLimits == true
+        let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
+        let supported = descriptor?.supportsUsageLimits == true, refreshable = descriptor?.supportsUsageRefresh == true
         return VStack(alignment: .leading, spacing: 12) {
             Text("\(thread.harness.title) account usage").font(.headline)
             Text("Shared across your account, including other chats and apps.").font(.caption).foregroundStyle(theme.secondary)
@@ -294,39 +303,34 @@ struct ChatPane: View {
                             ForEach(usage.buckets) { bucket in
                                 Text(bucket.title).fontWeight(.medium)
                                 if bucket.windows.isEmpty { Text("No usage windows reported.").foregroundStyle(theme.secondary) }
-                                ForEach(bucket.windows) { window in
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        HStack {
-                                            Text(window.title)
-                                            Spacer()
-                                            if let remaining = window.remainingPercent { Text("\(remaining, specifier: "%.0f")% remaining") }
-                                            else { Text("Usage unavailable") }
-                                        }
-                                        if let remaining = window.remainingPercent { ProgressView(value: remaining, total: 100) }
-                                        if let reset = window.resetsAt {
-                                            Text("Resets \(reset.formatted(date: .abbreviated, time: .shortened))")
-                                                .foregroundStyle(theme.secondary)
-                                        } else { Text("Reset time unavailable").foregroundStyle(theme.secondary) }
-                                    }.font(.caption)
-                                }
+                                ForEach(bucket.windows) { window in UsageWindowRow(window: window).font(.caption) }
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }.frame(height: min(280, CGFloat(usage.buckets.reduce(0) { $0 + max(1, $1.windows.count) }) * 100 + CGFloat(usage.buckets.count) * 25))
-                    Text("Last updated \(usage.fetchedAt.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(theme.secondary)
+                    Text("\(refreshable ? "Last updated" : "Last reported") \(usage.fetchedAt.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(theme.secondary)
+                } else if !refreshable {
+                    Text("\(thread.harness.title) reports limits alongside responses. Send a message in any \(thread.harness.title) chat to see your session and weekly limits.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("API-key, Bedrock and Vertex sign-ins do not report subscription limits.").font(.caption).foregroundStyle(theme.secondary)
                 }
                 if let error = store.usageErrors[key] { Text(error).font(.caption).foregroundStyle(theme.secondary) }
-                HStack {
+            }
+            HStack {
+                if supported && refreshable {
                     Button { Task { await store.loadUsage(thread) } } label: {
                         Image(systemName: "arrow.clockwise")
                     }.hoverFeedback().help("Refresh usage").accessibilityLabel("Refresh usage")
                         .disabled(store.loadingUsage.contains(key))
                     if store.loadingUsage.contains(key) { ProgressView().controlSize(.small) }
                 }
+                Spacer()
+                Button("Usage Dashboard") { showingUsage = false; openWindow(id: UsageDashboardWindow.id) }
+                    .hoverFeedback().help("Token usage across Codex and Claude sessions")
             }
-        }.padding(18).frame(width: 350).task { if supported { await store.loadUsage(thread) } }
+        }.padding(18).frame(width: 350).task { if supported && refreshable { await store.loadUsage(thread) } }
     }
     private func agentMenu(_ thread: WorkspaceThread) -> some View {
-        let models = store.modelCatalogs[thread.workingDirectory] ?? []
+        let models = store.modelCatalogs[store.modelKey(thread)] ?? []
         let selected = models.first { $0.model == thread.agentSettings.model }
         let summary = [thread.harness.title, selected?.displayName ?? thread.agentSettings.model,
                        thread.agentSettings.reasoningEffort.map { $0 == "xhigh" ? "Extra high" : $0.capitalized }]
@@ -340,7 +344,7 @@ struct ChatPane: View {
                     }
                 }
             }
-            if thread.harness == .codex {
+            if store.supportsModels(thread.harness) {
                 Menu("Model") {
                     if thread.agentSettings.model == nil { Text("Using session default") }
                     ForEach(models) { model in
@@ -350,9 +354,9 @@ struct ChatPane: View {
                         }.help(model.description)
                     }
                     Divider()
-                    Button(store.loadingModels.contains(thread.workingDirectory) ? "Loading models…" : "Refresh models") {
-                        Task { await store.loadModels(directory: thread.workingDirectory, refresh: true) }
-                    }.disabled(store.loadingModels.contains(thread.workingDirectory))
+                    Button(store.loadingModels.contains(store.modelKey(thread)) ? "Loading models…" : "Refresh models") {
+                        Task { await store.loadModels(directory: thread.workingDirectory, harness: thread.harness, refresh: true) }
+                    }.disabled(store.loadingModels.contains(store.modelKey(thread)))
                 }
                 Menu("Reasoning") {
                     if selected == nil { Text("Choose a model first") }
@@ -397,11 +401,20 @@ struct ChatPane: View {
     }
     private func composer(_ thread: WorkspaceThread) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            queuedMessages(thread)
             ForEach(store.attachments[thread.id] ?? []) { attachment in
                 HStack {
                     Label(attachment.label, systemImage: "curlybraces").lineLimit(1)
                     Spacer(); Button { store.attachments[thread.id]?.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark") }.buttonStyle(HoverButtonStyle()).help("Remove attachment")
                 }.font(.system(size: 15)).padding(7).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+            }
+            ForEach(store.browserAnnotations[thread.id] ?? []) { annotation in
+                HStack {
+                    // The tooltip shows exactly what will be sent with the message.
+                    Label(annotation.label, systemImage: "cursorarrow.rays").lineLimit(1).truncationMode(.middle).help(annotation.promptContext)
+                    Spacer(); Button { store.browserAnnotations[thread.id]?.removeAll { $0.id == annotation.id } } label: { Image(systemName: "xmark") }
+                        .buttonStyle(HoverButtonStyle()).help("Remove annotation").accessibilityLabel("Remove annotation")
+                }.font(.system(size: 15)).padding(7).background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
             imageStrip(store.draftImages[thread.id] ?? [], threadID: thread.id)
             if let compaction = thread.lastCompaction, compaction.state == .compacting {
@@ -415,18 +428,24 @@ struct ChatPane: View {
                 }
             }
             DraftEditor(drafts: store.draftStore, threadID: thread.id, focusRequest: store.composerFocus, theme: store.theme,
-                        placeholder: store.isProjectChat ? "Ask about this project…" : "Ask anything…",
+                        commands: store.commandCatalogs[store.modelKey(thread)] ?? [],
+                        providerTitle: thread.harness.title,
+                        commandsLoading: store.loadingCommands.contains(store.modelKey(thread)),
+                        commandError: store.commandErrors[store.modelKey(thread)],
+                        refreshCommands: { Task { await store.loadCommands(thread, refresh: true) } },
+                        placeholder: store.running.contains(thread.id) ? "Add a follow-up…" : store.isProjectChat ? "Ask about this project…" : "Ask anything…",
                         onChange: { store.drafts[thread.id] = $0 },
                         onPasteImage: { store.pasteScreenshot(from: $0, threadID: thread.id) }, onSend: { store.send() })
-                .id(thread.id).frame(height: 110)
+                .id(thread.id)
+                .task(id: "\(store.modelKey(thread)):\(store.claudeConfigurationID):\(store.codexConfigurationID)") { await store.loadCommands(thread) }
             HStack(spacing: 10) {
                 Button { store.chooseImages(threadID: thread.id) } label: {
                     Image(systemName: "plus").frame(width: 16, height: 16)
                 }
                 .buttonStyle(HoverButtonStyle())
-                .help(thread.harness == .codex ? "Add images" : "Image attachments require Codex")
+                .help(store.supportsImages(thread.harness) ? "Add images" : "Images are unavailable with this provider")
                 .accessibilityLabel("Add images")
-                .disabled(thread.harness != .codex || store.importingImages.contains(thread.id) || (store.draftImages[thread.id]?.count ?? 0) >= 4)
+                .disabled(!store.supportsImages(thread.harness) || store.importingImages.contains(thread.id) || (store.draftImages[thread.id]?.count ?? 0) >= 4)
                 if store.importingImages.contains(thread.id) {
                     ProgressView().controlSize(.small).accessibilityLabel("Loading images")
                 }
@@ -442,18 +461,76 @@ struct ChatPane: View {
                                  supportsCompaction: store.harnessDescriptors.first { $0.id == thread.harness }?.supportsCompactionStatus == true)
                     .id(thread.id)
                 if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback().shortcutHint("stop") }
-                else { Button { store.send() } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback().disabled(!store.canSend(thread)).shortcutHint("send") }
+                Button { store.send() } label: {
+                    Image(systemName: store.running.contains(thread.id) ? "text.badge.plus" : "arrow.up")
+                }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback()
+                    .disabled(!store.canSend(thread)).shortcutHint("send")
+                    .help(store.running.contains(thread.id) ? "Queue message (Return)" : "Send message (Return)")
+                    .accessibilityLabel(store.running.contains(thread.id) ? "Queue message" : "Send message")
             }
-            if thread.harness == .codex {
-                if let error = store.modelErrors[thread.workingDirectory] {
+            if store.supportsModels(thread.harness) {
+                if let error = store.modelErrors[store.modelKey(thread)] {
                     Text(error).font(.system(size: 12)).foregroundStyle(theme.secondary)
-                } else if let modelID = thread.agentSettings.model, let catalog = store.modelCatalogs[thread.workingDirectory], !catalog.contains(where: { $0.model == modelID }) {
+                } else if let modelID = thread.agentSettings.model, let catalog = store.modelCatalogs[store.modelKey(thread)], !catalog.contains(where: { $0.model == modelID }) {
                     Text("The saved model is unavailable. Choose another in Agent settings.").font(.system(size: 12)).foregroundStyle(theme.secondary)
                 }
             }
-            if thread.harness == .claude { Text("Claude uses its CLI model and reasoning settings. Interactive approvals are unavailable.").font(.system(size: 12)).foregroundStyle(theme.secondary) }
+            if thread.harness == .claude, store.claudeAuthStatus?.loggedIn == false {
+                Text("Claude is signed out. Open Settings → Agents → Open CLI sign-in.")
+                    .font(.system(size: 12)).foregroundStyle(theme.secondary)
+            }
+
         }.padding(12).background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary)).padding(14)
+    }
+    @ViewBuilder private func queuedMessages(_ thread: WorkspaceThread) -> some View {
+        let messages = store.queuedMessages[thread.id] ?? []
+        if !messages.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Queued · \(messages.count)").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if !store.running.contains(thread.id) {
+                        Button("Send queued") { store.resumeQueue(thread.id) }
+                            .disabled(store.steeringMessages[thread.id] != nil).controlSize(.small)
+                    }
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(messages) { queued in
+                            HStack(alignment: .top, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(queued.message.text.isEmpty ? "Image message" : queued.message.text)
+                                        .font(.system(size: 13)).lineLimit(2).help(queued.message.text)
+                                    if !queued.message.images.isEmpty || !queued.message.attachments.isEmpty || !queued.message.browserAnnotations.isEmpty {
+                                        Text("\(queued.message.images.count) images · \(queued.message.attachments.count) code selections"
+                                             + (queued.message.browserAnnotations.isEmpty ? "" : " · \(queued.message.browserAnnotations.count) annotations"))
+                                            .font(.system(size: 11)).foregroundStyle(theme.secondary)
+                                    }
+                                    if let error = store.queueErrors[queued.id] {
+                                        Text(error).font(.system(size: 11)).foregroundStyle(theme.red)
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                                if store.steeringMessages[thread.id] == queued.id {
+                                    ProgressView().controlSize(.small).accessibilityLabel("Sending steering message")
+                                } else {
+                                    if store.running.contains(thread.id), thread.harness == .codex {
+                                        Button("Steer now") { store.steerQueued(queued.id, threadID: thread.id) }
+                                            .controlSize(.small).disabled(!store.canSteer(thread))
+                                            .accessibilityIdentifier("steer-\(queued.id)")
+                                    }
+                                    Button { store.removeQueued(queued.id, threadID: thread.id) } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(HoverButtonStyle()).help("Remove queued message").accessibilityLabel("Remove queued message")
+                                        .accessibilityIdentifier("remove-queued-\(queued.id)")
+                                }
+                            }.padding(8).background(theme.surface, in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }.frame(height: min(CGFloat(messages.count) * 72, 144))
+                Text(store.pausedQueues.contains(thread.id) ? "Queue paused. Messages are kept here until you send them." : "Sends in order after the current turn. Queued messages stay here until you quit.")
+                    .font(.system(size: 11)).foregroundStyle(theme.secondary)
+            }.fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -522,11 +599,76 @@ private struct DraftEditor: View {
     let threadID: UUID
     let focusRequest: Int
     let theme: AppTheme
+    let commands: [AgentCommand]
+    let providerTitle: String
+    let commandsLoading: Bool
+    let commandError: String?
+    let refreshCommands: () -> Void
     let placeholder: String
     let onChange: (String) -> Void
     let onPasteImage: (NSPasteboard) -> Bool
     let onSend: () -> Void
+    @State private var selectedCommand = 0
+    @State private var dismissedText: String?
+    private var text: String { drafts.values[threadID] ?? "" }
+    private var matching: [AgentCommand] { SlashCommandQuery.matches(commands, text: text) }
+    private var showingCommands: Bool { SlashCommandQuery.prefix(in: text) != nil && dismissedText != text }
+    private func choose(_ command: AgentCommand) {
+        onChange(SlashCommandQuery.insertion(command)); selectedCommand = 0
+    }
+    private func commandKey(_ code: UInt16) -> Bool {
+        guard showingCommands else { return false }
+        if code == 53 { dismissedText = text; return true }
+        guard !matching.isEmpty else { return false }
+        if code == 125 || code == 126 {
+            selectedCommand = (min(selectedCommand, matching.count - 1) + (code == 125 ? 1 : matching.count - 1)) % matching.count
+            return true
+        }
+        if code == 36 || code == 76 || code == 48 {
+            choose(matching[min(selectedCommand, matching.count - 1)]); return true
+        }
+        return false
+    }
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if showingCommands {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Skills & commands").font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Button("Refresh", action: refreshCommands).font(.caption).disabled(commandsLoading)
+                    }
+                    if commandsLoading {
+                        Text("Loading from \(providerTitle)…").font(.caption).foregroundStyle(theme.secondary)
+                    } else if let commandError {
+                        Text(commandError).font(.caption).foregroundStyle(theme.secondary)
+                    } else if matching.isEmpty {
+                        Text("No matching commands reported by this CLI. Check your provider’s skills and this chat’s working directory.")
+                            .font(.caption).foregroundStyle(theme.secondary)
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                VStack(spacing: 2) {
+                                    ForEach(Array(matching.enumerated()), id: \.element.id) { index, command in
+                                        Button { choose(command) } label: {
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text("/\(command.name) \(command.argumentHint)").font(.system(size: 13, weight: .medium))
+                                                if !command.description.isEmpty {
+                                                    Text(command.description).font(.system(size: 12)).foregroundStyle(theme.secondary).lineLimit(2)
+                                                }
+                                            }.frame(maxWidth: .infinity, alignment: .leading).padding(7)
+                                                .background(index == min(selectedCommand, matching.count - 1) ? theme.accent.opacity(0.12) : .clear,
+                                                            in: RoundedRectangle(cornerRadius: 5))
+                                        }.buttonStyle(.plain).id(index).accessibilityLabel("Insert /\(command.name)")
+                                    }
+                                }
+                            }.frame(height: min(180, CGFloat(matching.count) * 62))
+                                .onChange(of: selectedCommand) { _, index in proxy.scrollTo(index) }
+                        }
+                        Text("↑ ↓ to choose · Return or Tab to insert · Escape to dismiss").font(.system(size: 11)).foregroundStyle(theme.secondary)
+                    }
+                }.padding(8).background(theme.surface, in: RoundedRectangle(cornerRadius: 7))
+            }
         ZStack(alignment: .topLeading) {
             if (drafts.values[threadID] ?? "").isEmpty {
                 Text(placeholder).font(.system(size: 15)).foregroundStyle(theme.subtle)
@@ -534,8 +676,9 @@ private struct DraftEditor: View {
             }
             ComposerTextView(focusRequest: focusRequest, theme: theme,
                              text: Binding(get: { drafts.values[threadID] ?? "" }, set: onChange),
-                             onPasteImage: onPasteImage, onSend: onSend)
-        }
+                             onPasteImage: onPasteImage, onSend: onSend, onCommandKey: commandKey)
+        }.frame(height: 110)
+        }.onChange(of: text) { _, _ in selectedCommand = 0; dismissedText = nil }
     }
 }
 
@@ -547,6 +690,7 @@ struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
     var onPasteImage: (NSPasteboard) -> Bool
     var onSend: () -> Void
+    var onCommandKey: (UInt16) -> Bool = { _ in false }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -576,7 +720,11 @@ struct ComposerTextView: NSViewRepresentable {
             editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             editor.scrollRangeToVisible(editor.selectedRange())
         }
-        editor.onPasteImage = onPasteImage; editor.onSend = onSend
+        editor.onPasteImage = onPasteImage
+        editor.onCommandKey = onCommandKey
+        editor.onSend = { [weak editor, weak coordinator = context.coordinator] in
+            if let editor { coordinator?.submit(editor) }
+        }
         // Reapplying text attributes on every edit invalidates native layout and
         // can move the scroll position while the insertion point is being drawn.
         if context.coordinator.theme != theme {
@@ -594,6 +742,15 @@ struct ComposerTextView: NSViewRepresentable {
         var theme: AppTheme?
         var parent: ComposerTextView
         init(_ parent: ComposerTextView) { self.parent = parent }
+        func submit(_ editor: NSTextView) {
+            parent.onSend()
+            // Clear accepted input before the next native key event, without
+            // waiting for SwiftUI to update this representable.
+            guard !editor.hasMarkedText(), editor.string != parent.text else { return }
+            editor.string = parent.text
+            editor.setSelectedRange(NSRange(location: (parent.text as NSString).length, length: 0))
+            editor.scrollRangeToVisible(editor.selectedRange())
+        }
         func textDidChange(_ notification: Notification) {
             if let editor = notification.object as? NSTextView { parent.text = editor.string }
         }
@@ -602,6 +759,7 @@ struct ComposerTextView: NSViewRepresentable {
 final class ScreenshotTextView: NSTextView {
     var onPasteImage: ((NSPasteboard) -> Bool)?
     var onSend: (() -> Void)?
+    var onCommandKey: ((UInt16) -> Bool)?
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
         super.readablePasteboardTypes + [.png, .tiff]
     }
@@ -615,6 +773,7 @@ final class ScreenshotTextView: NSTextView {
     }
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers.isEmpty, !hasMarkedText(), onCommandKey?(event.keyCode) == true { return }
         if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText() {
             if modifiers.isEmpty || modifiers == .command {
                 if !event.isARepeat { onSend?() }

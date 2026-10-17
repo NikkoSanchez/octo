@@ -86,6 +86,7 @@ import OctoAgents
         store.archive = WorkspaceArchive(projects: [project, second], selectedProjectID: project.id, selectedThreadID: original.id)
         XCTAssertFalse(store.showingReview)
         let model = try JSONDecoder().decode(AgentModel.self, from: Data(#"{"model":"test-model","displayName":"Test","description":"","hidden":false,"isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high","description":""}]}"#.utf8))
+        store.modelCatalogs[store.modelKey(original)] = [model]
         store.selectModel(model)
         store.selectPermissions(.readOnly, threadID: original.id)
         let expected = AgentSettings(model: "test-model", reasoningEffort: "high", permissionMode: .readOnly)
@@ -223,7 +224,7 @@ import OctoAgents
         store.shutdown()
     }
 
-    func testScreenshotPasteIsDraftOnlyAndRejectsUnsupportedProvider() throws {
+    func testScreenshotPasteIsDraftOnlyForBothProviders() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = AppStore(storage: WorkspaceStore(fileURL: directory.appendingPathComponent("workspace.json")))
@@ -250,9 +251,9 @@ import OctoAgents
         store.changeHarness(.claude)
         board.clearContents(); board.setData(png, forType: .png)
         XCTAssertTrue(store.pasteScreenshot(from: board, threadID: thread.id))
-        store.send()
-        XCTAssertEqual(store.draftImages[thread.id]?.count, 1)
+        XCTAssertEqual(store.draftImages[thread.id]?.count, 2)
         XCTAssertTrue(store.thread?.messages.isEmpty == true)
+        XCTAssertTrue(store.running.isEmpty)
         store.changeHarness(.codex)
         for _ in 0..<5 { store.pasteScreenshot(from: board, threadID: thread.id) }
         XCTAssertEqual(store.draftImages[thread.id]?.count, 4)
@@ -278,7 +279,7 @@ import OctoAgents
         let thread = WorkspaceThread(workingDirectory: directory.path)
         let project = WorkspaceProject(name: "Test", rootPath: directory.path, threads: [thread])
         store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id)
-        store.modelCatalogs[directory.path] = []; store.modelErrors[directory.path] = "old error"
+        store.modelCatalogs[store.modelKey(thread)] = []; store.modelErrors[store.modelKey(thread)] = "old error"
         let initial = store.codexConfigurationID
         store.setCodexExecutable(path: executable.path)
         XCTAssertNotEqual(initial, store.codexConfigurationID)
@@ -314,7 +315,7 @@ import OctoAgents
         store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id)
         let data = Data(#"[{"model":"a","displayName":"A","description":"","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":""},{"reasoningEffort":"high","description":""}]},{"model":"b","displayName":"B","description":"","hidden":false,"isDefault":false,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low","description":""}]}]"#.utf8)
         let models = try JSONDecoder().decode([AgentModel].self, from: data)
-        store.modelCatalogs[directory.path] = models
+        store.modelCatalogs[store.modelKey(thread)] = models
         store.selectModel(models[0]); store.selectReasoning("high")
         XCTAssertEqual(store.thread?.agentSettings, AgentSettings(model: "a", reasoningEffort: "high"))
         store.selectReasoning("unsupported")
@@ -326,7 +327,7 @@ import OctoAgents
         XCTAssertEqual(store.thread?.agentSettings, AgentSettings(model: "b", reasoningEffort: "low"))
         store.saveNow()
         XCTAssertEqual(try storage.load().projects[0].threads[0].agentSettings, store.thread?.agentSettings)
-        store.modelCatalogs[directory.path] = []
+        store.modelCatalogs[store.modelKey(thread)] = []
         store.drafts[thread.id] = "Keep this draft"
         store.send()
         XCTAssertEqual(store.drafts[thread.id], "Keep this draft")

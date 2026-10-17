@@ -52,9 +52,17 @@ import OctoTerminal
     @Published var modelCatalogs: [String: [AgentModel]] = [:]
     @Published var modelErrors: [String: String] = [:]
     @Published var loadingModels = Set<String>()
+    @Published var commandCatalogs: [String: [AgentCommand]] = [:]
+    @Published var commandErrors: [String: String] = [:]
+    @Published var loadingCommands = Set<String>()
+    @Published var claudeAuthStatus: ClaudeAuthStatus?
+    @Published var claudeAuthError: String?
+    @Published var checkingClaudeAuth = false
+    @Published var claudeConfigurationID = UUID()
     @Published var usageSnapshots: [String: AgentUsage] = [:]
     @Published var usageErrors: [String: String] = [:]
     @Published var loadingUsage = Set<String>()
+    let usageLedger = UsageLedger()
     @Published var error: String?
     let draftStore = DraftStore()
     var drafts: [UUID: String] {
@@ -70,7 +78,15 @@ import OctoTerminal
     @Published var draftImages: [UUID: [ImageAttachment]] = [:]
     @Published private(set) var importingImages: Set<UUID> = []
     @Published var attachments: [UUID: [CodeAttachment]] = [:]
+    @Published var browserAnnotations: [UUID: [BrowserAnnotation]] = [:]
+    @Published var showingBrowser = false
+    private var browserSessions: [UUID: BrowserSession] = [:]
     @Published var running = Set<UUID>()
+    @Published private(set) var queuedMessages: [UUID: [QueuedMessage]] = [:]
+    @Published private(set) var steeringMessages: [UUID: UUID] = [:]
+    @Published private(set) var queueErrors: [UUID: String] = [:]
+    @Published private(set) var pausedQueues = Set<UUID>()
+    private var shuttingDown = false
     @Published var approvals: [UUID: [AgentApproval]] = [:]
     @Published var interactions: [UUID: [AgentInteraction]] = [:]
     let terminal = TerminalWorkspace()
@@ -81,6 +97,8 @@ import OctoTerminal
     private let titleGenerator: TitleGenerator
     private var titleTasks: [UUID: Task<Void, Never>] = [:]
     private var titleRequests: [UUID: UUID] = [:]
+    typealias HarnessFactory = @MainActor (HarnessID, URL?) -> any AgentHarness
+    private let harnessFactory: HarnessFactory
     private var harnesses: [UUID: any AgentHarness] = [:]
     private var turnClocks: [UUID: TimeInterval] = [:]
     private var runIDs: [UUID: UUID] = [:]
@@ -93,7 +111,9 @@ import OctoTerminal
     var thread: WorkspaceThread? { project?.threads.first { $0.id == archive.selectedThreadID } }
     var isProjectChat: Bool { project.map { !$0.isChatCollection } ?? false }
     init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard,
+         harnessFactory: @escaping HarnessFactory = { HarnessRegistry.make($0, codexExecutable: $1) },
          titleGenerator: @escaping TitleGenerator = { try await HarnessRegistry.generateTitle($0, text: $1, codexExecutable: $2) }) {
+        self.harnessFactory = harnessFactory
         self.titleGenerator = titleGenerator
         self.storage = storage; self.preferences = preferences
         theme = AppTheme(rawValue: preferences.string(forKey: "appearanceTheme") ?? "") ?? .system
@@ -250,7 +270,7 @@ import OctoTerminal
         if let existing {
             id = existing.id
             if archive.projects[p].isChatCollection, !prepareChat(id) { return }
-            let hasDraft = !(drafts[id] ?? "").isEmpty || !(draftImages[id] ?? []).isEmpty || !(attachments[id] ?? []).isEmpty
+            let hasDraft = !(drafts[id] ?? "").isEmpty || !(draftImages[id] ?? []).isEmpty || !(attachments[id] ?? []).isEmpty || !(browserAnnotations[id] ?? []).isEmpty
             if requestedHarness != nil || !hasDraft {
                 mutate(id) { $0.harness = harness; $0.agentSettings = settings }
             }
@@ -299,7 +319,8 @@ import OctoTerminal
         guard !running.contains(id) else { error = "Stop the running agent before deleting this thread."; return }
         cancelTitle(id)
         harnesses.removeValue(forKey: id)?.shutdown()
-        drafts[id] = nil; draftImages[id] = nil; attachments[id] = nil; approvals[id] = nil; interactions[id] = nil
+        queuedMessages[id] = nil; pausedQueues.remove(id)
+        drafts[id] = nil; draftImages[id] = nil; attachments[id] = nil; browserAnnotations[id] = nil; approvals[id] = nil; interactions[id] = nil
         archive.removeThread(id, projectID: projectID); saveSoon()
     }
     func removeProject(_ id: UUID) {
@@ -309,6 +330,7 @@ import OctoTerminal
         }
         for thread in project.threads { deleteThread(thread.id, projectID: id) }
         archive.removeProject(id)
+        browserSessions.removeValue(forKey: id)?.webView.loadHTMLString("", baseURL: nil)
         if archive.selectedProjectID == nil { showingTerminal = false }
         saveSoon()
     }
@@ -346,6 +368,7 @@ import OctoTerminal
         else { preferences.removeObject(forKey: Self.codexPathKey) }
         codexConfigurationID = UUID(); codexVersion = "Checking version…"
         modelCatalogs.removeAll(); modelErrors.removeAll(); loadingModels.removeAll()
+        commandCatalogs.removeAll(); commandErrors.removeAll(); loadingCommands.removeAll()
         usageSnapshots.removeAll(); usageErrors.removeAll(); loadingUsage.removeAll()
     }
     func refreshCodexVersion() async {
@@ -359,26 +382,71 @@ import OctoTerminal
             if !Task.isCancelled && configuration == codexConfigurationID { codexVersion = "Version unavailable: \(error.localizedDescription)" }
         }
     }
-    func loadModels(directory: String, refresh: Bool = false) async {
-        guard !Task.isCancelled, !loadingModels.contains(directory), refresh || modelCatalogs[directory] == nil else { return }
-        let configuration = codexConfigurationID
-        loadingModels.insert(directory); modelErrors[directory] = nil
-        defer { if configuration == codexConfigurationID { loadingModels.remove(directory) } }
+    func modelKey(_ thread: WorkspaceThread) -> String { modelKey(thread.harness, directory: thread.workingDirectory) }
+    var claudeIsRunning: Bool {
+        archive.projects.flatMap(\.threads).contains { $0.harness == .claude && running.contains($0.id) }
+    }
+    func refreshClaudeAuth() async {
+        guard !checkingClaudeAuth else { return }
+        checkingClaudeAuth = true; claudeAuthError = nil
+        defer { checkingClaudeAuth = false }
         do {
-            guard let executable = codexExecutable else { throw ProcessFailure.missing("Codex executable (choose one in Settings)") }
-            let models = try await CodexHarness.models(directory: directory, executable: executable)
-            guard configuration == codexConfigurationID else { return }
-            modelCatalogs[directory] = models
+            let status = try await ClaudeCLI.authStatus()
+            guard !Task.isCancelled else { return }
+            claudeAuthStatus = status
         } catch {
-            if !Task.isCancelled && configuration == codexConfigurationID { modelErrors[directory] = "Could not load Codex models: \(error.localizedDescription)" }
+            guard !Task.isCancelled else { return }
+            claudeAuthStatus = nil; claudeAuthError = error.localizedDescription
+        }
+    }
+    func claudeSetupClosed() {
+        claudeConfigurationID = UUID()
+        commandCatalogs = commandCatalogs.filter { !$0.key.hasPrefix("claude:") }
+        commandErrors = commandErrors.filter { !$0.key.hasPrefix("claude:") }
+        loadingCommands = loadingCommands.filter { !$0.hasPrefix("claude:") }
+        modelCatalogs = modelCatalogs.filter { !$0.key.hasPrefix("claude:") }
+        modelErrors = modelErrors.filter { !$0.key.hasPrefix("claude:") }
+        loadingModels = loadingModels.filter { !$0.hasPrefix("claude:") }
+    }
+    func loadCommands(_ thread: WorkspaceThread, refresh: Bool = false) async {
+        let key = modelKey(thread), configuration = thread.harness == .claude ? claudeConfigurationID : codexConfigurationID
+        guard !Task.isCancelled, !loadingCommands.contains(key), refresh || commandCatalogs[key] == nil else { return }
+        loadingCommands.insert(key); commandErrors[key] = nil
+        defer { if configuration == (thread.harness == .claude ? claudeConfigurationID : codexConfigurationID) { loadingCommands.remove(key) } }
+        do {
+            let commands = try await HarnessRegistry.commands(thread.harness, directory: thread.workingDirectory, codexExecutable: codexExecutable)
+            guard !Task.isCancelled, configuration == (thread.harness == .claude ? claudeConfigurationID : codexConfigurationID) else { return }
+            commandCatalogs[key] = commands
+        } catch {
+            if !Task.isCancelled, configuration == (thread.harness == .claude ? claudeConfigurationID : codexConfigurationID) { commandErrors[key] = error.localizedDescription }
+        }
+    }
+    func modelKey(_ harness: HarnessID, directory: String) -> String { "\(harness.rawValue):\(directory)" }
+    func supportsImages(_ harness: HarnessID) -> Bool { harnessDescriptors.first { $0.id == harness }?.supportsImages == true }
+    func supportsModels(_ harness: HarnessID) -> Bool { harnessDescriptors.first { $0.id == harness }?.supportsModels == true }
+    func loadModels(directory: String, harness: HarnessID = .codex, refresh: Bool = false) async {
+        let key = modelKey(harness, directory: directory)
+        guard supportsModels(harness), !Task.isCancelled, !loadingModels.contains(key), refresh || modelCatalogs[key] == nil else { return }
+        let configuration = harness == .claude ? claudeConfigurationID : codexConfigurationID
+        loadingModels.insert(key); modelErrors[key] = nil
+        defer { if configuration == (harness == .claude ? claudeConfigurationID : codexConfigurationID) { loadingModels.remove(key) } }
+        do {
+            if harness == .codex && codexExecutable == nil { throw ProcessFailure.missing("Codex executable (choose one in Settings)") }
+            let models = try await HarnessRegistry.models(harness, directory: directory, codexExecutable: codexExecutable)
+            guard !Task.isCancelled, configuration == (harness == .claude ? claudeConfigurationID : codexConfigurationID) else { return }
+            modelCatalogs[key] = models
+        } catch {
+            if !Task.isCancelled && configuration == (harness == .claude ? claudeConfigurationID : codexConfigurationID) { modelErrors[key] = "Could not load \(harness.title) models: \(error.localizedDescription)" }
         }
     }
     func selectModel(_ model: AgentModel) {
-        guard let thread, thread.harness == .codex, !running.contains(thread.id) else { return }
+        guard let thread, supportsModels(thread.harness), !running.contains(thread.id),
+              modelCatalogs[modelKey(thread)]?.contains(model) == true else { return }
         mutate(thread.id) {
             let previous = $0.agentSettings.reasoningEffort
+            let fallback = model.defaultReasoningEffort.isEmpty ? nil : model.defaultReasoningEffort
             $0.agentSettings = AgentSettings(model: model.model, reasoningEffort:
-                model.supportedReasoningEfforts.contains { $0.reasoningEffort == previous } ? previous : model.defaultReasoningEffort,
+                model.supportedReasoningEfforts.contains { $0.reasoningEffort == previous } ? previous : fallback,
                 permissionMode: $0.agentSettings.permissionMode)
         }
         rememberAgentChoices()
@@ -389,7 +457,10 @@ import OctoTerminal
         mutate(thread.id) { $0.agentSettings.permissionMode = mode }
         rememberAgentChoices()
     }
-    func usageKey(_ thread: WorkspaceThread) -> String { "\(thread.harness.rawValue):\(thread.workingDirectory)" }
+    /// Claude limits arrive on any session's stream and belong to the signed-in account, not a checkout.
+    func usageKey(_ thread: WorkspaceThread) -> String {
+        thread.harness == .claude ? thread.harness.rawValue : "\(thread.harness.rawValue):\(thread.workingDirectory)"
+    }
     func loadUsage(_ thread: WorkspaceThread) async {
         let key = usageKey(thread), configuration = codexConfigurationID
         guard !loadingUsage.contains(key) else { return }
@@ -405,8 +476,8 @@ import OctoTerminal
         }
     }
     func selectReasoning(_ effort: String) {
-        guard let thread, thread.harness == .codex, !running.contains(thread.id),
-              let model = modelCatalogs[thread.workingDirectory]?.first(where: { $0.model == thread.agentSettings.model }),
+        guard let thread, supportsModels(thread.harness), !running.contains(thread.id),
+              let model = modelCatalogs[modelKey(thread)]?.first(where: { $0.model == thread.agentSettings.model }),
               model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == effort }) else { return }
         mutate(thread.id) { $0.agentSettings.reasoningEffort = effort }
         rememberAgentChoices()
@@ -424,7 +495,7 @@ import OctoTerminal
     }
     private func canAttachImage(_ threadID: UUID) -> Bool {
         guard let owner = archive.projects.flatMap(\.threads).first(where: { $0.id == threadID }) else { return false }
-        guard owner.harness == .codex else { error = "Image attachments currently require Codex."; return false }
+        guard supportsImages(owner.harness) else { error = "Image attachments are unavailable with this provider."; return false }
         guard (draftImages[threadID]?.count ?? 0) < 4 else { error = "You can attach up to four images per message."; return false }
         return true
     }
@@ -471,6 +542,33 @@ import OctoTerminal
         guard let thread, thread.workingDirectory == attachment.workingDirectory else { error = "This selection belongs to a different checkout."; return }
         attachments[thread.id, default: []].append(attachment); showingTerminal = false
     }
+    /// One browser per project, kept alive while hidden so page state survives panel and project switches.
+    func browserSession(for projectID: UUID) -> BrowserSession {
+        if let session = browserSessions[projectID] { return session }
+        let session = BrowserSession(); browserSessions[projectID] = session
+        session.onAnnotation = { [weak self] in self?.attachBrowserAnnotation($0, screenshot: $1, projectID: projectID) }
+        return session
+    }
+    /// Adds an annotation (and its screenshot when the provider accepts images) to the draft; never sends.
+    func attachBrowserAnnotation(_ annotation: BrowserAnnotation, screenshot: Data?, projectID: UUID) {
+        guard project?.id == projectID, !shuttingDown else { return }
+        if thread == nil { newThread() }
+        guard let thread else { return }
+        var annotation = annotation
+        if let screenshot, supportsImages(thread.harness), (draftImages[thread.id]?.count ?? 0) < 4,
+           let image = try? DraftImageImport.decode(screenshot, name: "Annotation \((browserAnnotations[thread.id]?.count ?? 0) + 1)") {
+            draftImages[thread.id, default: []].append(image); annotation.screenshot = image.name
+        }
+        browserAnnotations[thread.id, default: []].append(annotation); showingTerminal = false
+        focusComposer()
+    }
+    func attachBrowserScreenshot(_ data: Data, projectID: UUID) {
+        guard project?.id == projectID, !shuttingDown else { return }
+        if thread == nil { newThread() }
+        guard let thread, canAttachImage(thread.id) else { return }
+        do { draftImages[thread.id, default: []].append(try DraftImageImport.decode(data, name: "Browser")); focusComposer() }
+        catch { self.error = error.localizedDescription }
+    }
     func openInEditor(_ snapshot: ReviewSnapshot, selection: CodeAttachment?) {
         guard archive.projects.contains(where: { $0.id == snapshot.projectID && !$0.isChatCollection }) else { return }
         Task {
@@ -480,52 +578,115 @@ import OctoTerminal
             } catch { self.error = error.localizedDescription }
         }
     }
-    func send() {
-        if let id = thread?.id, project?.isChatCollection == true, !prepareChat(id) { return }
-        guard let thread, !running.contains(thread.id), !importingImages.contains(thread.id) else { return }
+    private func validateMessage(_ thread: WorkspaceThread, images: [ImageAttachment]) -> Bool {
         if let mode = thread.agentSettings.permissionMode,
            harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) != true {
-            error = "The saved permission mode is unavailable with this CLI. Choose a supported mode before sending."; return
+            error = "The saved permission mode is unavailable with this CLI. Choose a supported mode before sending."; return false
         }
-        let images = draftImages[thread.id] ?? []
         if !images.isEmpty {
-            guard thread.harness == .codex else { error = "Screenshot attachments currently require Codex. Remove them or switch providers."; return }
-            if let model = modelCatalogs[thread.workingDirectory]?.first(where: { $0.model == thread.agentSettings.model }), !model.supportsImages {
-                error = "This model does not support images. Choose an image-capable model or remove the screenshots."; return
+            guard supportsImages(thread.harness) else { error = "Screenshot attachments are unavailable with this provider. Remove them or switch providers."; return false }
+            if let model = modelCatalogs[modelKey(thread)]?.first(where: { $0.model == thread.agentSettings.model }), !model.supportsImages {
+                error = "This model does not support images. Choose an image-capable model or remove the screenshots."; return false
             }
         }
         if thread.harness == .codex && codexExecutable == nil {
-            error = "Codex executable not found. Choose an installation in Settings."; return
+            error = "Codex executable not found. Choose an installation in Settings."; return false
         }
-        if thread.harness == .codex, let modelID = thread.agentSettings.model,
-           let catalog = modelCatalogs[thread.workingDirectory] {
+        if harnessDescriptors.first(where: { $0.id == thread.harness })?.executable == nil {
+            error = "\(thread.harness.title) executable not found. Install its CLI and authenticate before sending."; return false
+        }
+        if supportsModels(thread.harness), let modelID = thread.agentSettings.model,
+           let catalog = modelCatalogs[modelKey(thread)] {
             guard let model = catalog.first(where: { $0.model == modelID }) else {
-                error = "The selected model is unavailable. Choose a model from the current catalog."; return
+                error = "The selected model is unavailable. Choose a model from the current catalog."; return false
             }
             if let effort = thread.agentSettings.reasoningEffort,
                effort != model.defaultReasoningEffort && !model.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == effort }) {
-                error = "The selected reasoning effort is unavailable for this model. Choose a supported effort."; return
+                error = "The selected reasoning effort is unavailable for this model. Choose a supported effort."; return false
             }
         }
-        let text = (drafts[thread.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let selections = attachments[thread.id] ?? []
-        guard !text.isEmpty || !images.isEmpty else { return }
-        let id = thread.id
-        let prompt = text + (selections.isEmpty ? "" : "\n\nSelected code context (captured snapshots):\n" + selections.map(\.promptContext).joined(separator: "\n\n"))
-        prepareThreadTitle(thread, text: text)
-        mutate(id) {
-            $0.messages.append(ChatMessage(role: .user, text: text, attachments: selections, images: images))
+        return true
+    }
+    func send() {
+        if let id = thread?.id, project?.isChatCollection == true, !prepareChat(id) { return }
+        guard let thread, canSend(thread), !shuttingDown else { return }
+        let images = draftImages[thread.id] ?? []
+        guard validateMessage(thread, images: images) else { return }
+        guard (queuedMessages[thread.id]?.count ?? 0) < 20 else {
+            error = "You can queue up to 20 messages per chat."; return
         }
-        drafts[id] = ""; attachments[id] = []; draftImages[id] = []; beginWork(id)
+        let text = (drafts[thread.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = QueuedMessage(message: ChatMessage(role: .user, text: text, attachments: attachments[thread.id] ?? [], images: images,
+                                                                 browserAnnotations: browserAnnotations[thread.id] ?? []),
+                                    harness: thread.harness, directory: thread.workingDirectory)
+        drafts[thread.id] = ""; attachments[thread.id] = []; draftImages[thread.id] = []; browserAnnotations[thread.id] = []
+        if !running.contains(thread.id), (queuedMessages[thread.id] ?? []).isEmpty { pausedQueues.remove(thread.id) }
+        queuedMessages[thread.id, default: []].append(message)
+        if !running.contains(thread.id), !pausedQueues.contains(thread.id) { sendNextQueued(thread.id) }
+    }
+    func canSteer(_ thread: WorkspaceThread) -> Bool {
+        running.contains(thread.id) && !stopping.contains(thread.id) && steeringMessages[thread.id] == nil &&
+        harnessDescriptors.first(where: { $0.id == thread.harness })?.capabilities.steering == true
+    }
+    func removeQueued(_ messageID: UUID, threadID: UUID) {
+        guard steeringMessages[threadID] != messageID else { return }
+        queuedMessages[threadID]?.removeAll { $0.id == messageID }; queueErrors[messageID] = nil
+        if (queuedMessages[threadID] ?? []).isEmpty { pausedQueues.remove(threadID) }
+    }
+    func resumeQueue(_ threadID: UUID) {
+        guard !running.contains(threadID), steeringMessages[threadID] == nil else { return }
+        pausedQueues.remove(threadID); sendNextQueued(threadID)
+    }
+    private func sendNextQueued(_ id: UUID) {
+        guard !shuttingDown, !running.contains(id), steeringMessages[id] == nil, !pausedQueues.contains(id),
+              let queued = queuedMessages[id]?.first,
+              let thread = archive.projects.flatMap(\.threads).first(where: { $0.id == id }) else { return }
+        guard queued.harness == thread.harness, queued.directory == thread.workingDirectory else {
+            pausedQueues.insert(id); queueErrors[queued.id] = "The provider or checkout changed. Remove this message and compose it again."; return
+        }
+        guard validateMessage(thread, images: queued.message.images) else {
+            pausedQueues.insert(id); queueErrors[queued.id] = error; return
+        }
+        queuedMessages[id]?.removeFirst(); queueErrors[queued.id] = nil
+        prepareThreadTitle(thread, text: queued.message.text)
+        flushStreamText()
+        mutate(id) { $0.messages.append(queued.message) }
+        beginWork(id)
         let harness: any AgentHarness
         if let existing = harnesses[id] { harness = existing } else {
-            harness = HarnessRegistry.make(thread.harness, codexExecutable: codexExecutable); harnesses[id] = harness
+            harness = harnessFactory(thread.harness, codexExecutable); harnesses[id] = harness
             harness.onEvent = { [weak self] event in self?.receive(event, threadID: id) }
         }
         let runID = runIDs[id]
         Task {
-            do { try await harness.send(prompt: prompt, sessionID: thread.remoteSessionID, directory: thread.workingDirectory, settings: thread.agentSettings, images: images) }
+            guard !shuttingDown, runIDs[id] == runID else { return }
+            guard !stopping.contains(id) else { receive(.interrupted, threadID: id); return }
+            do { try await harness.send(prompt: queued.prompt, sessionID: thread.remoteSessionID, directory: queued.directory,
+                                        settings: thread.agentSettings, images: queued.message.images) }
             catch { if runIDs[id] == runID { receive(.failed(error.localizedDescription), threadID: id) } }
+        }
+    }
+    func steerQueued(_ messageID: UUID, threadID id: UUID) {
+        guard let thread = archive.projects.flatMap(\.threads).first(where: { $0.id == id }), canSteer(thread),
+              let queued = queuedMessages[id]?.first(where: { $0.id == messageID }), let harness = harnesses[id] else { return }
+        flushStreamText()
+        let insertionIndex = archive.projects.flatMap(\.threads).first(where: { $0.id == id })?.messages.count ?? 0
+        steeringMessages[id] = messageID; queueErrors[messageID] = nil
+        Task {
+            do {
+                try await harness.steer(prompt: queued.prompt, images: queued.message.images)
+                guard !shuttingDown else { return }
+                flushStreamText()
+                var message = queued.message; message.isSteering = true
+                mutate(id) { $0.messages.insert(message, at: min(insertionIndex, $0.messages.count)) }
+                queuedMessages[id]?.removeAll { $0.id == messageID }
+            } catch {
+                guard !shuttingDown else { return }
+                queueErrors[messageID] = "Steering was not confirmed: \(error.localizedDescription)"
+                pausedQueues.insert(id)
+            }
+            steeringMessages[id] = nil
+            sendNextQueued(id)
         }
     }
     /// Called only on explicit send; opening saved chats never makes a title request.
@@ -565,6 +726,7 @@ import OctoTerminal
     }
     private func finishWork(_ id: UUID, outcome: TurnWork.Outcome) {
         endCompaction(id)
+        endToolActivities(id)
         guard let started = turnClocks.removeValue(forKey: id) else { return }
         runIDs[id] = nil
         let elapsed = max(0, ProcessInfo.processInfo.systemUptime - started), completed = Date()
@@ -572,7 +734,7 @@ import OctoTerminal
         mutate(id) { thread in
             thread.lastActivityAt = completed
             if result == .completed { thread.unreadCompletedAt = completed }
-            guard let index = thread.messages.lastIndex(where: { $0.role == .user }), thread.messages[index].work != nil else { return }
+            guard let index = thread.messages.lastIndex(where: { $0.role == .user && $0.work != nil }) else { return }
             thread.messages[index].work?.elapsed = elapsed
             thread.messages[index].work?.outcome = result
             for i in thread.messages.indices where i > index && thread.messages[i].role == .assistant {
@@ -585,9 +747,23 @@ import OctoTerminal
         guard running.contains(id) else { return }
         flushStreamText()
         endCompaction(id)
-        stopping.insert(id)
+        stopping.insert(id); pausedQueues.insert(id)
+        endToolActivities(id)
         interactions[id] = []; approvals[id] = []
-        Task { await harnesses[id]?.interrupt() }
+        let runID = runIDs[id], harness = harnesses[id]
+        Task {
+            guard runIDs[id] == runID, stopping.contains(id) else { return }
+            await harness?.interrupt()
+        }
+    }
+    private func endToolActivities(_ id: UUID) {
+        mutate(id) { thread in
+            for index in thread.messages.indices {
+                guard var tool = thread.messages[index].toolActivity, tool.state == .running else { continue }
+                tool.state = .interrupted
+                thread.messages[index].toolActivity = tool; thread.messages[index].text = tool.text
+            }
+        }
     }
     private func endCompaction(_ id: UUID) {
         guard archive.projects.flatMap(\.threads).first(where: { $0.id == id })?.lastCompaction?.state == .compacting else { return }
@@ -667,7 +843,9 @@ import OctoTerminal
             else { $0.messages.append(ChatMessage(role: .assistant, text: text)) }
         }
         case .message(let text): mutate(threadID) { $0.messages.append(ChatMessage(role: .assistant, text: text)) }
-        case .toolActivity(let activity): mutate(threadID) { thread in
+        case .toolActivity(let activity):
+            guard running.contains(threadID), !stopping.contains(threadID) else { return }
+            mutate(threadID) { thread in
             if let index = thread.messages.firstIndex(where: { $0.toolActivity?.id == activity.id }) {
                 guard thread.messages[index].toolActivity?.state == .running else { return }
                 thread.messages[index].toolActivity = activity; thread.messages[index].text = activity.text
@@ -693,18 +871,21 @@ import OctoTerminal
         case .usage(let usage):
             if let owner = archive.projects.flatMap(\.threads).first(where: { $0.id == threadID }) {
                 let key = usageKey(owner)
-                var buckets = usageSnapshots[key]?.buckets ?? []
-                for bucket in usage.buckets {
-                    buckets.removeAll { $0.id == bucket.id }; buckets.append(bucket)
-                }
-                var merged = usage; merged.buckets = buckets.sorted { $0.id < $1.id }
-                usageSnapshots[key] = merged
+                usageSnapshots[key] = AgentUsage.merging(usage, into: usageSnapshots[key])
             }
         case .failed(let text):
+            pausedQueues.insert(threadID)
             finishWork(threadID, outcome: .failed)
             running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []
             mutate(threadID) { $0.messages.append(ChatMessage(role: .error, text: text)) }
-        case .finished: finishWork(threadID, outcome: .completed); running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []; saveSoon()
+        case .interrupted:
+            pausedQueues.insert(threadID)
+            finishWork(threadID, outcome: .interrupted); running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []
+        case .finished:
+            guard running.contains(threadID) else { return }
+            finishWork(threadID, outcome: .completed); running.remove(threadID); approvals[threadID] = []; interactions[threadID] = []; saveSoon()
+            // Yield past the provider callback before beginning another turn.
+            Task { [weak self] in self?.sendNextQueued(threadID) }
         case .approval(let approval):
             if !(approvals[threadID] ?? []).contains(where: { $0.id == approval.id }) { approvals[threadID, default: []].append(approval) }
         case .approvalResolved(let id): approvals[threadID]?.removeAll { $0.id == id }
@@ -729,6 +910,7 @@ import OctoTerminal
         }
     }
     func shutdown() {
+        shuttingDown = true
         terminal.shutdown()
         for id in Array(titleTasks.keys) { cancelTitle(id) }
         flushStreamText()
@@ -789,5 +971,17 @@ enum DraftImageImport {
               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
               png.count <= 5 * 1_024 * 1_024 else { throw ImageImportFailure.invalid }
         return ImageAttachment(name: name, pngData: png)
+    }
+}
+
+/// Explicitly submitted snapshots waiting for delivery, local to this app session.
+struct QueuedMessage: Identifiable {
+    var id: UUID { message.id }
+    let message: ChatMessage
+    let harness: HarnessID
+    let directory: String
+    var prompt: String {
+        message.text + (message.attachments.isEmpty ? "" : "\n\nSelected code context (captured snapshots):\n" + message.attachments.map(\.promptContext).joined(separator: "\n\n"))
+            + (message.browserAnnotations.isEmpty ? "" : "\n\nBrowser annotations (captured from the browser panel):\n" + message.browserAnnotations.map(\.promptContext).joined(separator: "\n\n"))
     }
 }

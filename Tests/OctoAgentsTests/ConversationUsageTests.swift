@@ -51,7 +51,7 @@ final class ConversationUsageTests: XCTestCase {
                         snapshots.append(usage)
                         if usage.latest.total == 32_000 { finalUsage.fulfill() }
                     case .compaction(let compaction): states.append(compaction.state)
-                    case .finished: done.fulfill()
+                    case .finished, .interrupted: done.fulfill()
                     case .failed(let error): XCTFail(error)
                     default: break
                     }
@@ -76,7 +76,7 @@ final class ConversationUsageTests: XCTestCase {
             harness.onEvent = { event in
                 switch event {
                 case .compaction(let compaction): states.append(compaction.state); started.fulfill()
-                case .finished, .failed: ended.fulfill()
+                case .finished, .interrupted, .failed: ended.fulfill()
                 default: break
                 }
             }

@@ -53,7 +53,8 @@ import OctoGit
         if refreshSelection { snapshotGeneration = UUID(); loadingSnapshot = false }
         let nextContext = projectID.uuidString + root
         if context != nextContext {
-            context = nextContext; editor = nil; filePath = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
+            // `filePath` belongs to the panel's selected file tab, which applies to every checkout.
+            context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
@@ -64,7 +65,7 @@ import OctoGit
             files = result; self.branch = branch; error = nil
             if !refreshSelection { loading = false; return }
             if browsingFiles {
-                if let selectedPath, paths.contains(selectedPath) || editor?.isDirty == true { await selectPath(selectedPath, projectID: projectID, root: root) }
+                if let filePath, paths.contains(filePath) || editors.existing(root: root, path: filePath)?.isDirty == true { await selectPath(filePath, projectID: projectID, root: root) }
                 else { snapshot = nil; editor = nil; selection = nil; selectedPath = nil }
                 if generation == token { loading = false }; return
             }
@@ -84,6 +85,22 @@ import OctoGit
             if let file = files.first(where: { $0.path == path }) ?? files.first { await select(file, projectID: projectID, root: root) }
             else { snapshotGeneration = UUID(); snapshot = nil; selectedPath = nil; loadingSnapshot = false }
         }
+    }
+    /// Mirrors the panel's selected tab before a refresh, so the refresh restores that tab's file.
+    func adopt(_ tabs: PanelTabs) {
+        guard tabs.showsReview else { return }
+        browsingFiles = tabs.isBrowsingFiles
+        if browsingFiles { filePath = tabs.selectedFile }
+    }
+    /// Shows the panel's selected tab. Browser tabs and the empty panel leave the review state untouched.
+    func show(_ tabs: PanelTabs, projectID: UUID, root: String) async {
+        guard tabs.showsReview else { return }
+        adopt(tabs)
+        if browsingFiles, filePath == nil {
+            snapshotGeneration = UUID(); snapshot = nil; editor = nil; selectedPath = nil; selection = nil; loadingSnapshot = false
+        } else if browsingFiles, let filePath, selectedPath == filePath, snapshot?.scope == .file, snapshot?.path == filePath, snapshot?.workingDirectory == root, !loadingSnapshot {
+            return
+        } else { await switchBrowser(projectID: projectID, root: root) }
     }
     func selectPath(_ path: String, projectID: UUID, root: String) async {
         guard browsingFiles else { return }

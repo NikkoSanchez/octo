@@ -195,6 +195,7 @@ struct InlineFilePane: View {
     let revealRequest: Int
     let onSelection: (CodeAttachment?) -> Void
     let onAskAgent: (CodeAttachment) -> Void
+    var onEdit: () -> Void = {}
     @Environment(\.octoTheme) private var colors
     @State private var confirmingReload = false
     var body: some View {
@@ -222,6 +223,7 @@ struct InlineFilePane: View {
             } else if session.error == nil { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
             else { Spacer() }
         }
+        .onChange(of: session.isDirty) { _, dirty in if dirty { onEdit() } }
         .alert("Reload file from disk?", isPresented: $confirmingReload) {
             Button("Reload", role: .destructive) { Task { await session.load(discardChanges: true) } }
             Button("Keep Editing", role: .cancel) {}

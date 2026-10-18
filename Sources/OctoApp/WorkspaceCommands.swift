@@ -161,13 +161,15 @@ final class KeyRoutingView: NSView {
             }
             self.hintHold.update(commandDown: event.modifierFlags.contains(.command), keyDown: event.type == .keyDown)
             guard event.type == .keyDown,
-                  let command = self.commands.first(where: { $0.matches(event) }),
-                  (command.terminalAllowed || !self.terminalVisible),
-                  (!command.terminalRequired || self.terminalVisible) else { return event }
+                  let command = Self.command(for: event, in: self.commands, terminalVisible: self.terminalVisible) else { return event }
             // Reserve unavailable app commands too; don't leak them to a shell.
             if command.enabled { command.action() }
             return nil
         }
+    }
+    /// Terminal and panel commands may share a key; the visible surface's command wins.
+    static func command(for event: NSEvent, in commands: [AppCommand], terminalVisible: Bool) -> AppCommand? {
+        commands.first { $0.matches(event) && ($0.terminalAllowed || !terminalVisible) && (!$0.terminalRequired || terminalVisible) }
     }
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil

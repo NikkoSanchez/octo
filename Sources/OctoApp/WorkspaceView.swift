@@ -23,6 +23,7 @@ struct WorkspaceView: View {
     @State private var paletteAction: (() -> Void)?
     @State private var fileAction: FileAction?
     @State private var reviewFocus = 0
+    @State private var surfacePickerFocus = 0
     @State private var showingShortcutHints = false
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -90,6 +91,8 @@ struct WorkspaceView: View {
             compactSidebarOpen = false
             if layout.detailWidth < 737 { store.showingReview = false }
         }
+        // The picker's letter keys need focus; it otherwise stays in the composer when the panel opens.
+        .onChange(of: surfacePickerVisible) { _, visible in if visible { focusSurfacePicker() } }
         .onChange(of: store.showingReview) { _, visible in
             if visible { compactSidebarOpen = false; if singleReview { NativeWorkspaceFocus.clear() } }
             else if !store.showingTerminal {
@@ -111,7 +114,10 @@ struct WorkspaceView: View {
             if review.browsingFiles { reviewFocus += 1 }
         }) { action in
             FileActionSheet(action: action, store: store) { path in
+                if action.kind == .delete { store.updatePanelTabs(action.projectID) { $0.close(.file(path)) } }
+                else { store.updatePanelTabs(action.projectID) { $0.openFile(path, pinned: true) } }
                 await review.fileDidChange(path, deleted: action.kind == .delete, projectID: action.projectID, root: action.root)
+                if action.kind == .delete, store.project?.id == action.projectID { syncReview() }
             }.modifier(ThemedContent(theme: store.theme))
         }
         .onChange(of: store.showingTerminal) { _, visible in
@@ -131,6 +137,14 @@ struct WorkspaceView: View {
     private var layout: WorkspaceLayout { layout(at: windowWidth) }
     private func layout(at width: CGFloat) -> WorkspaceLayout {
         WorkspaceLayout(width: width, sidebarWidth: sidebarWidth, sidebarOpen: sidebarOpen, compactSidebarOpen: compactSidebarOpen)
+    }
+    private var surfacePickerVisible: Bool {
+        store.isProjectChat && store.showingReview && !store.showingTerminal && store.project?.panelTabs.selected == nil
+    }
+    /// Takes focus from the composer's native text view, then focuses the picker once it is mounted.
+    private func focusSurfacePicker() {
+        NativeWorkspaceFocus.clear()
+        DispatchQueue.main.async { surfacePickerFocus += 1 }
     }
     private var singleReview: Bool { store.isProjectChat && layout.detailWidth < 737 && store.showingReview && !store.showingTerminal }
     private func toggleSidebar() {
@@ -153,6 +167,7 @@ struct WorkspaceView: View {
     private var reviewKey: String { (store.project?.id.uuidString ?? "") + (store.thread?.workingDirectory ?? "") }
     private func refresh() async {
         guard let project = store.project, store.isProjectChat else { return }
+        review.adopt(project.panelTabs)
         await review.refresh(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
     }
     private func openMarkdownFile(_ url: URL) {
@@ -167,6 +182,7 @@ struct WorkspaceView: View {
             return
         }
         store.showingTerminal = false; store.showingReview = true
+        store.updatePanelTabs(project.id) { $0.openFile(link.path, pinned: false) }
         Task { await review.reveal(link, projectID: project.id, root: root) }
     }
     private var sidebar: some View {
@@ -209,40 +225,88 @@ struct WorkspaceView: View {
         }
     }
     private func reviewPane(_ project: WorkspaceProject) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                HStack(spacing: 3) {
-                    Button { revealReview(files: false) } label: {
-                        Text("Changes (\(review.files.count))").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(padded: false, selected: !review.browsingFiles && !store.showingBrowser))
-                        .shortcutHint("changes")
-                        .accessibilityAddTraits(!review.browsingFiles && !store.showingBrowser ? .isSelected : [])
-                    Button { revealReview(files: true) } label: {
-                        Text("Files").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles && !store.showingBrowser))
-                        .shortcutHint("browseFiles")
-                        .accessibilityAddTraits(review.browsingFiles && !store.showingBrowser ? .isSelected : [])
-                    Button { revealBrowser() } label: {
-                        Text("Browser").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(HoverButtonStyle(padded: false, selected: store.showingBrowser))
-                        .shortcutHint("browser")
-                        .accessibilityAddTraits(store.showingBrowser ? .isSelected : [])
-                }.padding(3).background(theme.surface, in: RoundedRectangle(cornerRadius: 8))
-                    .frame(maxWidth: 330)
-                Spacer()
-                if !store.showingBrowser { reviewControls }
-            }.padding(12)
+        let tabs = project.panelTabs
+        return VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 3) {
+                            ForEach(tabs.tabs, id: \.self) { tab in panelTabButton(tab, tabs: tabs, project: project).id(tab) }
+                            Menu {
+                                Button("Browser") { openBrowserTab() }
+                                Button("Private Browser") { openBrowserTab(isPrivate: true) }
+                                Button("Files") { showPanel { $0.showFiles() } }
+                                Button("Changes") { showPanel { $0.showChanges() } }
+                            } label: { Image(systemName: "plus") }
+                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                                .padding(.horizontal, 6).frame(minHeight: 28).hoverFeedback()
+                                .help("Open a browser, files or changes").accessibilityLabel("Open a surface")
+                        }.padding(.vertical, 3)
+                    }
+                    .onChange(of: tabs.selected) { _, selected in if let selected { proxy.scrollTo(selected) } }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                if tabs.showsReview { reviewControls(tabs: tabs, project: project) }
+            }.padding(.horizontal, 12).padding(.vertical, 9)
             Divider()
             ZStack {
-                reviewContent(project).opacity(store.showingBrowser ? 0 : 1).allowsHitTesting(!store.showingBrowser).accessibilityHidden(store.showingBrowser)
-                // Mounted while hidden so the page, scroll position and dev-server session survive.
-                BrowserPane(session: store.browserSession(for: project.id)) { store.attachBrowserScreenshot($0, projectID: project.id) }
-                    .id(project.id)
-                    .opacity(store.showingBrowser ? 1 : 0).allowsHitTesting(store.showingBrowser).accessibilityHidden(!store.showingBrowser)
+                reviewContent(project, tabs: tabs).opacity(tabs.showsReview ? 1 : 0).allowsHitTesting(tabs.showsReview).accessibilityHidden(!tabs.showsReview)
+                // Every open browser tab stays mounted so its page, scroll position and dev-server session survive.
+                ForEach(tabs.browsers, id: \.self) { id in
+                    let visible = tabs.selectedBrowser == id
+                    BrowserPane(session: store.browserSession(id, projectID: project.id), isVisible: visible && store.showingReview && !store.showingTerminal) { store.attachBrowserScreenshot($0, projectID: project.id) }
+                        .opacity(visible ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
+                }
+                if tabs.selected == nil {
+                    SurfacePicker(changeCount: review.files.count, focusRequest: surfacePickerFocus,
+                                  openBrowser: { openBrowserTab(isPrivate: $0) },
+                                  openFiles: { showPanel { $0.showFiles() } },
+                                  openChanges: { showPanel { $0.showChanges() } })
+                        .background(theme.background)
+                }
             }
         }
     }
-    @ViewBuilder private var reviewControls: some View {
+    private func panelTabButton(_ tab: PanelTab, tabs: PanelTabs, project: WorkspaceProject) -> some View {
+        let selected = tabs.selected == tab
+        return HStack(spacing: 2) {
+            Button { showPanel { $0.select(tab) } } label: {
+                HStack(spacing: 6) {
+                    switch tab {
+                    case .changes:
+                        Image(systemName: "plus.forwardslash.minus").font(.system(size: 11))
+                        Text("Changes")
+                        Text("\(review.files.count)").font(.system(size: 11, weight: .medium).monospacedDigit()).foregroundStyle(theme.secondary)
+                    case .files:
+                        Image(systemName: "doc.on.doc").font(.system(size: 11))
+                        Text("Files")
+                    case .file(let path):
+                        Image(systemName: "doc.text").font(.system(size: 11))
+                        Text((path as NSString).lastPathComponent).italic(tabs.preview == path)
+                    case .browser(let id):
+                        PanelBrowserTabTitle(session: store.browserSession(id, projectID: project.id))
+                    }
+                }
+                .font(.system(size: 13)).lineLimit(1).frame(maxWidth: 180, minHeight: 26).padding(.leading, 8).padding(.trailing, 2)
+                .contentShape(Rectangle())
+            }
+                .buttonStyle(HoverButtonStyle(padded: false, selected: selected))
+                .simultaneousGesture(TapGesture(count: 2).onEnded { if let path = tab.path { store.updatePanelTabs(project.id) { $0.pin(path) } } })
+                .help(tab.path ?? "")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            Button { closePanelTab(tab) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 18, height: 26) }
+                .buttonStyle(HoverButtonStyle(padded: false)).padding(.trailing, 2)
+                .shortcutHint("closePanelTab", active: selected).help("Close tab").accessibilityLabel("Close tab")
+        }
+        .background(selected ? theme.selection : theme.surface, in: RoundedRectangle(cornerRadius: 6))
+        .contextMenu {
+            if let path = tab.path, tabs.preview == path { Button("Keep Open") { store.updatePanelTabs(project.id) { $0.pin(path) } } }
+            Button("Close Tab") { closePanelTab(tab) }
+            Button("Close Other Tabs") { for other in tabs.tabs where other != tab { closePanelTab(other) } }
+                .disabled(tabs.tabs.count < 2)
+        }
+    }
+    @ViewBuilder private func reviewControls(tabs: PanelTabs, project: WorkspaceProject) -> some View {
         if !review.browsingFiles {
             Picker("Diff layout", selection: $review.diffLayout) {
                 Text("Stacked").tag(DiffLayout.stacked)
@@ -255,20 +319,21 @@ struct WorkspaceView: View {
                 .hoverFeedback().help("New file").accessibilityLabel("New file")
         }
         Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.hoverFeedback().shortcutHint("refresh").help("Refresh changes")
+        if tabs.isBrowsingFiles {
+            Button { store.updatePanelTabs(project.id) { $0.showsFileTree.toggle() } } label: { Image(systemName: "sidebar.left") }
+                .buttonStyle(HoverButtonStyle(selected: tabs.showsFileTree)).shortcutHint("browseFiles")
+                .help(tabs.showsFileTree ? "Hide file tree" : "Show file tree").accessibilityLabel(tabs.showsFileTree ? "Hide file tree" : "Show file tree")
+        }
     }
-    private func reviewContent(_ project: WorkspaceProject) -> some View {
+    private func reviewContent(_ project: WorkspaceProject, tabs: PanelTabs) -> some View {
         VStack(spacing: 0) {
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
-                ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3) {
+                ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3, leadingVisible: !review.browsingFiles || tabs.showsFileTree) {
                     ZStack {
                         ScrollViewReader { proxy in
                             List {
-                                FileTreeRows(nodes: review.tree, review: review, action: requestFileAction) { path in
-                                    let root = store.thread?.workingDirectory ?? project.rootPath
-                                    Task {
-                                        await review.selectPath(path, projectID: project.id, root: root)
-                                        if review.browsingFiles && review.selectedPath == path && review.represents(projectID: project.id, root: root) { reviewFocus += 1 }
-                                    }
+                                FileTreeRows(nodes: review.tree, review: review, action: requestFileAction) { path, pinned in
+                                    showPanel(focus: true) { $0.openFile(path, pinned: pinned) }
                                 }
                             }.listStyle(.sidebar).scrollContentBackground(.hidden)
                                 .onChange(of: review.revealRequest) { _, _ in
@@ -281,6 +346,7 @@ struct WorkspaceView: View {
                         HStack { Image(systemName: "doc.text").foregroundStyle(theme.secondary); Text(file.path).font(.system(size: 13)).lineLimit(1).truncationMode(.middle); Spacer(minLength: 0); Text(file.isUntracked ? "U" : file.hasStaged ? "S" : "M").font(.system(size: 12, weight: .medium)).foregroundStyle(file.isUntracked ? theme.green : theme.secondary) }
                             .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                             .contentShape(Rectangle()).hoverFeedback().help(file.path).tag(file.path)
+                            .contextMenu { if file.worktreeStatus != "D" && file.indexStatus != "D" { Button("Open File") { showPanel(focus: true) { $0.openFile(file.path, pinned: true) } } } }
                     }.listStyle(.plain).scrollContentBackground(.hidden)
                         .opacity(review.browsingFiles ? 0 : 1).allowsHitTesting(!review.browsingFiles).accessibilityHidden(review.browsingFiles)
                     }
@@ -302,7 +368,8 @@ struct WorkspaceView: View {
                                     revealLine: review.revealLine, revealRequest: review.revealRequest,
                                     onSelection: { selection in
                                         if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { review.selection = selection }
-                                    }, onAskAgent: { if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { attachToDraft($0) } })
+                                    }, onAskAgent: { if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { attachToDraft($0) } },
+                                    onEdit: { store.updatePanelTabs(project.id) { $0.pin(editor.context.path) } })
                                     .id(editor.id)
                             } else if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
                             else if !review.browsingFiles && review.diffLayout == .sideBySide {
@@ -319,7 +386,12 @@ struct WorkspaceView: View {
                                 Spacer()
                                 Button("Ask Agent") { if let selection = review.selection { attachToDraft(selection) } }.hoverFeedback().disabled(review.selection == nil).controlSize(.small).shortcutHint("attach")
                             }.padding(10)
-                        } else { ContentUnavailableView(!review.browsingFiles && review.files.isEmpty ? "No changes" : "Choose a file", systemImage: !review.browsingFiles && review.files.isEmpty ? "checkmark.circle" : "doc.text.magnifyingglass") }
+                        } else if review.browsingFiles, let path = tabs.selectedFile, !review.loadingSnapshot, !review.loading {
+                            ContentUnavailableView {
+                                Label("File not found", systemImage: "questionmark.folder")
+                            } description: { Text("\(path) is not in this checkout.") }
+                            actions: { Button("Close Tab") { closePanelTab(.file(path)) } }
+                        } else if !review.loadingSnapshot { ContentUnavailableView(!review.browsingFiles && review.files.isEmpty ? "No changes" : "Choose a file", systemImage: !review.browsingFiles && review.files.isEmpty ? "checkmark.circle" : "doc.text.magnifyingglass") }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                         .allowsHitTesting(!review.loadingSnapshot)
                         .overlay { if review.loadingSnapshot { theme.background.opacity(0.12).accessibilityLabel("Loading file") } }
@@ -1088,6 +1160,8 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
     var initialFraction: CGFloat
     var trailingVisible = true
     var singleColumnWhenNarrow = false
+    /// When false, the trailing column fills the width and the leading column stays mounted offscreen.
+    var leadingVisible = true
     @ViewBuilder var leading: () -> Leading
     @ViewBuilder var trailing: () -> Trailing
     @State private var fraction: CGFloat?
@@ -1100,12 +1174,12 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
             let lower = min(minLeading, upper)
             let width = min(upper, max(lower, available * (fraction ?? initialFraction)))
             let single = singleColumnWhenNarrow && available < minLeading + minTrailing
-            let split = trailingVisible && !single
-            let leadingVisible = !trailingVisible || !single
+            let split = trailingVisible && leadingVisible && !single
+            let showsLeading = leadingVisible && (!trailingVisible || !single)
             ZStack(alignment: .leading) {
                 leading().frame(height: geometry.size.height)
                     .modifier(PanelFrame(width: split ? width : geometry.size.width))
-                    .opacity(leadingVisible ? 1 : 0).allowsHitTesting(leadingVisible).accessibilityHidden(!leadingVisible)
+                    .opacity(showsLeading ? 1 : 0).allowsHitTesting(showsLeading).accessibilityHidden(!showsLeading)
                 ResizeHandle(enabled: split, color: NSColor(theme.border), activeColor: NSColor(theme.activeBorder), onDrag: { translation in
                     if dragStart == nil { dragStart = width }
                     let next = min(upper, max(lower, (dragStart ?? width) + translation))
@@ -1120,7 +1194,7 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
                         fraction = next / max(1, available)
                     }
                 trailing().frame(height: geometry.size.height).background(theme.background)
-                    .modifier(PanelFrame(width: single ? geometry.size.width : max(0, available - width),
+                    .modifier(PanelFrame(width: single || !leadingVisible ? geometry.size.width : max(0, available - width),
                                          x: trailingVisible ? (split ? width + 7 : 0) : geometry.size.width))
                     .allowsHitTesting(trailingVisible).accessibilityHidden(!trailingVisible)
             }
@@ -1162,16 +1236,34 @@ extension WorkspaceView {
         else if singleReview { reviewFocus += 1 }
         else { store.composerFocus += 1 }
     }
-    private func revealReview(files: Bool) {
-        guard store.isProjectChat else { return }
-        store.showingTerminal = false; store.showingReview = true; store.showingBrowser = false; review.browsingFiles = files
-        if let project = store.project {
-            Task { await review.switchBrowser(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
+    /// Changes the project's panel tabs, reveals the panel and shows the selected tab's review content.
+    private func showPanel(focus: Bool = false, _ change: (inout PanelTabs) -> Void) {
+        guard store.isProjectChat, let project = store.project else { return }
+        store.showingTerminal = false; store.showingReview = true
+        store.updatePanelTabs(project.id, change)
+        syncReview(focus: focus)
+    }
+    private func syncReview(focus: Bool = false) {
+        guard let project = store.project, store.isProjectChat else { return }
+        let tabs = project.panelTabs, root = store.thread?.workingDirectory ?? project.rootPath
+        Task {
+            await review.show(tabs, projectID: project.id, root: root)
+            if focus, let path = tabs.selectedFile, review.selectedPath == path, review.represents(projectID: project.id, root: root) { reviewFocus += 1 }
         }
     }
-    private func revealBrowser() {
-        guard store.isProjectChat else { return }
-        store.showingTerminal = false; store.showingReview = true; store.showingBrowser = true
+    private func openBrowserTab(isPrivate: Bool = false) {
+        guard store.isProjectChat, let project = store.project else { return }
+        store.showingTerminal = false; store.showingReview = true
+        store.openBrowserTab(projectID: project.id, isPrivate: isPrivate)
+    }
+    private func showBrowser() {
+        guard let project = store.project else { return }
+        if let id = project.panelTabs.recentBrowser { showPanel { $0.select(.browser(id)) } } else { openBrowserTab() }
+    }
+    private func closePanelTab(_ tab: PanelTab) {
+        guard let project = store.project else { return }
+        store.closePanelTab(tab, projectID: project.id)
+        if store.project?.panelTabs.selected == nil { focusSurfacePicker() } else { syncReview() }
     }
     private func editSidebar(_ kind: SidebarEdit.Kind, thread: Bool) {
         guard let project = store.project else { return }
@@ -1194,11 +1286,15 @@ extension WorkspaceView {
             .init(id: "previousThread", title: "Previous Thread", group: "Navigate", key: "[", modifiers: [.command, .option], enabled: hasThread) { store.cycleThread(-1) },
             .init(id: "nextThread", title: "Next Thread", group: "Navigate", key: "]", modifiers: [.command, .option], enabled: hasThread) { store.cycleThread(1) },
             .init(id: "sidebar", title: "Toggle Left Sidebar", group: "Panels", key: "b", action: toggleSidebar),
-            .init(id: "review", title: "Toggle Review Panel", group: "Panels", key: "r", modifiers: [.command, .option], enabled: hasProject) { store.showingTerminal = false; store.showingReview.toggle() },
+            .init(id: "review", title: "Toggle Review Panel", group: "Panels", key: "b", modifiers: [.command, .option], enabled: hasProject) { store.showingTerminal = false; store.showingReview.toggle() },
             .init(id: "composer", title: "Focus Thread / Composer", group: "Panels", key: "1", enabled: hasThread) { store.focusComposer() },
-            .init(id: "changes", title: "Show Changes", group: "Panels", key: "2", enabled: hasProject) { revealReview(files: false) },
-            .init(id: "browseFiles", title: "Show Files", group: "Panels", key: "3", enabled: hasProject) { revealReview(files: true) },
-            .init(id: "browser", title: "Show Browser", group: "Panels", key: "5", enabled: hasProject) { revealBrowser() },
+            .init(id: "changes", title: "Show Changes", group: "Panels", key: "2", enabled: hasProject) { showPanel { $0.showChanges() } },
+            .init(id: "browseFiles", title: "Show Files", group: "Panels", key: "3", enabled: hasProject) { showPanel { $0.showFiles() } },
+            .init(id: "browser", title: "Show Browser", group: "Panels", key: "5", enabled: hasProject) { showBrowser() },
+            .init(id: "newBrowserTab", title: "New Browser Tab", group: "Panels", enabled: hasProject) { openBrowserTab() },
+            .init(id: "newPrivateBrowserTab", title: "New Private Browser Tab", group: "Panels", enabled: hasProject) { openBrowserTab(isPrivate: true) },
+            .init(id: "previousPanelTab", title: "Previous Panel Tab", group: "Panels", key: "[", modifiers: [.command, .shift], enabled: hasProject && store.showingReview, terminalAllowed: false) { showPanel { $0.selectAdjacent(-1) } },
+            .init(id: "nextPanelTab", title: "Next Panel Tab", group: "Panels", key: "]", modifiers: [.command, .shift], enabled: hasProject && store.showingReview, terminalAllowed: false) { showPanel { $0.selectAdjacent(1) } },
             .init(id: "usageDashboard", title: "Usage Dashboard", group: "Panels") { openWindow(id: UsageDashboardWindow.id) },
             .init(id: "terminal", title: "Toggle Project Terminal", group: "Panels", key: "j", enabled: hasProject) {
                 if store.showingTerminal { store.focusComposer() } else if let project { store.openTerminal(project) }
@@ -1238,8 +1334,8 @@ extension WorkspaceView {
             .init(id: "closeTerminal", title: "Close Terminal Tab…", group: "Terminal", key: "w", enabled: store.showingTerminal && project.flatMap { store.terminal.selectedTabs[$0.id] } != nil, terminalRequired: true) {
                 if let project { store.closingTerminal = store.terminal.selectedTabs[project.id] }
             },
-            .init(id: "previousTab", title: "Previous Terminal Tab", group: "Terminal", key: "[", modifiers: [.command, .shift], enabled: store.showingTerminal) { if let project { store.terminal.cycle(projectID: project.id, offset: -1) } },
-            .init(id: "nextTab", title: "Next Terminal Tab", group: "Terminal", key: "]", modifiers: [.command, .shift], enabled: store.showingTerminal) { if let project { store.terminal.cycle(projectID: project.id, offset: 1) } },
+            .init(id: "previousTab", title: "Previous Terminal Tab", group: "Terminal", key: "[", modifiers: [.command, .shift], enabled: store.showingTerminal, terminalRequired: true) { if let project { store.terminal.cycle(projectID: project.id, offset: -1) } },
+            .init(id: "nextTab", title: "Next Terminal Tab", group: "Terminal", key: "]", modifiers: [.command, .shift], enabled: store.showingTerminal, terminalRequired: true) { if let project { store.terminal.cycle(projectID: project.id, offset: 1) } },
             .init(id: "settings", title: "Settings…", group: "App", key: ",") { openSettings() },
             .init(id: "pinThread", title: thread?.isPinned == true ? "Unpin Thread" : "Pin Thread", group: "Thread", enabled: hasThread) { if let thread { store.toggleThreadPin(thread.id) } },
             .init(id: "renameThread", title: "Rename Thread…", group: "Thread", enabled: hasThread) { editSidebar(.rename, thread: true) },
@@ -1250,6 +1346,15 @@ extension WorkspaceView {
             .init(id: "revealProject", title: "Reveal Project in Finder", group: "Project", enabled: hasProject) { if let project { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.rootPath) } },
             .init(id: "removeProject", title: "Remove Project…", group: "Project", enabled: hasProject && (project.map { p in !p.threads.contains { store.running.contains($0.id) } && !store.terminal.tabs.contains { $0.projectID == p.id } } ?? false)) { editSidebar(.remove, thread: false) }
         ]
+        // Only listed while a closable tab is showing, so ⌘W otherwise keeps its window behavior.
+        if hasProject, store.showingReview, let project, let tab = project.panelTabs.selected {
+            result.append(.init(id: "closePanelTab", title: "Close Panel Tab", group: "Panels", key: "w", terminalAllowed: false) { closePanelTab(tab) })
+        }
+        if hasProject, let project, let id = project.panelTabs.selectedBrowser, store.showingReview {
+            let session = store.browserSession(id, projectID: project.id)
+            result.append(.init(id: "hardReload", title: "Hard Reload Browser Page", group: "Panels", enabled: session.currentURL != nil) { session.hardReload() })
+            result.append(.init(id: "webInspector", title: "Open Web Inspector", group: "Panels", enabled: session.currentURL != nil && session.canOpenDevTools) { session.openDevTools() })
+        }
         for project in store.archive.orderedProjects {
             result.append(.init(id: "project-\(project.id)", title: "Switch to Project: \(project.name)", group: "Project") { store.selectProject(project) })
         }
@@ -1313,14 +1418,78 @@ extension WorkspaceView {
             func leaves(_ nodes: [FileNode]) -> [String] { nodes.flatMap { $0.children.map(leaves) ?? [$0.id] } }
             return leaves(review.tree).map { path in
                 PaletteEntry(id: path, title: path, detail: project.name) {
-                    revealReview(files: true)
-                    Task {
-                        await review.selectPath(path, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
-                        reviewFocus += 1
-                    }
+                    showPanel(focus: true) { $0.openFile(path, pinned: true) }
                 }
             }
         }
+    }
+}
+
+/// Shown when every panel tab is closed. Its letter keys work while it has focus.
+private struct SurfacePicker: View {
+    var changeCount: Int
+    var focusRequest: Int
+    var openBrowser: (_ isPrivate: Bool) -> Void
+    var openFiles: () -> Void
+    var openChanges: () -> Void
+    @Environment(\.octoTheme) private var theme
+    @FocusState private var focused: Bool
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("Open a surface").font(.system(size: 15, weight: .medium))
+            VStack(spacing: 2) {
+                row("Browser", icon: "globe", key: "B") { openBrowser(false) } accessory: {
+                    Menu {
+                        Button("Browser") { openBrowser(false) }
+                        Button("Private Browser") { openBrowser(true) }
+                    } label: { Image(systemName: "chevron.down").font(.system(size: 11)) }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .help("Browser or private browser").accessibilityLabel("Browser options")
+                }
+                row("Files", icon: "doc.on.doc", key: "F", action: openFiles) { EmptyView() }
+                row("Changes", icon: "plus.forwardslash.minus", key: "C", action: openChanges) {
+                    Text("\(changeCount)").font(.system(size: 12).monospacedDigit()).foregroundStyle(theme.secondary)
+                }
+            }.frame(maxWidth: 320)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture { focused = true }
+        .focusable().focused($focused).focusEffectDisabled()
+        .onKeyPress(phases: .down) { press in
+            guard press.modifiers.isDisjoint(with: [.command, .control, .option]) else { return .ignored }
+            switch press.characters.lowercased() {
+            case "b": openBrowser(press.modifiers.contains(.shift)); return .handled
+            case "f": openFiles(); return .handled
+            case "c": openChanges(); return .handled
+            default: return .ignored
+            }
+        }
+        .onChange(of: focusRequest) { _, _ in focused = true }
+    }
+    private func row<Accessory: View>(_ title: String, icon: String, key: String, action: @escaping () -> Void, @ViewBuilder accessory: () -> Accessory) -> some View {
+        HStack(spacing: 10) {
+            Button(action: action) {
+                HStack(spacing: 12) {
+                    Image(systemName: icon).frame(width: 20)
+                    Text(title)
+                    Spacer(minLength: 8)
+                }.font(.system(size: 14)).frame(minHeight: 34).padding(.leading, 10).contentShape(Rectangle())
+            }.buttonStyle(HoverButtonStyle(padded: false))
+            accessory()
+            Text(key).font(.system(size: 12, weight: .medium).monospaced()).foregroundStyle(theme.secondary)
+                .frame(width: 24, height: 22).background(theme.surface, in: RoundedRectangle(cornerRadius: 5))
+                .help("Press \(key) while this panel is focused").accessibilityHidden(true)
+        }.padding(.trailing, 6)
+    }
+}
+
+private struct PanelBrowserTabTitle: View {
+    @ObservedObject var session: BrowserSession
+    var body: some View {
+        Image(systemName: session.isPrivate ? "eye.slash" : "globe").font(.system(size: 11))
+        Text(!session.title.isEmpty ? session.title : session.currentURL?.host ?? (session.isPrivate ? "Private" : "New Tab"))
+            .help(session.currentURL?.absoluteString ?? session.address)
     }
 }
 
@@ -1328,7 +1497,8 @@ private struct FileTreeRows: View {
     let nodes: [FileNode]
     @ObservedObject var review: ReviewModel
     let action: (FileAction.Kind, String) -> Void
-    let select: (String) -> Void
+    /// A single click opens a replaceable preview tab; double-clicking or Open File keeps the tab.
+    let select: (_ path: String, _ pinned: Bool) -> Void
     var body: some View {
         ForEach(nodes) { node in
             if let children = node.children {
@@ -1343,13 +1513,14 @@ private struct FileTreeRows: View {
                         .contextMenu { Button("New File Here…") { action(.create, node.id + "/") } }
                 }
             } else {
-                Button { select(node.id) } label: {
+                Button { select(node.id, false) } label: {
                     Label(node.name, systemImage: "doc.text").font(.system(size: 13)).lineLimit(1)
                         .padding(.horizontal, 8).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).contentShape(Rectangle())
-                }.buttonStyle(HoverButtonStyle(padded: false, selected: review.selectedPath == node.id))
+                }.buttonStyle(HoverButtonStyle(padded: false, selected: review.browsingFiles && review.selectedPath == node.id))
+                    .simultaneousGesture(TapGesture(count: 2).onEnded { select(node.id, true) })
                     .help(node.id).id(node.id).listRowBackground(Color.clear)
                     .contextMenu {
-                        Button("Open File") { select(node.id) }
+                        Button("Open File") { select(node.id, true) }
                         Button("New File Here…") {
                             let folder = node.id.lastIndex(of: "/").map { String(node.id[...$0]) } ?? ""
                             action(.create, folder)

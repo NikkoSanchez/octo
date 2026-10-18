@@ -168,4 +168,15 @@ import OctoCore
         XCTAssertTrue(chats.isAvailable(inTerminal: true))
         XCTAssertTrue(chats.isAvailable(inTerminal: false))
     }
+
+    func testSharedKeysRouteToTheVisibleSurface() throws {
+        let commands = [
+            AppCommand(id: "closeTerminal", title: "Close Terminal Tab", group: "Terminal", key: "w", terminalRequired: true) {},
+            AppCommand(id: "closePanelTab", title: "Close Panel Tab", group: "Panels", key: "w", terminalAllowed: false) {}
+        ]
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0, context: nil, characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13))
+        XCTAssertEqual(KeyRoutingView.command(for: event, in: commands, terminalVisible: true)?.id, "closeTerminal")
+        XCTAssertEqual(KeyRoutingView.command(for: event, in: commands, terminalVisible: false)?.id, "closePanelTab")
+        XCTAssertNil(KeyRoutingView.command(for: event, in: [commands[0]], terminalVisible: false), "Unclaimed keys keep their native behavior")
+    }
 }

@@ -79,7 +79,7 @@ import OctoTerminal
     @Published private(set) var importingImages: Set<UUID> = []
     @Published var attachments: [UUID: [CodeAttachment]] = [:]
     @Published var browserAnnotations: [UUID: [BrowserAnnotation]] = [:]
-    @Published var showingBrowser = false
+    /// Keyed by browser tab. Sessions outlive their views so hidden tabs and other projects keep page state.
     private var browserSessions: [UUID: BrowserSession] = [:]
     @Published var running = Set<UUID>()
     @Published private(set) var queuedMessages: [UUID: [QueuedMessage]] = [:]
@@ -330,7 +330,7 @@ import OctoTerminal
         }
         for thread in project.threads { deleteThread(thread.id, projectID: id) }
         archive.removeProject(id)
-        browserSessions.removeValue(forKey: id)?.webView.loadHTMLString("", baseURL: nil)
+        for browser in project.panelTabs.browsers { browserSessions.removeValue(forKey: browser)?.close() }
         if archive.selectedProjectID == nil { showingTerminal = false }
         saveSoon()
     }
@@ -542,12 +542,43 @@ import OctoTerminal
         guard let thread, thread.workingDirectory == attachment.workingDirectory else { error = "This selection belongs to a different checkout."; return }
         attachments[thread.id, default: []].append(attachment); showingTerminal = false
     }
-    /// One browser per project, kept alive while hidden so page state survives panel and project switches.
-    func browserSession(for projectID: UUID) -> BrowserSession {
-        if let session = browserSessions[projectID] { return session }
-        let session = BrowserSession(); browserSessions[projectID] = session
-        session.onAnnotation = { [weak self] in self?.attachBrowserAnnotation($0, screenshot: $1, projectID: projectID) }
+    func updatePanelTabs(_ projectID: UUID, _ change: (inout PanelTabs) -> Void) {
+        guard let p = archive.projects.firstIndex(where: { $0.id == projectID && !$0.isChatCollection }) else { return }
+        var tabs = archive.projects[p].panelTabs
+        change(&tabs)
+        guard tabs != archive.projects[p].panelTabs else { return }
+        archive.projects[p].panelTabs = tabs; saveSoon()
+    }
+    @discardableResult func openBrowserTab(projectID: UUID, address: String? = nil, isPrivate: Bool = false) -> UUID {
+        let id = UUID()
+        updatePanelTabs(projectID) { $0.openBrowser(id, isPrivate: isPrivate) }
+        if let address { browserSession(id, projectID: projectID).open(address) }
+        return id
+    }
+    func closePanelTab(_ tab: PanelTab, projectID: UUID) {
+        updatePanelTabs(projectID) { $0.close(tab) }
+        if let id = tab.browserID { browserSessions.removeValue(forKey: id)?.close() }
+    }
+    /// Created on first display. Restored tabs show their saved address and load when first selected.
+    func browserSession(_ id: UUID, projectID: UUID) -> BrowserSession {
+        if let session = browserSessions[id] { return session }
+        let tabs = archive.projects.first { $0.id == projectID }?.panelTabs ?? PanelTabs()
+        let session = BrowserSession(isPrivate: tabs.privateBrowsers.contains(id))
+        if let address = tabs.browserAddresses[id] { session.restore(address) }
+        register(session, id: id, projectID: projectID)
         return session
+    }
+    private func register(_ session: BrowserSession, id: UUID, projectID: UUID) {
+        browserSessions[id] = session
+        session.onAnnotation = { [weak self] in self?.attachBrowserAnnotation($0, screenshot: $1, projectID: projectID) }
+        session.onAddressChange = { [weak self] address in self?.updatePanelTabs(projectID) { $0.recordAddress(address, for: id) } }
+        session.onOpenTab = { [weak self] child in
+            guard let self else { return }
+            let childID = UUID()
+            self.register(child, id: childID, projectID: projectID)
+            self.updatePanelTabs(projectID) { $0.openBrowser(childID, isPrivate: child.isPrivate) }
+        }
+        session.onClose = { [weak self] in self?.closePanelTab(.browser(id), projectID: projectID) }
     }
     /// Adds an annotation (and its screenshot when the provider accepts images) to the draft; never sends.
     func attachBrowserAnnotation(_ annotation: BrowserAnnotation, screenshot: Data?, projectID: UUID) {

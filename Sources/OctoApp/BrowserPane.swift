@@ -4,7 +4,28 @@ import SwiftUI
 import WebKit
 import OctoCore
 
-/// A project's browser. The web view lives here, not in a view, so hiding the panel or switching
+enum BrowserAppearance: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var title: String { self == .system ? "System" : self == .light ? "Light" : "Dark" }
+}
+
+/// Viewport presets. WebKit on macOS keeps its desktop engine and user agent, so this emulates width and
+/// height for responsive CSS only, not touch input or mobile-only server behavior.
+enum BrowserDevice: String, CaseIterable, Identifiable {
+    case phone, tablet, laptop
+    var id: String { rawValue }
+    var title: String { self == .phone ? "Phone" : self == .tablet ? "Tablet" : "Laptop" }
+    var size: CGSize {
+        switch self {
+        case .phone: return CGSize(width: 390, height: 844)
+        case .tablet: return CGSize(width: 820, height: 1180)
+        case .laptop: return CGSize(width: 1280, height: 800)
+        }
+    }
+}
+
+/// One browser tab. The web view lives here, not in a view, so hiding the tab or switching
 /// projects keeps page state. Annotation runs in an isolated content world: page scripts can
 /// neither call its message handler nor read its state.
 @MainActor final class BrowserSession: NSObject, ObservableObject {
@@ -15,16 +36,45 @@ import OctoCore
     @Published private(set) var canGoForward = false
     @Published private(set) var isLoading = false
     @Published private(set) var annotating = false
+    @Published private(set) var zoom: Double = 1
+    @Published var appearance: BrowserAppearance = .system {
+        didSet { webView.appearance = appearance == .system ? nil : NSAppearance(named: appearance == .dark ? .darkAqua : .aqua) }
+    }
+    @Published var device: BrowserDevice?
+    @Published var landscape = false
+    @Published private(set) var detached = false
     @Published var error: String?
     let webView: WKWebView
+    /// Private tabs use a non-persistent data store; pop-ups share their opener's store.
+    let isPrivate: Bool
     var onAnnotation: ((BrowserAnnotation, Data?) -> Void)?
+    var onAddressChange: ((String) -> Void)?
+    /// Receives pages opened with `target=_blank` or `window.open`, already bound to WebKit's pop-up configuration.
+    var onOpenTab: ((BrowserSession) -> Void)?
+    /// The page called `window.close()`.
+    var onClose: (() -> Void)?
     private let world = WKContentWorld.world(name: "OctoAnnotate")
     private var observers: Set<AnyCancellable> = []
+    private var pendingAddress: String?
+    private var fitScale: Double = 1
+    private var window: NSWindow?
+    private let developerExtras: Bool
 
-    override init() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        configuration.applicationNameForUserAgent = Self.applicationName
+    /// Pass WebKit's configuration for a pop-up so it keeps its opener and website data.
+    init(configuration: WKWebViewConfiguration? = nil, isPrivate: Bool = false) {
+        self.isPrivate = isPrivate
+        let configuration = configuration ?? {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = isPrivate ? .nonPersistent() : .default()
+            configuration.applicationNameForUserAgent = Self.applicationName
+            return configuration
+        }()
+        // A pop-up's configuration carries its opener's controller, which already has a handler with this name.
+        configuration.userContentController = WKUserContentController()
+        // WebKit's inspector does not open unless this preference is on; it also adds Inspect Element to the
+        // context menu. The key is SPI, so KVC is used only when its setter exists.
+        developerExtras = configuration.preferences.responds(to: NSSelectorFromString("_setDeveloperExtrasEnabled:"))
+        if developerExtras { configuration.preferences.setValue(true, forKey: "developerExtrasEnabled") }
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         configuration.userContentController.add(WeakScriptHandler(self), contentWorld: world, name: "octoAnnotate")
@@ -32,10 +82,13 @@ import OctoCore
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
         if #available(macOS 13.3, *) { webView.isInspectable = true }
-        webView.publisher(for: \.title).sink { [weak self] in self?.title = $0 ?? "" }.store(in: &observers)
+        webView.publisher(for: \.title).sink { [weak self] in
+            self?.title = $0 ?? ""
+            self?.window?.title = ($0 ?? "").isEmpty ? "Browser" : $0 ?? ""
+        }.store(in: &observers)
         webView.publisher(for: \.url).sink { [weak self] url in
             self?.currentURL = url
-            if let url, url.absoluteString != "about:blank" { self?.address = url.absoluteString }
+            if let url, url.absoluteString != "about:blank" { self?.address = url.absoluteString; self?.onAddressChange?(url.absoluteString) }
         }.store(in: &observers)
         webView.publisher(for: \.canGoBack).sink { [weak self] in self?.canGoBack = $0 }.store(in: &observers)
         webView.publisher(for: \.canGoForward).sink { [weak self] in self?.canGoForward = $0 }.store(in: &observers)
@@ -90,13 +143,85 @@ import OctoCore
 
     func go() {
         guard let url = Self.url(from: address) else { return }
-        error = nil; address = url.absoluteString
+        error = nil; address = url.absoluteString; pendingAddress = nil
         Task { await Self.cacheReady.value; webView.load(URLRequest(url: url)) }
     }
+    func open(_ address: String) { self.address = address; go() }
+    /// A restored tab shows its address and loads only when first shown.
+    func restore(_ address: String) { self.address = address; pendingAddress = address }
+    func loadIfRestoring() { if let pendingAddress { open(pendingAddress) } }
+    var isRestoring: Bool { pendingAddress != nil }
     func goBack() { webView.goBack() }
     func goForward() { webView.goForward() }
     func reload() { if isLoading { webView.stopLoading() } else { error = nil; webView.reload() } }
+    /// Revalidates every resource instead of using cached copies.
+    func hardReload() { error = nil; webView.reloadFromOrigin() }
     func openExternally() { if let currentURL { NSWorkspace.shared.open(currentURL) } }
+
+    static let zoomLevels: [Double] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+    func zoomIn() { zoom = Self.zoomLevels.first { $0 > zoom + 0.001 } ?? zoom; applyZoom() }
+    func zoomOut() { zoom = Self.zoomLevels.last { $0 < zoom - 0.001 } ?? zoom; applyZoom() }
+    func resetZoom() { zoom = 1; applyZoom() }
+
+    var viewport: CGSize? {
+        device.map { landscape ? CGSize(width: $0.size.height, height: $0.size.width) : $0.size }
+    }
+    /// The page lays out `frame / pageZoom` CSS pixels wide, so shrinking both by the same factor keeps the
+    /// emulated viewport exact while it fits in the panel.
+    static func fitScale(viewport: CGSize, in available: CGSize) -> Double {
+        guard viewport.width > 0, viewport.height > 0 else { return 1 }
+        return max(0.1, min(1, available.width / viewport.width, available.height / viewport.height))
+    }
+    func setFitScale(_ scale: Double) { guard scale != fitScale else { return }; fitScale = scale; applyZoom() }
+    private func applyZoom() { webView.pageZoom = zoom * fitScale }
+
+    /// WebKit has no public API to open its inspector from code. `_inspector` and the developer extras preference
+    /// are WebKit SPI, so both are looked up at runtime and the command reports unavailable if a WebKit release
+    /// removes them. Because the page is inspectable, Safari's Develop menu works either way.
+    private static let inspectorSelector = NSSelectorFromString("_inspector"), showSelector = NSSelectorFromString("show")
+    private var inspector: NSObject? {
+        guard webView.responds(to: Self.inspectorSelector),
+              let inspector = webView.perform(Self.inspectorSelector)?.takeUnretainedValue() as? NSObject,
+              inspector.responds(to: Self.showSelector) else { return nil }
+        return inspector
+    }
+    var canOpenDevTools: Bool { developerExtras && webView.responds(to: Self.inspectorSelector) }
+    func openDevTools() {
+        if canOpenDevTools, let inspector { inspector.perform(Self.showSelector) }
+        else { error = "This version of WebKit cannot open the inspector from Octo. Use Safari → Develop → this Mac → Octo." }
+    }
+
+    /// Clears cookies for this tab's profile: the shared default store, or this private tab and its pop-ups.
+    func clearCookies() async {
+        await webView.configuration.websiteDataStore.removeData(ofTypes: [WKWebsiteDataTypeCookies], modifiedSince: .distantPast)
+    }
+    func clearCache() async {
+        await webView.configuration.websiteDataStore.removeData(ofTypes: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeFetchCache], modifiedSince: .distantPast)
+    }
+
+    /// Moves the live page into its own window; closing that window returns it to the panel.
+    func openInWindow() {
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = title.isEmpty ? "Browser" : title
+        let container = NSView(frame: window.contentLayoutRect)
+        webView.removeFromSuperview()
+        webView.frame = container.bounds; webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+        window.contentView = container
+        window.delegate = self
+        window.center(); window.makeKeyAndOrderFront(nil)
+        self.window = window; detached = true
+    }
+    func returnFromWindow() { window?.close() }
+
+    /// Ends the page. The session is not reused afterwards.
+    func close() {
+        onAnnotation = nil; onAddressChange = nil; onOpenTab = nil; onClose = nil
+        window?.close()
+        webView.stopLoading(); webView.loadHTMLString("", baseURL: nil)
+    }
 
     func toggleAnnotating() {
         guard currentURL != nil else { return }
@@ -254,10 +379,25 @@ extension BrowserSession: WKNavigationDelegate, WKUIDelegate {
         if (error as NSError).code == NSURLErrorCancelled { return }
         self.error = error.localizedDescription
     }
-    /// Pop-ups and `target=_blank` links open in this view; there is one page per project.
+    /// Pop-ups and `target=_blank` links open as new tabs that keep `window.opener`, so sign-in pop-ups work.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if action.targetFrame == nil, let url = action.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") { webView.load(action.request) }
+        guard action.targetFrame == nil else { return nil }
+        if let onOpenTab {
+            let child = BrowserSession(configuration: configuration, isPrivate: isPrivate)
+            onOpenTab(child)
+            return child.webView
+        }
+        if let url = action.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") { webView.load(action.request) }
         return nil
+    }
+    func webViewDidClose(_ webView: WKWebView) { onClose?() }
+}
+
+extension BrowserSession: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        guard let window, notification.object as? NSWindow === window else { return }
+        webView.removeFromSuperview()
+        window.delegate = nil; self.window = nil; detached = false
     }
 }
 
@@ -285,9 +425,11 @@ private struct BrowserWebView: NSViewRepresentable {
 
 struct BrowserPane: View {
     @ObservedObject var session: BrowserSession
+    var isVisible: Bool
     var attachScreenshot: (Data) -> Void
     @Environment(\.octoTheme) private var theme
     @FocusState private var addressFocused: Bool
+    @State private var clearingCookies = false
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
@@ -298,12 +440,18 @@ struct BrowserPane: View {
                 Button(action: session.reload) { Image(systemName: session.isLoading ? "xmark" : "arrow.clockwise") }
                     .disabled(session.currentURL == nil)
                     .buttonStyle(HoverButtonStyle()).help(session.isLoading ? "Stop" : "Reload").accessibilityLabel(session.isLoading ? "Stop loading" : "Reload")
-                TextField("Search or enter address", text: $session.address)
-                    .textFieldStyle(.plain).font(.system(size: 13)).focused($addressFocused)
+                HStack(spacing: 6) {
+                    if session.isPrivate {
+                        Image(systemName: "eye.slash").font(.system(size: 12)).foregroundStyle(theme.secondary)
+                            .help("Private tab: cookies and website data are discarded when the tab closes").accessibilityLabel("Private tab")
+                    }
+                    TextField(session.isPrivate ? "Search or enter address privately" : "Search or enter address", text: $session.address)
+                        .textFieldStyle(.plain).font(.system(size: 13)).focused($addressFocused)
+                        .onSubmit { session.go(); addressFocused = false }
+                        .accessibilityLabel("Address")
+                }
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(theme.surface, in: RoundedRectangle(cornerRadius: 7))
-                    .onSubmit { session.go(); addressFocused = false }
-                    .accessibilityLabel("Address")
                 Button(action: session.toggleAnnotating) { Image(systemName: "cursorarrow.rays") }
                     .buttonStyle(HoverButtonStyle(selected: session.annotating)).disabled(session.currentURL == nil)
                     .help("Annotate elements and regions: click an element or drag a region to attach it to the draft")
@@ -314,18 +462,28 @@ struct BrowserPane: View {
                 Button(action: session.openExternally) { Image(systemName: "safari") }
                     .buttonStyle(HoverButtonStyle()).disabled(session.currentURL == nil)
                     .help("Open in default browser").accessibilityLabel("Open in default browser")
+                moreMenu
             }.padding(.horizontal, 8).padding(.vertical, 6)
             ProgressView(value: session.isLoading ? 0.5 : 0).progressViewStyle(.linear).opacity(session.isLoading ? 1 : 0).frame(height: 2)
+            if session.device != nil { deviceToolbar }
             Divider()
             ZStack(alignment: .top) {
-                BrowserWebView(webView: session.webView)
-                if session.currentURL == nil {
+                if session.detached {
                     ContentUnavailableView {
-                        Label("Browser", systemImage: "globe")
+                        Label("Open in a separate window", systemImage: "macwindow")
+                    } description: { Text(session.title.isEmpty ? "This page is showing in its own window." : session.title) }
+                    actions: { Button("Return to Panel", action: session.returnFromWindow) }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).background(theme.background)
+                } else { page }
+                if session.currentURL == nil && !session.detached {
+                    ContentUnavailableView {
+                        Label(session.isPrivate ? "Private Browser" : "Browser", systemImage: session.isPrivate ? "eye.slash" : "globe")
                     } description: {
-                        Text("Open your dev server or any page. Annotate elements and regions to attach them to the draft with a screenshot.")
+                        Text(session.isPrivate
+                             ? "Cookies, storage and history in this tab are discarded when it closes."
+                             : "Open your dev server or any page. Annotate elements and regions to attach them to the draft with a screenshot.")
                     } actions: {
-                        Button("Open localhost:3000") { session.address = "localhost:3000"; session.go() }
+                        Button("Open localhost:3000") { session.open("localhost:3000") }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity).background(theme.background)
                 }
                 if session.annotating {
@@ -343,6 +501,72 @@ struct BrowserPane: View {
                 }
             }
         }
-        .onAppear { if session.currentURL == nil { addressFocused = true } }
+        .onChange(of: isVisible, initial: true) { _, visible in
+            guard visible else { return }
+            if session.isRestoring { session.loadIfRestoring() }
+            else if session.currentURL == nil { addressFocused = true }
+        }
+        .alert("Clear cookies?", isPresented: $clearingCookies) {
+            Button("Clear Cookies", role: .destructive) { Task { await session.clearCookies() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(session.isPrivate
+                 ? "This signs you out of sites in this private tab and the pop-ups it opened."
+                 : "This signs you out of sites in every non-private browser tab in Octo. Private tabs are unaffected.")
+        }
+    }
+    /// The web view keeps one position in the hierarchy, so toggling the device toolbar never reloads the page.
+    private var page: some View {
+        GeometryReader { geometry in
+            let viewport = session.viewport
+            let scale = viewport.map { BrowserSession.fitScale(viewport: $0, in: CGSize(width: geometry.size.width - 24, height: geometry.size.height - 24)) } ?? 1
+            BrowserWebView(webView: session.webView)
+                .frame(width: viewport.map { $0.width * scale }, height: viewport.map { $0.height * scale })
+                .overlay { if viewport != nil { RoundedRectangle(cornerRadius: 2).stroke(theme.border) } }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(viewport != nil ? theme.surface : Color.clear)
+                .onChange(of: scale, initial: true) { _, scale in session.setFitScale(scale) }
+        }
+    }
+    private var deviceToolbar: some View {
+        HStack(spacing: 8) {
+            Picker("Device", selection: Binding(get: { session.device ?? .phone }, set: { session.device = $0 })) {
+                ForEach(BrowserDevice.allCases) { Text($0.title).tag($0) }
+            }.labelsHidden().pickerStyle(.segmented).frame(width: 210)
+            Button { session.landscape.toggle() } label: { Image(systemName: "rotate.right") }
+                .buttonStyle(HoverButtonStyle()).help("Rotate").accessibilityLabel("Rotate viewport")
+            if let viewport = session.viewport {
+                Text("\(Int(viewport.width)) × \(Int(viewport.height))").font(.system(size: 12).monospacedDigit()).foregroundStyle(theme.secondary)
+            }
+            Spacer()
+            Button { session.device = nil } label: { Image(systemName: "xmark") }
+                .buttonStyle(HoverButtonStyle()).help("Hide device toolbar").accessibilityLabel("Hide device toolbar")
+        }.padding(.horizontal, 8).padding(.vertical, 4)
+    }
+    private var moreMenu: some View {
+        Menu {
+            Button("Hard Reload", action: session.hardReload).disabled(session.currentURL == nil)
+            Button("Open Web Inspector", action: session.openDevTools).disabled(!session.canOpenDevTools || session.currentURL == nil)
+            if session.detached { Button("Return Page to Panel", action: session.returnFromWindow) }
+            else { Button("Open in Separate Window", action: session.openInWindow).disabled(session.currentURL == nil) }
+            Button(session.device == nil ? "Show Device Toolbar" : "Hide Device Toolbar") { session.device = session.device == nil ? .phone : nil }
+            Picker("Appearance", selection: $session.appearance) {
+                ForEach(BrowserAppearance.allCases) { Text($0.title).tag($0) }
+            }.pickerStyle(.menu)
+            Divider()
+            Section("Zoom: \(Int((session.zoom * 100).rounded()))%") {
+                Button("Zoom In", action: session.zoomIn).disabled(session.zoom >= BrowserSession.zoomLevels.last!)
+                Button("Zoom Out", action: session.zoomOut).disabled(session.zoom <= BrowserSession.zoomLevels.first!)
+                Button("Actual Size", action: session.resetZoom).disabled(session.zoom == 1)
+            }
+            Divider()
+            Section(session.isPrivate ? "Profile: Private" : "Profile: Default") {
+                Button("Clear Cookies…") { clearingCookies = true }
+                Button("Clear Cache") { Task { await session.clearCache() } }
+            }
+        } label: { Image(systemName: "ellipsis") }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .padding(.horizontal, 6).frame(minHeight: 26).hoverFeedback()
+            .help("More browser actions").accessibilityLabel("More browser actions")
     }
 }

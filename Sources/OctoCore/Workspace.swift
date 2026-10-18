@@ -9,6 +9,8 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
     public var isCollapsed = false
     /// The built-in home for conversations without a user-selected repository.
     public var isChatCollection = false
+    /// Review-panel tabs: open files and browser pages.
+    public var panelTabs = PanelTabs()
     public var orderedThreads: [WorkspaceThread] {
         // Threads are appended on creation. Reverse presentation only, retaining
         // archive order and keeping pins ahead of the remaining conversations.
@@ -16,7 +18,7 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
         return newestFirst.filter(\.isPinned) + newestFirst.filter { !$0.isPinned }
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, rootPath, threads, isPinned, isCollapsed, isChatCollection }
+    private enum CodingKeys: String, CodingKey { case id, name, rootPath, threads, isPinned, isCollapsed, isChatCollection, panelTabs }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -26,6 +28,7 @@ public struct WorkspaceProject: Identifiable, Codable, Equatable, Sendable {
         isPinned = try values.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         isCollapsed = try values.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false
         isChatCollection = try values.decodeIfPresent(Bool.self, forKey: .isChatCollection) ?? false
+        panelTabs = (try? values.decodeIfPresent(PanelTabs.self, forKey: .panelTabs)) ?? PanelTabs()
     }
     public init(id: UUID = UUID(), name: String, rootPath: String, threads: [WorkspaceThread] = []) {
         self.id = id; self.name = name; self.rootPath = rootPath; self.threads = threads

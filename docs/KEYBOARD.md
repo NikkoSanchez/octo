@@ -21,7 +21,7 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | Focus thread composer | ⌘1 |
 | Show Changes / Files | ⌘2 / ⌘3 |
 | Focus code preview | ⌘4 |
-| Toggle review panel | ⌥⌘R |
+| Toggle review panel | ⌥⌘B |
 | Toggle project terminal | ⌘J |
 | Send draft (composer) / insert new line | Return / Shift–Return |
 | Send draft (outside terminal) / stop current agent | ⌘Return / ⌘. |

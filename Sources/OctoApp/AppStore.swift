@@ -13,9 +13,28 @@ import OctoTerminal
     @Published private(set) var codexVersion = "Checking version…"
     private let preferences: UserDefaults
     private static let codexPathKey = "codexExecutablePath"
-    var codexExecutable: URL? { CodexExecutable.resolve(customPath: codexExecutablePath) }
+    /// Automatic discovery walks PATH on disk; views read these many times per render.
+    /// Refreshed on activation, before sending, and when the executable choice or CLI
+    /// sign-in changes.
+    private var resolvedExecutables: (descriptors: [HarnessDescriptor], codex: URL?)?
+    private var activationObserver: NSObjectProtocol?
+    private var executables: (descriptors: [HarnessDescriptor], codex: URL?) {
+        if let resolvedExecutables { return resolvedExecutables }
+        let value = (HarnessRegistry.descriptors, CodexExecutable.resolve())
+        resolvedExecutables = value
+        return value
+    }
+    func refreshExecutables() {
+        guard resolvedExecutables != nil else { return }
+        resolvedExecutables = nil; objectWillChange.send()
+    }
+    /// A custom path is a single stat and stays live, so a removed binary never silently falls back.
+    var codexExecutable: URL? {
+        if let codexExecutablePath { return CodexExecutable.resolve(customPath: codexExecutablePath) }
+        return executables.codex
+    }
     var harnessDescriptors: [HarnessDescriptor] {
-        HarnessRegistry.descriptors.map { descriptor in
+        executables.descriptors.map { descriptor in
             var descriptor = descriptor
             if descriptor.id == .codex { descriptor.executable = codexExecutable }
             if descriptor.id == .codex && !CodexHarness.supportsAutoReview(version: codexVersion) {
@@ -92,6 +111,7 @@ import OctoTerminal
     let terminal = TerminalWorkspace()
     let git = GitService()
     private let storage: WorkspaceStore
+    private let writer: WorkspaceArchiveWriter
     private var canSave = true
     typealias TitleGenerator = @MainActor (HarnessID, String, URL?) async throws -> String?
     private let titleGenerator: TitleGenerator
@@ -116,9 +136,13 @@ import OctoTerminal
         self.harnessFactory = harnessFactory
         self.titleGenerator = titleGenerator
         self.storage = storage; self.preferences = preferences
+        writer = WorkspaceArchiveWriter(storage: storage)
         theme = AppTheme(rawValue: preferences.string(forKey: "appearanceTheme") ?? "") ?? .system
         terminal.applyTheme(theme)
         codexExecutablePath = preferences.string(forKey: Self.codexPathKey)
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshExecutables() }
+        }
         do { archive = try storage.load() } catch { self.error = "Could not load workspace: \(error.localizedDescription)\nThe existing file will not be overwritten."; canSave = false }
         // Persisted activity is historical: a previous process cannot still own a live call.
         for p in archive.projects.indices {
@@ -179,13 +203,22 @@ import OctoTerminal
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
-            self?.saveNow()
+            self?.saveInBackground()
         }
     }
+    private func saveInBackground() {
+        flushStreamText()
+        guard canSave else { return }
+        writer.write(archive) { error in
+            let message = "Could not save workspace: \(error.localizedDescription)"
+            Task { @MainActor [weak self] in self?.error = message }
+        }
+    }
+    /// Synchronous: used on quit and by tests that read the file back.
     func saveNow() {
         flushStreamText()
         guard canSave else { return }
-        do { try storage.save(archive) } catch { self.error = "Could not save workspace: \(error.localizedDescription)" }
+        do { try writer.writeNow(archive) } catch { self.error = "Could not save workspace: \(error.localizedDescription)" }
     }
     func chooseProject() {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
@@ -363,7 +396,7 @@ import OctoTerminal
             cancelTitle(thread.id)
             harnesses.removeValue(forKey: thread.id)?.shutdown()
         }
-        codexExecutablePath = path
+        codexExecutablePath = path; resolvedExecutables = nil
         if let path { preferences.set(path, forKey: Self.codexPathKey) }
         else { preferences.removeObject(forKey: Self.codexPathKey) }
         codexConfigurationID = UUID(); codexVersion = "Checking version…"
@@ -400,6 +433,7 @@ import OctoTerminal
         }
     }
     func claudeSetupClosed() {
+        refreshExecutables()
         claudeConfigurationID = UUID()
         commandCatalogs = commandCatalogs.filter { !$0.key.hasPrefix("claude:") }
         commandErrors = commandErrors.filter { !$0.key.hasPrefix("claude:") }
@@ -610,6 +644,7 @@ import OctoTerminal
         }
     }
     private func validateMessage(_ thread: WorkspaceThread, images: [ImageAttachment]) -> Bool {
+        resolvedExecutables = nil
         if let mode = thread.agentSettings.permissionMode,
            harnessDescriptors.first(where: { $0.id == thread.harness })?.permissionOptions.contains(where: { $0.mode == mode }) != true {
             error = "The saved permission mode is unavailable with this CLI. Choose a supported mode before sending."; return false

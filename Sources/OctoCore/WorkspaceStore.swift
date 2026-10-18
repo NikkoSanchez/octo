@@ -113,3 +113,36 @@ public struct WorkspaceStore: Sendable {
         }
     }
 }
+
+/// Encoding and fsyncing the archive takes tens of milliseconds, so debounced saves
+/// run on one serial queue. Only the newest pending snapshot is written; snapshots
+/// are values, so later main-thread edits never race the encoder.
+public final class WorkspaceArchiveWriter: @unchecked Sendable {
+    private let storage: WorkspaceStore
+    private let queue = DispatchQueue(label: "app.octo.workspace-archive", qos: .utility)
+    private let lock = NSLock()
+    private var pending: WorkspaceArchive?
+    public init(storage: WorkspaceStore) { self.storage = storage }
+    /// Returns immediately. `failed` runs on the writer queue.
+    public func write(_ archive: WorkspaceArchive, failed: @escaping @Sendable (Error) -> Void) {
+        lock.lock()
+        let scheduled = pending != nil
+        pending = archive
+        lock.unlock()
+        guard !scheduled else { return }
+        queue.async { [self] in
+            lock.lock()
+            let next = pending; pending = nil
+            lock.unlock()
+            guard let next else { return }
+            do { try storage.save(next) } catch { failed(error) }
+        }
+    }
+    /// Writes after any queued snapshot and supersedes one not yet started.
+    public func writeNow(_ archive: WorkspaceArchive) throws {
+        try queue.sync {
+            lock.lock(); pending = nil; lock.unlock()
+            try storage.save(archive)
+        }
+    }
+}

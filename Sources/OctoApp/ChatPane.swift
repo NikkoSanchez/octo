@@ -34,27 +34,15 @@ struct ChatPane: View {
                 findBar.frame(height: store.findingThread ? 50 : 0).clipped()
                     .opacity(store.findingThread ? 1 : 0).allowsHitTesting(store.findingThread).accessibilityHidden(!store.findingThread)
                 ScrollViewReader { proxy in
-                    let turns = ChatTurn.turns(thread.messages)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
-                            if thread.messages.isEmpty {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text(store.isProjectChat ? "What are we building?" : "What's on your mind?").font(.title2.weight(.semibold))
-                                    Text(store.isProjectChat ? "Start a conversation about this project. Select code in the review pane to attach precise context." : "Ask a question, explore an idea, or work through something. Your conversations live here in Chats.").foregroundStyle(theme.secondary)
-                                }.padding(.top, 30)
-                            }
-                            if turns.count > 1 {
-                                VStack(alignment: .leading, spacing: 20) {
-                                    ForEach(turns.dropLast()) { turn in
-                                        turnView(turn, harness: thread.harness, active: false)
-                                    }
-                                }
-                            }
-                            // Eager history keeps measured Markdown heights and native scroll
-                            // geometry stable while scrolling or resizing the chat column.
-                            ForEach(turns.suffix(1)) { turn in
-                                turnView(turn, harness: thread.harness, active: store.running.contains(thread.id))
-                            }
+                            TranscriptTurns(messages: thread.messages, harness: thread.harness,
+                                            active: store.running.contains(thread.id), isProjectChat: store.isProjectChat,
+                                            matchIDs: matchIDs, matchIndex: matchIndex, expandedDetails: expandedDetails,
+                                            setExpanded: { id, expanded in
+                                                if expanded { expandedDetails.insert(id) } else { expandedDetails.remove(id) }
+                                            }, openFile: openFile)
+                                .equatable()
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding(20)
                             .background(TranscriptScrollProbe(controller: transcriptScroll, threadID: thread.id,
@@ -135,10 +123,6 @@ struct ChatPane: View {
                 }
             } message: { Text("This thread's next turns can access files outside the project and the network without approval prompts. This choice is also remembered for new threads until you change permissions. The CLI's managed policies still apply.") }
     }
-    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
-        messageView(message, harness: harness).id(message.id).padding(6)
-            .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
-    }
     private var matchIDs: [UUID] {
         guard store.findingThread, !store.threadQuery.isEmpty else { return [] }
         return store.thread?.messages.filter { $0.text.localizedStandardContains(store.threadQuery) }.map(\.id) ?? []
@@ -159,133 +143,6 @@ struct ChatPane: View {
             Button { store.findingThread = false; store.focusComposer() } label: { Image(systemName: "xmark") }.help("Close search")
         }.padding(12).background(theme.panel)
 
-    }
-    private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if let user = turn.user { transcriptMessage(user, harness: harness) }
-            if active || turn.user?.work != nil || !turn.details.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    if turn.details.isEmpty {
-                        workLabel(turn, active: active)
-                    } else {
-                        DisclosureGroup(isExpanded: Binding(get: {
-                            expandedDetails.contains(turn.id) || turn.details.contains { matchIDs.contains($0.id) }
-                        }, set: { if $0 { expandedDetails.insert(turn.id) } else { expandedDetails.remove(turn.id) } })) {
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(turn.details) { transcriptMessage($0, harness: harness) }
-                            }.padding(.top, 10)
-                        } label: { workLabel(turn, active: active) }
-                        .disclosureGroupStyle(WorkDisclosureStyle())
-                    }
-                    Divider().overlay(theme.border.opacity(0.25))
-                }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
-            }
-            ForEach(turn.responses) { transcriptMessage($0, harness: harness) }
-        }
-    }
-    @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
-        if active {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack(spacing: 7) {
-                    WorkingIndicator()
-                    Text("Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
-                        .monospacedDigit()
-                }
-            }
-        } else {
-            Text(turn.user?.work?.label ?? "Reasoning & activity · \(turn.details.count)")
-        }
-    }
-    private func timestamp(_ message: ChatMessage) -> some View {
-        let date = message.completedAt ?? message.createdAt
-        return Text(date, format: .dateTime.weekday(.wide).hour().minute())
-            .font(.system(size: 11)).foregroundStyle(theme.secondary)
-            .help(date.formatted(date: .complete, time: .standard))
-    }
-    private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
-        let latestResponse = message.role == .assistant && store.thread?.messages.last(where: { $0.role == .assistant })?.id == message.id
-        return ResponseTimestampHover(hoverOnly: latestResponse) { showTimestamp in
-            HStack(alignment: .top, spacing: 0) {
-                if message.role == .user { Spacer(minLength: 48) }
-                VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if message.role == .error {
-                            Text("Agent notice").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.red)
-                        }
-                        if message.role == .assistant {
-                            MarkdownResponseView(source: message.text)
-                                .environment(\.openURL, OpenURLAction { url in
-                                    if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return .systemAction }
-                                    openFile(url)
-                                    return .handled
-                                })
-                        } else {
-                            Text(verbatim: message.text)
-                                .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
-                                .lineSpacing(message.role == .user ? 6 : 0)
-                                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
-                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        imageStrip(message.images)
-                        ForEach(message.attachments) { attachment in
-                            Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
-                                .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-                        }
-                        ForEach(message.browserAnnotations) { annotation in
-                            Label(annotation.label, systemImage: "cursorarrow.rays").font(.system(size: 12)).lineLimit(1).padding(6)
-                                .background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 4)).help(annotation.promptContext)
-                        }
-                    }
-                    .padding(message.role == .user ? 14 : 0)
-                    .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
-                    if message.role == .user || message.role == .assistant || message.role == .error {
-                        HStack(spacing: 10) {
-                            if message.isSteering == true { Text("Steering message").font(.system(size: 11)) }
-                            if message.role == .assistant {
-                                Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
-                                    .buttonStyle(HoverButtonStyle()).help("Copy original response")
-                                    .accessibilityLabel("Copy original response")
-                            }
-                            timestamp(message)
-                                // Reserve its space: hovering must never reflow the response.
-                                .opacity(showTimestamp ? 1 : 0)
-                                .accessibilityHidden(false)
-                        }.foregroundStyle(theme.secondary)
-                    }
-                }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
-            }
-        }
-    }
-    private func permissionsMenu(_ thread: WorkspaceThread, compact: Bool = false) -> some View {
-        let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
-        let selected = thread.agentSettings.permissionMode ?? descriptor?.defaultPermissionMode
-        let title = descriptor?.permissionOptions.first { $0.mode == selected }?.title ?? selected?.title ?? "CLI permissions"
-        return Menu {
-            if descriptor?.permissionOptions.isEmpty != false {
-                Text("Uses CLI defaults. Permission controls are unavailable in this adapter.")
-            } else {
-                Text("Permissions for the next turn")
-                ForEach(descriptor?.permissionOptions ?? []) { option in
-                    Button {
-                        if option.mode == .fullAccess { fullAccessThread = thread.id }
-                        else { store.selectPermissions(option.mode, threadID: thread.id) }
-                    } label: {
-                        VStack(alignment: .leading) {
-                            if option.mode == selected { Label(option.title, systemImage: "checkmark") }
-                            else { Text(option.title) }
-                            Text(option.detail).font(.caption)
-                        }
-                    }.help(option.detail)
-                }
-            }
-        } label: {
-            Label(title, systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
-                .labelStyle(PermissionLabelStyle(compact: compact))
-                .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
-        }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
-            .help(title)
-            .accessibilityLabel("Permissions: \(title)")
-            .disabled(store.running.contains(thread.id))
     }
     private func usageView(_ thread: WorkspaceThread) -> some View {
         let key = store.usageKey(thread)
@@ -329,75 +186,20 @@ struct ChatPane: View {
             }
         }.padding(18).frame(width: 350).task { if supported && refreshable { await store.loadUsage(thread) } }
     }
-    private func agentMenu(_ thread: WorkspaceThread) -> some View {
-        let models = store.modelCatalogs[store.modelKey(thread)] ?? []
-        let selected = models.first { $0.model == thread.agentSettings.model }
-        let summary = [thread.harness.title, selected?.displayName ?? thread.agentSettings.model,
-                       thread.agentSettings.reasoningEffort.map { $0 == "xhigh" ? "Extra high" : $0.capitalized }]
-            .compactMap { $0 }.joined(separator: " · ")
-        return Menu {
-            Menu("Provider") {
-                ForEach(store.harnessDescriptors) { descriptor in
-                    Button { store.changeHarness(descriptor.id) } label: {
-                        if descriptor.id == thread.harness { Label(descriptor.id.title, systemImage: "checkmark") }
-                        else { Text(descriptor.id.title + (descriptor.executable == nil ? " · not installed" : "")) }
-                    }
-                }
-            }
-            if store.supportsModels(thread.harness) {
-                Menu("Model") {
-                    if thread.agentSettings.model == nil { Text("Using session default") }
-                    ForEach(models) { model in
-                        Button { store.selectModel(model) } label: {
-                            if thread.agentSettings.model == model.model { Label(model.displayName, systemImage: "checkmark") }
-                            else { Text(model.displayName) }
-                        }.help(model.description)
-                    }
-                    Divider()
-                    Button(store.loadingModels.contains(store.modelKey(thread)) ? "Loading models…" : "Refresh models") {
-                        Task { await store.loadModels(directory: thread.workingDirectory, harness: thread.harness, refresh: true) }
-                    }.disabled(store.loadingModels.contains(store.modelKey(thread)))
-                }
-                Menu("Reasoning") {
-                    if selected == nil { Text("Choose a model first") }
-                    ForEach(selected?.supportedReasoningEfforts ?? []) { option in
-                        Button { store.selectReasoning(option.reasoningEffort) } label: {
-                            if thread.agentSettings.reasoningEffort == option.reasoningEffort { Label(option.title, systemImage: "checkmark") }
-                            else { Text(option.title) }
-                        }.help(option.description)
-                    }
-                }.disabled(selected?.supportedReasoningEfforts.isEmpty != false)
-            }
-        } label: {
-            Text(summary).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-        }.menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
-            .help("Provider, model, and reasoning").accessibilityLabel("Agent settings")
-            .disabled(store.running.contains(thread.id))
-    }
-    @ViewBuilder private func imageStrip(_ images: [ImageAttachment], threadID: UUID? = nil) -> some View {
-        if !images.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(images) { attachment in
-                        VStack(alignment: .leading, spacing: 4) {
-                            if let image = NSImage(data: attachment.pngData) {
-                                Image(nsImage: image).resizable().scaledToFit().frame(width: 116, height: 76)
-                                    .background(theme.surface, in: RoundedRectangle(cornerRadius: 6))
-                                    .accessibilityLabel(attachment.name)
-                            }
-                            HStack {
-                                Text(attachment.name).font(.system(size: 11)).foregroundStyle(theme.secondary)
-                                if let threadID {
-                                    Button { store.draftImages[threadID]?.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
-                                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Remove image")
-                                }
-                            }
-                        }
-                    }
-                }
-            }.frame(height: 100)
-        }
+    private func agentControls(_ thread: WorkspaceThread) -> some View {
+        let key = store.modelKey(thread), descriptors = store.harnessDescriptors
+        let descriptor = descriptors.first { $0.id == thread.harness }
+        return AgentControls(threadID: thread.id, directory: thread.workingDirectory, harness: thread.harness,
+                             settings: thread.agentSettings,
+                             providers: descriptors.map { AgentControls.Provider(id: $0.id, installed: $0.executable != nil) },
+                             supportsModels: descriptor?.supportsModels == true, models: store.modelCatalogs[key] ?? [],
+                             loadingModels: store.loadingModels.contains(key),
+                             permissionOptions: descriptor?.permissionOptions ?? [], defaultPermission: descriptor?.defaultPermissionMode,
+                             running: store.running.contains(thread.id), store: store,
+                             requestFullAccess: { fullAccessThread = $0 })
+            .equatable()
+            // Take the row's free space ahead of the Spacer so the controls can compact themselves.
+            .layoutPriority(1)
     }
     private func composer(_ thread: WorkspaceThread) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -416,7 +218,7 @@ struct ChatPane: View {
                         .buttonStyle(HoverButtonStyle()).help("Remove annotation").accessibilityLabel("Remove annotation")
                 }.font(.system(size: 15)).padding(7).background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
-            imageStrip(store.draftImages[thread.id] ?? [], threadID: thread.id)
+            ImageStrip(images: store.draftImages[thread.id] ?? []) { id in store.draftImages[thread.id]?.removeAll { $0.id == id } }
             if let compaction = thread.lastCompaction, compaction.state == .compacting {
                 TimelineView(.periodic(from: .now, by: 1)) { clock in
                     HStack(spacing: 7) {
@@ -449,11 +251,7 @@ struct ChatPane: View {
                 if store.importingImages.contains(thread.id) {
                     ProgressView().controlSize(.small).accessibilityLabel("Loading images")
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread) }
-                        .fixedSize(horizontal: true, vertical: false)
-                    HStack(spacing: 4) { agentMenu(thread); permissionsMenu(thread, compact: true) }
-                }
+                agentControls(thread)
                 Spacer(minLength: 0)
                 ContextUsageView(usage: thread.conversationUsage, compaction: thread.lastCompaction,
                                  provider: thread.harness.title,
@@ -785,6 +583,312 @@ final class ScreenshotTextView: NSTextView {
             }
         }
         super.keyDown(with: event)
+    }
+}
+
+/// The transcript compares its inputs, so publications that do not touch this
+/// thread (sidebar changes, other threads streaming, model loading) skip rebuilding
+/// and re-measuring every turn. Unchanged message arrays compare by identity.
+private struct TranscriptTurns: View, Equatable {
+    let messages: [ChatMessage]
+    let harness: HarnessID
+    let active: Bool
+    let isProjectChat: Bool
+    let matchIDs: [UUID]
+    let matchIndex: Int
+    let expandedDetails: Set<UUID>
+    let setExpanded: (UUID, Bool) -> Void
+    let openFile: (URL) -> Void
+    @Environment(\.octoTheme) private var theme
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.messages == rhs.messages && lhs.harness == rhs.harness && lhs.active == rhs.active
+            && lhs.isProjectChat == rhs.isProjectChat && lhs.matchIDs == rhs.matchIDs
+            && lhs.matchIndex == rhs.matchIndex && lhs.expandedDetails == rhs.expandedDetails
+    }
+    private var latestResponseID: UUID? { messages.last { $0.role == .assistant }?.id }
+
+    var body: some View {
+        let turns = ChatTurn.turns(messages)
+        VStack(alignment: .leading, spacing: 20) {
+            if messages.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(isProjectChat ? "What are we building?" : "What's on your mind?").font(.title2.weight(.semibold))
+                    Text(isProjectChat ? "Start a conversation about this project. Select code in the review pane to attach precise context." : "Ask a question, explore an idea, or work through something. Your conversations live here in Chats.").foregroundStyle(theme.secondary)
+                }.padding(.top, 30)
+            }
+            if turns.count > 1 {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(turns.dropLast()) { turn in
+                        turnView(turn, harness: harness, active: false)
+                    }
+                }
+            }
+            // Eager history keeps measured Markdown heights and native scroll
+            // geometry stable while scrolling or resizing the chat column.
+            ForEach(turns.suffix(1)) { turn in
+                turnView(turn, harness: harness, active: active)
+            }
+        }
+    }
+    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
+        messageView(message, harness: harness, latestResponseID: latestResponseID).id(message.id).padding(6)
+            .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
+    }
+    private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let user = turn.user { transcriptMessage(user, harness: harness) }
+            if active || turn.user?.work != nil || !turn.details.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    if turn.details.isEmpty {
+                        workLabel(turn, active: active)
+                    } else {
+                        DisclosureGroup(isExpanded: Binding(get: {
+                            expandedDetails.contains(turn.id) || turn.details.contains { matchIDs.contains($0.id) }
+                        }, set: { setExpanded(turn.id, $0) })) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(turn.details) { transcriptMessage($0, harness: harness) }
+                            }.padding(.top, 10)
+                        } label: { workLabel(turn, active: active) }
+                        .disclosureGroupStyle(WorkDisclosureStyle())
+                    }
+                    Divider().overlay(theme.border.opacity(0.25))
+                }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
+            }
+            ForEach(turn.responses) { transcriptMessage($0, harness: harness) }
+        }
+    }
+    @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
+        if active {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 7) {
+                    WorkingIndicator()
+                    Text("Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
+                        .monospacedDigit()
+                }
+            }
+        } else {
+            Text(turn.user?.work?.label ?? "Reasoning & activity · \(turn.details.count)")
+        }
+    }
+    private func timestamp(_ message: ChatMessage) -> some View {
+        let date = message.completedAt ?? message.createdAt
+        return Text(date, format: .dateTime.weekday(.wide).hour().minute())
+            .font(.system(size: 11)).foregroundStyle(theme.secondary)
+            .help(date.formatted(date: .complete, time: .standard))
+    }
+    private func messageView(_ message: ChatMessage, harness: HarnessID, latestResponseID: UUID?) -> some View {
+        let latestResponse = message.role == .assistant && latestResponseID == message.id
+        return ResponseTimestampHover(hoverOnly: latestResponse) { showTimestamp in
+            HStack(alignment: .top, spacing: 0) {
+                if message.role == .user { Spacer(minLength: 48) }
+                VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if message.role == .error {
+                            Text("Agent notice").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.red)
+                        }
+                        if message.role == .assistant {
+                            MarkdownResponseView(source: message.text)
+                                .environment(\.openURL, OpenURLAction { url in
+                                    if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return .systemAction }
+                                    openFile(url)
+                                    return .handled
+                                })
+                        } else {
+                            Text(verbatim: message.text)
+                                .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                                .lineSpacing(message.role == .user ? 6 : 0)
+                                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
+                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        ImageStrip(images: message.images)
+                        ForEach(message.attachments) { attachment in
+                            Label(attachment.label, systemImage: "curlybraces").font(.system(size: 12)).padding(6)
+                                .background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        ForEach(message.browserAnnotations) { annotation in
+                            Label(annotation.label, systemImage: "cursorarrow.rays").font(.system(size: 12)).lineLimit(1).padding(6)
+                                .background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 4)).help(annotation.promptContext)
+                        }
+                    }
+                    .padding(message.role == .user ? 14 : 0)
+                    .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
+                    if message.role == .user || message.role == .assistant || message.role == .error {
+                        HStack(spacing: 10) {
+                            if message.isSteering == true { Text("Steering message").font(.system(size: 11)) }
+                            if message.role == .assistant {
+                                Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
+                                    .buttonStyle(HoverButtonStyle()).help("Copy original response")
+                                    .accessibilityLabel("Copy original response")
+                            }
+                            timestamp(message)
+                                // Reserve its space: hovering must never reflow the response.
+                                .opacity(showTimestamp ? 1 : 0)
+                                .accessibilityHidden(false)
+                        }.foregroundStyle(theme.secondary)
+                    }
+                }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
+            }
+        }
+    }
+}
+
+struct ImageStrip: View {
+    let images: [ImageAttachment]
+    var remove: ((UUID) -> Void)? = nil
+    @Environment(\.octoTheme) private var theme
+    var body: some View {
+        if !images.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(images) { attachment in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let image = NSImage(data: attachment.pngData) {
+                                Image(nsImage: image).resizable().scaledToFit().frame(width: 116, height: 76)
+                                    .background(theme.surface, in: RoundedRectangle(cornerRadius: 6))
+                                    .accessibilityLabel(attachment.name)
+                            }
+                            HStack {
+                                Text(attachment.name).font(.system(size: 11)).foregroundStyle(theme.secondary)
+                                if let remove {
+                                    Button { remove(attachment.id) } label: { Image(systemName: "xmark.circle.fill") }
+                                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Remove image")
+                                }
+                            }
+                        }
+                    }
+                }
+            }.frame(height: 100)
+        }
+    }
+}
+
+/// Building these menus converts every item to AppKit and measures it. Compare
+/// plain inputs so unrelated store publications (including streamed text) skip it.
+/// Actions capture only values that participate in equality.
+private struct AgentControls: View, Equatable {
+    struct Provider: Equatable { let id: HarnessID; let installed: Bool }
+    let threadID: UUID
+    let directory: String
+    let harness: HarnessID
+    let settings: AgentSettings
+    let providers: [Provider]
+    let supportsModels: Bool
+    let models: [AgentModel]
+    let loadingModels: Bool
+    let permissionOptions: [AgentPermissionOption]
+    let defaultPermission: AgentPermissionMode?
+    let running: Bool
+    let store: AppStore
+    let requestFullAccess: (UUID) -> Void
+    @Environment(\.octoTheme) private var theme
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.threadID == rhs.threadID && lhs.directory == rhs.directory && lhs.harness == rhs.harness
+            && lhs.settings == rhs.settings && lhs.providers == rhs.providers && lhs.supportsModels == rhs.supportsModels
+            && lhs.models == rhs.models && lhs.loadingModels == rhs.loadingModels
+            && lhs.permissionOptions == rhs.permissionOptions && lhs.defaultPermission == rhs.defaultPermission
+            && lhs.running == rhs.running && lhs.store === rhs.store
+    }
+
+    /// Width offered to the controls, and the natural width of the uncompacted row.
+    @State private var available: CGFloat = .infinity
+    @State private var natural: CGFloat = 0
+
+    // ViewThatFits re-measured both candidate rows of native popup buttons on every
+    // layout pass (~45 ms per chat publication). Measure once per size or content
+    // change instead, then lay out a single row.
+    var body: some View {
+        let compact = natural > available
+        // Never fixed-size: the frame must report the offered width, not the row's own.
+        HStack(spacing: 4) { agentMenu; permissionsMenu(compact: compact) }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                GeometryReader { proxy in Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in available = width } }
+            }
+            .background(alignment: .leading) {
+                HStack(spacing: 4) { agentMenu; permissionsMenu(compact: false) }
+                    .fixedSize()
+                    .hidden().allowsHitTesting(false).accessibilityHidden(true)
+                    .background {
+                        GeometryReader { proxy in Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in natural = width } }
+                    }
+            }
+    }
+    private func permissionsMenu(compact: Bool) -> some View {
+        let selected = settings.permissionMode ?? defaultPermission
+        let title = permissionOptions.first { $0.mode == selected }?.title ?? selected?.title ?? "CLI permissions"
+        return Menu {
+            if permissionOptions.isEmpty {
+                Text("Uses CLI defaults. Permission controls are unavailable in this adapter.")
+            } else {
+                Text("Permissions for the next turn")
+                ForEach(permissionOptions) { option in
+                    Button {
+                        if option.mode == .fullAccess { requestFullAccess(threadID) }
+                        else { store.selectPermissions(option.mode, threadID: threadID) }
+                    } label: {
+                        VStack(alignment: .leading) {
+                            if option.mode == selected { Label(option.title, systemImage: "checkmark") }
+                            else { Text(option.title) }
+                            Text(option.detail).font(.caption)
+                        }
+                    }.help(option.detail)
+                }
+            }
+        } label: {
+            Label(title, systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
+                .labelStyle(PermissionLabelStyle(compact: compact))
+                .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
+        }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
+            .help(title)
+            .accessibilityLabel("Permissions: \(title)")
+            .disabled(running)
+    }
+    private var agentMenu: some View {
+        let selected = models.first { $0.model == settings.model }
+        let summary = [harness.title, selected?.displayName ?? settings.model,
+                       settings.reasoningEffort.map { $0 == "xhigh" ? "Extra high" : $0.capitalized }]
+            .compactMap { $0 }.joined(separator: " · ")
+        return Menu {
+            Menu("Provider") {
+                ForEach(providers, id: \.id) { provider in
+                    Button { store.changeHarness(provider.id) } label: {
+                        if provider.id == harness { Label(provider.id.title, systemImage: "checkmark") }
+                        else { Text(provider.id.title + (provider.installed ? "" : " · not installed")) }
+                    }
+                }
+            }
+            if supportsModels {
+                Menu("Model") {
+                    if settings.model == nil { Text("Using session default") }
+                    ForEach(models) { model in
+                        Button { store.selectModel(model) } label: {
+                            if settings.model == model.model { Label(model.displayName, systemImage: "checkmark") }
+                            else { Text(model.displayName) }
+                        }.help(model.description)
+                    }
+                    Divider()
+                    Button(loadingModels ? "Loading models…" : "Refresh models") {
+                        let store = store, directory = directory, harness = harness
+                        Task { await store.loadModels(directory: directory, harness: harness, refresh: true) }
+                    }.disabled(loadingModels)
+                }
+                Menu("Reasoning") {
+                    if selected == nil { Text("Choose a model first") }
+                    ForEach(selected?.supportedReasoningEfforts ?? []) { option in
+                        Button { store.selectReasoning(option.reasoningEffort) } label: {
+                            if settings.reasoningEffort == option.reasoningEffort { Label(option.title, systemImage: "checkmark") }
+                            else { Text(option.title) }
+                        }.help(option.description)
+                    }
+                }.disabled(selected?.supportedReasoningEfforts.isEmpty != false)
+            }
+        } label: {
+            Text(summary).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
+        }.menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
+            .help("Provider, model, and reasoning").accessibilityLabel("Agent settings")
+            .disabled(running)
     }
 }
 

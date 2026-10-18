@@ -87,7 +87,7 @@ public enum AgentEvent {
     }
 }
 
-public struct AgentPermissionOption: Identifiable {
+public struct AgentPermissionOption: Identifiable, Equatable {
     public var id: AgentPermissionMode { mode }
     public let mode: AgentPermissionMode
     public let title: String

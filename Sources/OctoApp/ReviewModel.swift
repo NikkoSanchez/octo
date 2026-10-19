@@ -17,6 +17,9 @@ import OctoGit
         didSet { if diffLayout != oldValue { selection = nil } }
     }
     @Published var branch = ""
+    @Published private(set) var branches: [String] = []
+    /// Tracked-file line counts against HEAD; nil before the first read or in an unborn repository.
+    @Published private(set) var diffStat: DiffStat?
     @Published var error: String?
     @Published var loading = false
     @Published var expandedFolders = Set<String>()
@@ -54,13 +57,15 @@ import OctoGit
         let nextContext = projectID.uuidString + root
         if context != nextContext {
             // `filePath` belongs to the panel's selected file tab, which applies to every checkout.
-            context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; expandedFolders = []; revealLine = nil
+            context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; branches = []; diffStat = nil; expandedFolders = []; revealLine = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
             guard generation == token else { return }
             let paths = try await git.filePaths(root: root)
+            let stat = try? await git.diffStat(root: root)
             guard generation == token else { return }
+            if diffStat != stat { diffStat = stat }
             tree = FileNode.build(Array(Set(paths + editors.dirtyPaths(root: root))))
             files = result; self.branch = branch; error = nil
             if !refreshSelection { loading = false; return }
@@ -74,6 +79,17 @@ import OctoGit
             else { snapshot = nil; selection = nil }
         } catch { if generation == token { self.error = error.localizedDescription; files = []; snapshot = nil } }
         if generation == token { loading = false }
+    }
+    func loadBranches(projectID: UUID, root: String) async {
+        let expected = projectID.uuidString + root
+        let list = (try? await git.localBranches(root: root)) ?? []
+        if context == expected, branches != list { branches = list }
+    }
+    /// Git refuses the switch when uncommitted changes would be overwritten; that message is thrown.
+    func switchBranch(_ name: String, projectID: UUID, root: String) async throws {
+        try await git.switchBranch(name, root: root)
+        await refresh(projectID: projectID, root: root)
+        await loadBranches(projectID: projectID, root: root)
     }
     func switchBrowser(projectID: UUID, root: String) async {
         selection = nil

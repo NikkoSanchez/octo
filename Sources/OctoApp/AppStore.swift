@@ -59,6 +59,8 @@ import OctoTerminal
     @Published var findStep = 0
     @Published var findFocus = 0
     @Published var sidebarEdit: SidebarEdit?
+    /// Session-local Show more limits; projects not listed show `SidebarThreadLimit.initial`.
+    @Published var sidebarThreadLimits: [UUID: Int] = [:]
     @Published var closingTerminal: UUID?
     @Published var archive = WorkspaceArchive()
     @Published var showingTerminal = false {
@@ -247,9 +249,17 @@ import OctoTerminal
         showingTerminal = false; composerFocus += 1; saveSoon()
         if current.isChatCollection { showingReview = false }
     }
+    /// The threads the sidebar lists for a project: its Show more window plus `selected` and running threads.
+    func sidebarThreads(_ project: WorkspaceProject, keeping selected: UUID?) -> (threads: [WorkspaceThread], hidden: Int) {
+        SidebarThreadLimit.visible(project.orderedThreads, limit: sidebarThreadLimits[project.id] ?? SidebarThreadLimit.initial) {
+            $0 == selected || running.contains($0)
+        }
+    }
+    /// Cycles through the threads the sidebar lists, so threads behind Show more are skipped.
     func cycleThread(_ offset: Int) {
-        guard let project, !project.orderedThreads.isEmpty else { return }
-        let threads = project.orderedThreads
+        guard let project else { return }
+        let threads = sidebarThreads(project, keeping: thread?.id).threads
+        guard !threads.isEmpty else { return }
         let index = threads.firstIndex { $0.id == thread?.id } ?? 0
         let next = ((index + offset) % threads.count + threads.count) % threads.count
         selectThread(threads[next], project: project)
@@ -476,7 +486,20 @@ import OctoTerminal
     func selectModel(_ model: AgentModel) {
         guard let thread, supportsModels(thread.harness), !running.contains(thread.id),
               modelCatalogs[modelKey(thread)]?.contains(model) == true else { return }
-        mutate(thread.id) {
+        applyModel(model, to: thread.id)
+    }
+    /// Chooses a provider and optionally one of its models from the composer's nested menu.
+    /// A provider change on a thread with history starts a new thread, as `changeHarness` does:
+    /// a provider session cannot be continued by another CLI.
+    func selectAgent(_ harness: HarnessID, model: AgentModel?, directory: String) {
+        guard let current = thread, !running.contains(current.id) else { return }
+        if current.harness != harness { changeHarness(harness) }
+        guard let model, let thread, thread.harness == harness, supportsModels(harness),
+              modelCatalogs[modelKey(harness, directory: directory)]?.contains(model) == true else { return }
+        applyModel(model, to: thread.id)
+    }
+    private func applyModel(_ model: AgentModel, to threadID: UUID) {
+        mutate(threadID) {
             let previous = $0.agentSettings.reasoningEffort
             let fallback = model.defaultReasoningEffort.isEmpty ? nil : model.defaultReasoningEffort
             $0.agentSettings = AgentSettings(model: model.model, reasoningEffort:
@@ -494,6 +517,12 @@ import OctoTerminal
     /// Claude limits arrive on any session's stream and belong to the signed-in account, not a checkout.
     func usageKey(_ thread: WorkspaceThread) -> String {
         thread.harness == .claude ? thread.harness.rawValue : "\(thread.harness.rawValue):\(thread.workingDirectory)"
+    }
+    /// Read-only limit queries run in the selected thread's checkout when it uses this provider,
+    /// otherwise in the newest thread that does. nil when no thread has used the provider.
+    func usageThread(for provider: HarnessID) -> WorkspaceThread? {
+        if let thread, thread.harness == provider { return thread }
+        return archive.projects.flatMap(\.threads).filter { $0.harness == provider }.max { $0.createdAt < $1.createdAt }
     }
     func loadUsage(_ thread: WorkspaceThread) async {
         let key = usageKey(thread), configuration = codexConfigurationID
@@ -642,6 +671,13 @@ import OctoTerminal
                 showingTerminal = true
             } catch { self.error = error.localizedDescription }
         }
+    }
+    func openCheckoutInEditor(projectID: UUID, directory: String) {
+        guard archive.projects.contains(where: { $0.id == projectID && !$0.isChatCollection }) else { return }
+        do {
+            try terminal.openDirectoryInEditor(projectID: projectID, directory: directory)
+            showingTerminal = true
+        } catch { self.error = error.localizedDescription }
     }
     private func validateMessage(_ thread: WorkspaceThread, images: [ImageAttachment]) -> Bool {
         resolvedExecutables = nil

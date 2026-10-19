@@ -112,6 +112,23 @@ import OctoCore
         let tab = TerminalTab(projectID: projectID, directory: directory, label: file.lastPathComponent, command: command, editorSession: session)
         applyTheme(to: tab); tabs.append(tab); select(tab)
     }
+    /// Selects this checkout's running editor tab, or starts Neovim on the checkout root.
+    public func openDirectoryInEditor(projectID: UUID, directory: String) throws {
+        guard let nvim = Executables.find("nvim") else { throw ProcessFailure.missing("nvim (LazyVim uses your existing Neovim configuration)") }
+        let root = URL(fileURLWithPath: directory).resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw ProcessFailure.exited("This checkout no longer exists.")
+        }
+        for tab in tabs { tab.refreshEditorSession() }
+        if let tab = tabs.first(where: { $0.projectID == projectID && $0.directory == directory && $0.editorSocket != nil && !$0.exited }) {
+            select(tab); return
+        }
+        let session = try EditorSession()
+        let command = session.command(editor: nvim, file: root, line: 1)
+        let tab = TerminalTab(projectID: projectID, directory: directory, label: root.lastPathComponent, command: command, editorSession: session)
+        applyTheme(to: tab); tabs.append(tab); select(tab)
+    }
 }
 
 /// All tabs stay mounted even while chat is selected, preserving PTY processes and scrollback.

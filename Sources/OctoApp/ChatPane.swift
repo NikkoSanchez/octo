@@ -9,11 +9,9 @@ struct ChatPane: View {
     var openFile: (URL) -> Void = { _ in }
     @Environment(\.scenePhase) private var phase
     @Environment(\.octoTheme) private var theme
-    @Environment(\.openWindow) private var openWindow
     @StateObject private var transcriptScroll = TranscriptScrollController()
     @State private var matchIndex = 0
     @State private var expandedDetails = Set<UUID>()
-    @State private var showingUsage = false
     @State private var fullAccessThread: UUID?
     @State private var windowIsKey = false
     private var readableThreadID: UUID? {
@@ -22,15 +20,6 @@ struct ChatPane: View {
     var body: some View {
         VStack(spacing: 0) {
             if let thread = store.thread {
-                HStack {
-                    Image(systemName: "bubble.left.and.text.bubble.right"); Text(thread.harness.title).fontWeight(.medium)
-                    Spacer()
-                    Button { showingUsage.toggle() } label: { Image(systemName: "chart.bar.xaxis") }
-                        .buttonStyle(HoverButtonStyle()).accessibilityLabel("Account usage limits").help("Account usage limits")
-                        .popover(isPresented: $showingUsage, arrowEdge: .top) { usageView(thread).id(store.usageKey(thread)) }
-                    if store.running.contains(thread.id) { ProgressView().controlSize(.small) }
-                }.font(.system(size: 15)).padding(13)
-                Divider()
                 findBar.frame(height: store.findingThread ? 50 : 0).clipped()
                     .opacity(store.findingThread ? 1 : 0).allowsHitTesting(store.findingThread).accessibilityHidden(!store.findingThread)
                 ScrollViewReader { proxy in
@@ -102,6 +91,12 @@ struct ChatPane: View {
                         }
                         guard !Task.isCancelled else { return }
                         await store.loadModels(directory: thread.workingDirectory, harness: thread.harness)
+                        // The agent menu lists every installed provider's models. Discovery only
+                        // initializes each CLI; it never starts a model turn.
+                        for descriptor in store.harnessDescriptors where descriptor.id != thread.harness && descriptor.executable != nil {
+                            guard !Task.isCancelled else { return }
+                            await store.loadModels(directory: thread.workingDirectory, harness: descriptor.id)
+                        }
                     }
             } else { ContentUnavailableView {
                 Label("Start a chat", systemImage: "bubble.left")
@@ -144,56 +139,20 @@ struct ChatPane: View {
         }.padding(12).background(theme.panel)
 
     }
-    private func usageView(_ thread: WorkspaceThread) -> some View {
-        let key = store.usageKey(thread)
-        let descriptor = store.harnessDescriptors.first { $0.id == thread.harness }
-        let supported = descriptor?.supportsUsageLimits == true, refreshable = descriptor?.supportsUsageRefresh == true
-        return VStack(alignment: .leading, spacing: 12) {
-            Text("\(thread.harness.title) account usage").font(.headline)
-            Text("Shared across your account, including other chats and apps.").font(.caption).foregroundStyle(theme.secondary)
-            if !supported {
-                Text("Account limits and reset times are not exposed by this adapter.")
-            } else {
-                if let usage = store.usageSnapshots[key] {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            ForEach(usage.buckets) { bucket in
-                                Text(bucket.title).fontWeight(.medium)
-                                if bucket.windows.isEmpty { Text("No usage windows reported.").foregroundStyle(theme.secondary) }
-                                ForEach(bucket.windows) { window in UsageWindowRow(window: window).font(.caption) }
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }.frame(height: min(280, CGFloat(usage.buckets.reduce(0) { $0 + max(1, $1.windows.count) }) * 100 + CGFloat(usage.buckets.count) * 25))
-                    Text("\(refreshable ? "Last updated" : "Last reported") \(usage.fetchedAt.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(theme.secondary)
-                } else if !refreshable {
-                    Text("\(thread.harness.title) reports limits alongside responses. Send a message in any \(thread.harness.title) chat to see your session and weekly limits.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("API-key, Bedrock and Vertex sign-ins do not report subscription limits.").font(.caption).foregroundStyle(theme.secondary)
-                }
-                if let error = store.usageErrors[key] { Text(error).font(.caption).foregroundStyle(theme.secondary) }
-            }
-            HStack {
-                if supported && refreshable {
-                    Button { Task { await store.loadUsage(thread) } } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }.hoverFeedback().help("Refresh usage").accessibilityLabel("Refresh usage")
-                        .disabled(store.loadingUsage.contains(key))
-                    if store.loadingUsage.contains(key) { ProgressView().controlSize(.small) }
-                }
-                Spacer()
-                Button("Usage Dashboard") { showingUsage = false; openWindow(id: UsageDashboardWindow.id) }
-                    .hoverFeedback().help("Token usage across Codex and Claude sessions")
-            }
-        }.padding(18).frame(width: 350).task { if supported && refreshable { await store.loadUsage(thread) } }
-    }
     private func agentControls(_ thread: WorkspaceThread) -> some View {
-        let key = store.modelKey(thread), descriptors = store.harnessDescriptors
+        let descriptors = store.harnessDescriptors
         let descriptor = descriptors.first { $0.id == thread.harness }
         return AgentControls(threadID: thread.id, directory: thread.workingDirectory, harness: thread.harness,
                              settings: thread.agentSettings,
-                             providers: descriptors.map { AgentControls.Provider(id: $0.id, installed: $0.executable != nil) },
-                             supportsModels: descriptor?.supportsModels == true, models: store.modelCatalogs[key] ?? [],
-                             loadingModels: store.loadingModels.contains(key),
+                             hasHistory: !thread.messages.isEmpty || thread.remoteSessionID != nil,
+                             providers: descriptors.map { descriptor in
+                                 let key = store.modelKey(descriptor.id, directory: thread.workingDirectory)
+                                 return AgentControls.Provider(id: descriptor.id, installed: descriptor.executable != nil,
+                                                               supportsModels: descriptor.supportsModels,
+                                                               models: store.modelCatalogs[key] ?? [],
+                                                               loadingModels: store.loadingModels.contains(key),
+                                                               modelError: store.modelErrors[key])
+                             },
                              permissionOptions: descriptor?.permissionOptions ?? [], defaultPermission: descriptor?.defaultPermissionMode,
                              running: store.running.contains(thread.id), store: store,
                              requestFullAccess: { fullAccessThread = $0 })
@@ -208,7 +167,7 @@ struct ChatPane: View {
                 HStack {
                     Label(attachment.label, systemImage: "curlybraces").lineLimit(1)
                     Spacer(); Button { store.attachments[thread.id]?.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark") }.buttonStyle(HoverButtonStyle()).help("Remove attachment")
-                }.font(.system(size: 15)).padding(7).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                }.font(.system(size: 14)).padding(7).background(theme.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
             ForEach(store.browserAnnotations[thread.id] ?? []) { annotation in
                 HStack {
@@ -216,7 +175,7 @@ struct ChatPane: View {
                     Label(annotation.label, systemImage: "cursorarrow.rays").lineLimit(1).truncationMode(.middle).help(annotation.promptContext)
                     Spacer(); Button { store.browserAnnotations[thread.id]?.removeAll { $0.id == annotation.id } } label: { Image(systemName: "xmark") }
                         .buttonStyle(HoverButtonStyle()).help("Remove annotation").accessibilityLabel("Remove annotation")
-                }.font(.system(size: 15)).padding(7).background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                }.font(.system(size: 14)).padding(7).background(theme.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
             }
             ImageStrip(images: store.draftImages[thread.id] ?? []) { id in store.draftImages[thread.id]?.removeAll { $0.id == id } }
             if let compaction = thread.lastCompaction, compaction.state == .compacting {
@@ -258,7 +217,13 @@ struct ChatPane: View {
                                  supportsUsage: store.harnessDescriptors.first { $0.id == thread.harness }?.supportsConversationUsage == true,
                                  supportsCompaction: store.harnessDescriptors.first { $0.id == thread.harness }?.supportsCompactionStatus == true)
                     .id(thread.id)
-                if store.running.contains(thread.id) { Button("Stop") { store.stop(thread.id) }.controlSize(.small).hoverFeedback().shortcutHint("stop") }
+                if store.running.contains(thread.id) {
+                    // Fixed size: the agent controls take the row's free space first and would
+                    // otherwise compress a text button to nothing.
+                    Button { store.stop(thread.id) } label: { Image(systemName: "stop.fill") }
+                        .buttonStyle(.bordered).fixedSize().hoverFeedback().shortcutHint("stop")
+                        .help("Stop the agent").accessibilityLabel("Stop")
+                }
                 Button { store.send() } label: {
                     Image(systemName: store.running.contains(thread.id) ? "text.badge.plus" : "arrow.up")
                 }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback()
@@ -332,12 +297,11 @@ struct ChatPane: View {
     }
 }
 
-private struct ResponseTimestampHover<Content: View>: View {
-    let hoverOnly: Bool
+private struct MessageHover<Content: View>: View {
     @ViewBuilder let content: (Bool) -> Content
     @State private var hovering = false
     var body: some View {
-        content(!hoverOnly || hovering).contentShape(Rectangle()).onHover { hovering = $0 }
+        content(hovering).contentShape(Rectangle()).onHover { hovering = $0 }
     }
 }
 
@@ -469,7 +433,7 @@ private struct DraftEditor: View {
             }
         ZStack(alignment: .topLeading) {
             if (drafts.values[threadID] ?? "").isEmpty {
-                Text(placeholder).font(.system(size: 15)).foregroundStyle(theme.subtle)
+                Text(placeholder).font(.system(size: 14)).foregroundStyle(theme.subtle)
                     .padding(.top, 5).padding(.leading, 5).allowsHitTesting(false)
             }
             ComposerTextView(focusRequest: focusRequest, theme: theme,
@@ -498,7 +462,7 @@ struct ComposerTextView: NSViewRepresentable {
         let editor = ScreenshotTextView(frame: scroll.contentView.bounds)
         editor.identifier = NSUserInterfaceItemIdentifier("OctoComposer")
         editor.isRichText = false; editor.importsGraphics = false; editor.allowsUndo = true
-        editor.drawsBackground = false; editor.font = .systemFont(ofSize: 15); editor.textColor = .labelColor
+        editor.drawsBackground = false; editor.font = .systemFont(ofSize: 14); editor.textColor = .labelColor
         editor.textContainerInset = NSSize(width: 0, height: 5)
         editor.isHorizontallyResizable = false; editor.isVerticallyResizable = true
         editor.autoresizingMask = [.width]
@@ -605,7 +569,6 @@ private struct TranscriptTurns: View, Equatable {
             && lhs.isProjectChat == rhs.isProjectChat && lhs.matchIDs == rhs.matchIDs
             && lhs.matchIndex == rhs.matchIndex && lhs.expandedDetails == rhs.expandedDetails
     }
-    private var latestResponseID: UUID? { messages.last { $0.role == .assistant }?.id }
 
     var body: some View {
         let turns = ChatTurn.turns(messages)
@@ -631,7 +594,7 @@ private struct TranscriptTurns: View, Equatable {
         }
     }
     private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
-        messageView(message, harness: harness, latestResponseID: latestResponseID).id(message.id).padding(6)
+        messageView(message, harness: harness).id(message.id).padding(6)
             .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
     }
     private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool) -> some View {
@@ -660,11 +623,7 @@ private struct TranscriptTurns: View, Equatable {
     @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
         if active {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack(spacing: 7) {
-                    WorkingIndicator()
-                    Text("Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
-                        .monospacedDigit()
-                }
+                ShimmerText(text: "Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
             }
         } else {
             Text(turn.user?.work?.label ?? "Reasoning & activity · \(turn.details.count)")
@@ -676,9 +635,8 @@ private struct TranscriptTurns: View, Equatable {
             .font(.system(size: 11)).foregroundStyle(theme.secondary)
             .help(date.formatted(date: .complete, time: .standard))
     }
-    private func messageView(_ message: ChatMessage, harness: HarnessID, latestResponseID: UUID?) -> some View {
-        let latestResponse = message.role == .assistant && latestResponseID == message.id
-        return ResponseTimestampHover(hoverOnly: latestResponse) { showTimestamp in
+    private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
+        MessageHover { hovering in
             HStack(alignment: .top, spacing: 0) {
                 if message.role == .user { Spacer(minLength: 48) }
                 VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
@@ -695,9 +653,9 @@ private struct TranscriptTurns: View, Equatable {
                                 })
                         } else {
                             Text(verbatim: message.text)
-                                .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 15))
+                                .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 14))
                                 .lineSpacing(message.role == .user ? 6 : 0)
-                                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.foreground)
+                                .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.prose)
                                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                         }
                         ImageStrip(images: message.images)
@@ -715,15 +673,16 @@ private struct TranscriptTurns: View, Equatable {
                     if message.role == .user || message.role == .assistant || message.role == .error {
                         HStack(spacing: 10) {
                             if message.isSteering == true { Text("Steering message").font(.system(size: 11)) }
-                            if message.role == .assistant {
-                                Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
-                                    .buttonStyle(HoverButtonStyle()).help("Copy original response")
-                                    .accessibilityLabel("Copy original response")
+                            Group {
+                                if message.role == .assistant {
+                                    Button { copyResponseText(message.text) } label: { Image(systemName: "doc.on.doc") }
+                                        .buttonStyle(HoverButtonStyle()).help("Copy original response")
+                                        .accessibilityLabel("Copy original response")
+                                }
+                                timestamp(message)
                             }
-                            timestamp(message)
-                                // Reserve its space: hovering must never reflow the response.
-                                .opacity(showTimestamp ? 1 : 0)
-                                .accessibilityHidden(false)
+                            // Reserve their space: hovering must never reflow the response.
+                            .opacity(hovering ? 1 : 0).allowsHitTesting(hovering)
                         }.foregroundStyle(theme.secondary)
                     }
                 }.frame(maxWidth: message.role == .user ? 620 : .infinity, alignment: message.role == .user ? .trailing : .leading)
@@ -766,26 +725,32 @@ struct ImageStrip: View {
 /// plain inputs so unrelated store publications (including streamed text) skip it.
 /// Actions capture only values that participate in equality.
 private struct AgentControls: View, Equatable {
-    struct Provider: Equatable { let id: HarnessID; let installed: Bool }
+    struct Provider: Equatable {
+        let id: HarnessID
+        let installed: Bool
+        let supportsModels: Bool
+        let models: [AgentModel]
+        let loadingModels: Bool
+        let modelError: String?
+    }
     let threadID: UUID
     let directory: String
     let harness: HarnessID
     let settings: AgentSettings
+    /// Choosing another provider then starts a new thread.
+    let hasHistory: Bool
     let providers: [Provider]
-    let supportsModels: Bool
-    let models: [AgentModel]
-    let loadingModels: Bool
     let permissionOptions: [AgentPermissionOption]
     let defaultPermission: AgentPermissionMode?
     let running: Bool
     let store: AppStore
     let requestFullAccess: (UUID) -> Void
     @Environment(\.octoTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.threadID == rhs.threadID && lhs.directory == rhs.directory && lhs.harness == rhs.harness
-            && lhs.settings == rhs.settings && lhs.providers == rhs.providers && lhs.supportsModels == rhs.supportsModels
-            && lhs.models == rhs.models && lhs.loadingModels == rhs.loadingModels
+            && lhs.settings == rhs.settings && lhs.hasHistory == rhs.hasHistory && lhs.providers == rhs.providers
             && lhs.permissionOptions == rhs.permissionOptions && lhs.defaultPermission == rhs.defaultPermission
             && lhs.running == rhs.running && lhs.store === rhs.store
     }
@@ -839,40 +804,57 @@ private struct AgentControls: View, Equatable {
             Label(title, systemImage: selected == .fullAccess ? "exclamationmark.shield" : "hand.raised")
                 .labelStyle(PermissionLabelStyle(compact: compact))
                 .font(.system(size: 12)).foregroundStyle(selected == .fullAccess ? theme.yellow : theme.secondary)
-        }.menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
+        }.hoverMenuStyle(chevron: true).fixedSize()
             .help(title)
             .accessibilityLabel("Permissions: \(title)")
             .disabled(running)
     }
+    private var current: Provider? { providers.first { $0.id == harness } }
+    private func icon(_ provider: HarnessID) -> Image { Image(nsImage: ProviderMark.menuImage(provider, dark: colorScheme == .dark)) }
+
+    /// Providers first; each provider's submenu holds its models, and the current one also its reasoning.
     private var agentMenu: some View {
-        let selected = models.first { $0.model == settings.model }
+        let selected = current?.models.first { $0.model == settings.model }
         let summary = [harness.title, selected?.displayName ?? settings.model,
                        settings.reasoningEffort.map { $0 == "xhigh" ? "Extra high" : $0.capitalized }]
             .compactMap { $0 }.joined(separator: " · ")
         return Menu {
-            Menu("Provider") {
-                ForEach(providers, id: \.id) { provider in
-                    Button { store.changeHarness(provider.id) } label: {
-                        if provider.id == harness { Label(provider.id.title, systemImage: "checkmark") }
-                        else { Text(provider.id.title + (provider.installed ? "" : " · not installed")) }
-                    }
+            ForEach(providers, id: \.id) { provider in
+                Menu {
+                    providerItems(provider, selected: selected)
+                } label: {
+                    Label { Text(provider.id.title + (provider.installed ? "" : " · not installed")) } icon: { icon(provider.id) }
                 }
             }
-            if supportsModels {
-                Menu("Model") {
-                    if settings.model == nil { Text("Using session default") }
-                    ForEach(models) { model in
-                        Button { store.selectModel(model) } label: {
-                            if settings.model == model.model { Label(model.displayName, systemImage: "checkmark") }
-                            else { Text(model.displayName) }
-                        }.help(model.description)
-                    }
-                    Divider()
-                    Button(loadingModels ? "Loading models…" : "Refresh models") {
-                        let store = store, directory = directory, harness = harness
-                        Task { await store.loadModels(directory: directory, harness: harness, refresh: true) }
-                    }.disabled(loadingModels)
-                }
+        } label: {
+            Label { Text(summary).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle) } icon: {
+                icon(harness)
+            }.labelStyle(.titleAndIcon)
+        }.hoverMenuStyle(chevron: true).fixedSize(horizontal: false, vertical: true)
+            .help("Provider, model, and reasoning").accessibilityLabel("Agent settings")
+            .disabled(running)
+    }
+
+    @ViewBuilder private func providerItems(_ provider: Provider, selected: AgentModel?) -> some View {
+        let isCurrent = provider.id == harness
+        if !isCurrent && hasHistory { Text("Starts a new \(provider.id.title) thread") }
+        if !provider.supportsModels {
+            Button(isCurrent ? "Using \(provider.id.title) defaults" : "Use \(provider.id.title)") {
+                store.selectAgent(provider.id, model: nil, directory: directory)
+            }.disabled(isCurrent || !provider.installed)
+        } else {
+            if isCurrent && settings.model == nil { Text("Using session default") }
+            if provider.models.isEmpty {
+                Text(provider.loadingModels ? "Loading models…" : provider.installed ? (provider.modelError ?? "No models reported") : "Not installed")
+            }
+            ForEach(provider.models) { model in
+                Button { store.selectAgent(provider.id, model: model, directory: directory) } label: {
+                    if isCurrent && settings.model == model.model { Label(model.displayName, systemImage: "checkmark") }
+                    else { Text(model.displayName) }
+                }.help(model.description).disabled(!provider.installed)
+            }
+            if isCurrent {
+                Divider()
                 Menu("Reasoning") {
                     if selected == nil { Text("Choose a model first") }
                     ForEach(selected?.supportedReasoningEfforts ?? []) { option in
@@ -883,12 +865,14 @@ private struct AgentControls: View, Equatable {
                     }
                 }.disabled(selected?.supportedReasoningEfforts.isEmpty != false)
             }
-        } label: {
-            Text(summary).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-        }.menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4).padding(.vertical, 2).hoverFeedback()
-            .help("Provider, model, and reasoning").accessibilityLabel("Agent settings")
-            .disabled(running)
+            if provider.installed {
+                Divider()
+                Button(provider.loadingModels ? "Loading models…" : "Refresh models") {
+                    let store = store, directory = directory, id = provider.id
+                    Task { await store.loadModels(directory: directory, harness: id, refresh: true) }
+                }.disabled(provider.loadingModels)
+            }
+        }
     }
 }
 

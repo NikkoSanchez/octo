@@ -20,7 +20,7 @@ struct MarkdownResponseView: View {
                 }
             }
         }
-        .font(.system(size: 15)).foregroundStyle(theme.foreground)
+        .font(.system(size: 14)).foregroundStyle(theme.prose)
         .lineSpacing(6)
         .textSelection(.enabled).tint(theme.blue)
         .task(id: source) {
@@ -43,8 +43,9 @@ struct MarkdownResponseView: View {
         case .paragraph(let text):
             inlineText(text, inline: inline).frame(maxWidth: .infinity, alignment: .leading)
         case .heading(let level, let text):
-            inlineText(text, inline: inline)
-                .font(.system(size: [24.0, 21, 18, 16, 15, 15][level - 1], weight: .semibold))
+            let size = [22.0, 19, 17, 15, 14, 14][level - 1]
+            inlineText(text, inline: inline, size: size)
+                .font(.system(size: size, weight: .semibold)).foregroundStyle(theme.foreground)
                 .accessibilityAddTraits(.isHeader).padding(.top, 4)
         case .listItem(let marker, let depth, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -94,13 +95,20 @@ struct MarkdownResponseView: View {
         }
     }
 
-    private func inlineText(_ source: String, inline: [String: AttributedString]) -> Text {
+    private func inlineText(_ source: String, inline: [String: AttributedString], size: CGFloat = 14) -> Text {
         var value = inline[source] ?? AttributedString(source)
         for run in value.runs {
-            if run.inlinePresentationIntent?.contains(.code) == true {
+            let intent = run.inlinePresentationIntent ?? []
+            if intent.contains(.code) {
                 value[run.range].font = .system(size: 13, design: .monospaced)
                 value[run.range].backgroundColor = theme.surface
+            } else if intent.contains(.stronglyEmphasized) {
+                // The intent renders SF Bold (700), which reads heavy at body sizes; use
+                // semibold as web UIs do. Italic still applies through the remaining intent.
+                value[run.range].inlinePresentationIntent = intent.subtracting(.stronglyEmphasized)
+                value[run.range].font = .system(size: size, weight: .semibold)
             }
+            if intent.contains(.stronglyEmphasized) { value[run.range].foregroundColor = theme.foreground }
             if run.link != nil { value[run.range].foregroundColor = theme.blue }
         }
         return Text(value)

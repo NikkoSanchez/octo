@@ -335,7 +335,8 @@ extension EnvironmentValues {
         set { self[ShortcutHintsKey.self] = newValue }
     }
 }
-enum ShortcutHintPlacement { case above, inline }
+/// `leading` sits beside the control, for a button whose neighbor's badge already takes the space above.
+enum ShortcutHintPlacement { case above, inline, leading }
 private struct ShortcutHint: ViewModifier {
     @Environment(\.shortcutHints) private var hints
     @Environment(\.octoTheme) private var theme
@@ -344,7 +345,7 @@ private struct ShortcutHint: ViewModifier {
     let active: Bool
     let placement: ShortcutHintPlacement
     func body(content: Content) -> some View {
-        content.overlay(alignment: placement == .inline ? .trailing : .topTrailing) {
+        content.overlay(alignment: placement == .above ? .topTrailing : placement == .inline ? .trailing : .leading) {
             if active, enabled, let shortcut = hints[command] {
                 Text(shortcut.map(String.init).joined(separator: " ")).font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(theme.foreground).padding(.horizontal, 5).padding(.vertical, 3)
@@ -353,7 +354,9 @@ private struct ShortcutHint: ViewModifier {
                     .fixedSize()
                     // Align the badge's bottom above the control, leaving a real gap.
                     .alignmentGuide(.top) { $0[.bottom] + 6 }
-                    .offset(x: placement == .inline ? -12 : 0)
+                    // Leading: a zero-width frame at the control's edge lets the badge extend left of it.
+                    .frame(width: placement == .leading ? 0 : nil, alignment: .trailing)
+                    .offset(x: placement == .inline ? -12 : placement == .leading ? -4 : 0)
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
         }

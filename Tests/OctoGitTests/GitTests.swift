@@ -104,4 +104,38 @@ final class GitTests: XCTestCase {
         let restored = try await service.filePaths(root: root.path)
         XCTAssertEqual(restored, ["tracked.txt"])
     }
+    func testNumstatSumsTextAndSkipsBinaryCounts() {
+        let stat = GitService.parseNumstat("3\t1\tSources/a.swift\n-\t-\timage.png\n10\t0\tpath\twith tab.txt\n")
+        XCTAssertEqual(stat, DiffStat(additions: 13, deletions: 1))
+        XCTAssertEqual(GitService.parseNumstat(""), DiffStat())
+    }
+    func testLocalBranchesAndSwitchRejectUnknownNames() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let git = try XCTUnwrap(Executables.find("git"))
+        func run(_ args: [String]) async throws {
+            let result = try await ProcessRunner.run(git, arguments: args, directory: root)
+            XCTAssertEqual(result.status, 0, String(decoding: result.error, as: UTF8.self))
+        }
+        try await run(["init", "-b", "main"])
+        try "base\n".write(to: root.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+        try await run(["add", "--", "file.txt"])
+        try await run(["-c", "user.name=Octo Test", "-c", "user.email=octo@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "fixture"])
+        try await run(["branch", "feature/one"])
+        let service = GitService()
+        let branches = try await service.localBranches(root: root.path)
+        XCTAssertEqual(Set(branches), ["main", "feature/one"])
+        try await service.switchBranch("feature/one", root: root.path)
+        let current = await service.branch(root: root.path)
+        XCTAssertEqual(current, "feature/one")
+        for name in ["--orphan", "origin/main", "missing"] {
+            do { try await service.switchBranch(name, root: root.path); XCTFail("Switched to \(name)") } catch {}
+        }
+        let unchanged = await service.branch(root: root.path)
+        XCTAssertEqual(unchanged, "feature/one")
+        try "changed\nmore\n".write(to: root.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+        let stat = try await service.diffStat(root: root.path)
+        XCTAssertEqual(stat, DiffStat(additions: 2, deletions: 1))
+    }
 }

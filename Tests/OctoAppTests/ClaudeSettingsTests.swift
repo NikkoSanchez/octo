@@ -71,4 +71,35 @@ import OctoAgents
         XCTAssertTrue(store.running.isEmpty)
         XCTAssertTrue(store.error?.contains("unavailable") == true)
     }
+    func testNestedAgentMenuKeepsThreadForModelsAndBranchesOnlyForProviderWithHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(storage: WorkspaceStore(fileURL: root.appendingPathComponent("workspace.json")))
+        defer { store.shutdown() }
+        var thread = WorkspaceThread(harness: .claude, workingDirectory: root.path)
+        thread.messages = [ChatMessage(role: .user, text: "Started on Claude")]
+        let project = WorkspaceProject(name: "Fixture", rootPath: root.path, threads: [thread])
+        store.archive = WorkspaceArchive(projects: [project], selectedProjectID: project.id, selectedThreadID: thread.id)
+        func catalog(_ names: [String]) throws -> [AgentModel] {
+            try JSONDecoder().decode([AgentModel].self, from: Data(("[" + names.map { #"{"model":"\#($0)","displayName":"\#($0)","description":"","hidden":false,"isDefault":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":""}]}"# }.joined(separator: ",") + "]").utf8))
+        }
+        let claude = try catalog(["sonnet", "opus"]), codex = try catalog(["gpt-5.5"])
+        store.modelCatalogs[store.modelKey(.claude, directory: root.path)] = claude
+        store.modelCatalogs[store.modelKey(.codex, directory: root.path)] = codex
+        store.selectAgent(.claude, model: claude[1], directory: root.path)
+        XCTAssertEqual(store.thread?.id, thread.id, "Changing model never starts a thread")
+        XCTAssertEqual(store.thread?.agentSettings.model, "opus")
+        store.selectAgent(.codex, model: codex[0], directory: root.path)
+        XCTAssertNotEqual(store.thread?.id, thread.id, "A Claude session cannot continue in Codex")
+        XCTAssertEqual(store.thread?.harness, .codex)
+        XCTAssertEqual(store.thread?.agentSettings.model, "gpt-5.5")
+        XCTAssertEqual(store.archive.projects[0].threads.first { $0.id == thread.id }?.harness, .claude)
+        let draft = try XCTUnwrap(store.thread?.id)
+        store.selectAgent(.claude, model: claude[0], directory: root.path)
+        XCTAssertEqual(store.thread?.id, draft, "An empty draft switches provider in place")
+        XCTAssertEqual(store.thread?.harness, .claude)
+        XCTAssertEqual(store.thread?.agentSettings.model, "sonnet")
+        store.selectAgent(.claude, model: codex[0], directory: root.path)
+        XCTAssertEqual(store.thread?.agentSettings.model, "sonnet", "Another provider's model is rejected")
+    }
 }

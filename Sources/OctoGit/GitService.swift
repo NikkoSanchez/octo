@@ -12,6 +12,12 @@ public struct ChangedFile: Identifiable, Equatable, Sendable {
     public var hasWorking: Bool { worktreeStatus != " " }
 }
 
+public struct DiffStat: Equatable, Sendable {
+    public var additions = 0
+    public var deletions = 0
+    public init(additions: Int = 0, deletions: Int = 0) { self.additions = additions; self.deletions = deletions }
+}
+
 public actor GitService {
     public init() {}
     private func git(_ arguments: [String], root: String) async throws -> ProcessResult {
@@ -25,6 +31,34 @@ public actor GitService {
     }
     public func repositoryRoot(_ path: String) async throws -> String { try await text(["rev-parse", "--show-toplevel"], root: path) }
     public func branch(root: String) async -> String { (try? await text(["branch", "--show-current"], root: root)).flatMap { $0.isEmpty ? nil : $0 } ?? "Detached HEAD" }
+    /// Local branches, most recently committed first.
+    public func localBranches(root: String) async throws -> [String] {
+        try await text(["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"], root: root)
+            .split(separator: "\n").map(String.init)
+    }
+    /// Switches only to an existing local branch; never guesses a remote-tracking branch.
+    /// Git's own checks keep uncommitted changes that would be overwritten.
+    public func switchBranch(_ name: String, root: String) async throws {
+        guard !name.isEmpty, !name.hasPrefix("-") else { throw ProcessFailure.exited("Invalid branch name.") }
+        let branches = try await localBranches(root: root)
+        guard branches.contains(name) else { throw ProcessFailure.exited("\(name) is not a local branch.") }
+        _ = try await text(["switch", "--no-guess", name], root: root)
+    }
+    /// Lines added and removed in tracked files relative to HEAD (staged and unstaged).
+    public func diffStat(root: String) async throws -> DiffStat {
+        Self.parseNumstat(try await text(["diff", "--no-ext-diff", "--no-textconv", "--numstat", "HEAD"], root: root))
+    }
+    public nonisolated static func parseNumstat(_ output: String) -> DiffStat {
+        var stat = DiffStat()
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3 else { continue }
+            // Binary files report "-" for both counts.
+            stat.additions += Int(fields[0]) ?? 0
+            stat.deletions += Int(fields[1]) ?? 0
+        }
+        return stat
+    }
     public func changes(root: String) async throws -> [ChangedFile] {
         let result = try await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], root: root)
         guard result.status == 0 else { throw ProcessFailure.exited(String(decoding: result.error, as: UTF8.self)) }

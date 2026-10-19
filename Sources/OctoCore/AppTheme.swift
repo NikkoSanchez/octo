@@ -31,7 +31,7 @@ public enum AppTheme: String, CaseIterable, Identifiable, Sendable {
         case .dracula: return ThemePalette(
             base: "282a36", mantle: "21222c", crust: "191a21", surface: "343746",
             overlay0: "6272a4", overlay1: "6272a4", overlay2: "6272a4", text: "f8f8f2",
-            secondary: "f8f8f2", accent: "bd93f9", green: "50fa7b", red: "ff5555",
+            secondary: "a9abb6", accent: "bd93f9", green: "50fa7b", red: "ff5555",
             yellow: "f1fa8c", blue: "8be9fd", teal: "8be9fd", rosewater: "f8f8f2",
             pink: "ff79c6", peach: "ffb86c", sky: "8be9fd", lavender: "bd93f9",
             selectionBackground: "44475a", selectionOpacity: 1, cursorText: "282a36",

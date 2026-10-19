@@ -284,11 +284,11 @@ struct UsageDashboardView: View {
         }
     }
     private func limitsSection(_ descriptor: HarnessDescriptor, usage: AgentUsage?) -> some View {
-        let thread = limitsThread(descriptor.id)
+        let thread = store.usageThread(for: descriptor.id)
         let key = thread.map { store.usageKey($0) }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Circle().fill(color(descriptor.id)).frame(width: 9, height: 9)
+                ProviderIcon(harness: descriptor.id, size: 18)
                 Text(descriptor.id.title).font(.system(size: 18))
                 Spacer()
                 if let usage {
@@ -319,10 +319,5 @@ struct UsageDashboardView: View {
             Text("\(descriptor.id.title) reports limits alongside responses. They appear here after the next response in any \(descriptor.id.title) chat.")
                 .foregroundStyle(theme.secondary)
         }
-    }
-    /// Read-only limit queries run in the selected thread's checkout when it uses this provider.
-    private func limitsThread(_ provider: HarnessID) -> WorkspaceThread? {
-        if let thread = store.thread, thread.harness == provider { return thread }
-        return store.archive.projects.flatMap(\.threads).filter { $0.harness == provider }.max { $0.createdAt < $1.createdAt }
     }
 }

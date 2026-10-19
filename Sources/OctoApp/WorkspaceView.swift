@@ -25,6 +25,7 @@ struct WorkspaceView: View {
     @State private var reviewFocus = 0
     @State private var surfacePickerFocus = 0
     @State private var showingShortcutHints = false
+    @State private var showingProjectActions = false
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @Environment(\.octoTheme) private var theme
@@ -39,6 +40,9 @@ struct WorkspaceView: View {
                     GeometryReader { contentGeometry in
                         ZStack {
                             threadWorkspace.opacity(store.showingTerminal ? 0 : 1).allowsHitTesting(!store.showingTerminal).accessibilityHidden(store.showingTerminal)
+                                .overlay(alignment: .topTrailing) {
+                                    if projectActionsAvailable && projectActionsFloat(layout) { projectActions(floating: true).padding(16).transition(.opacity) }
+                                }
                             TerminalPane(store: store, terminal: store.terminal, visible: store.showingTerminal && !layout.overlayVisible)
                                 .background(theme.background)
                                 .offset(y: store.showingTerminal ? 0 : contentGeometry.size.height)
@@ -56,9 +60,10 @@ struct WorkspaceView: View {
                     .allowsHitTesting(layout.overlayVisible).accessibilityHidden(true)
 
                 VStack(spacing: 0) {
+                    // The window title already names the app.
                     HStack {
-                        Text("Octo").font(.headline)
                         Spacer()
+                        searchAllButton
                         Button(action: toggleSidebar) { Image(systemName: "sidebar.left") }
                             .hoverFeedback().shortcutHint("sidebar").help("Hide sidebar (⌘B)").accessibilityLabel("Hide sidebar")
                     }.padding(12)
@@ -146,6 +151,21 @@ struct WorkspaceView: View {
         NativeWorkspaceFocus.clear()
         DispatchQueue.main.async { surfacePickerFocus += 1 }
     }
+    /// The project actions stand in for the review panel while it is hidden, as in T3 Code and Codex.
+    private var projectActionsAvailable: Bool { store.isProjectChat && !store.showingReview && !store.showingTerminal }
+    /// Float beside the chat column only when the card fits in the margin; otherwise it opens from the titlebar.
+    private func projectActionsFloat(_ layout: WorkspaceLayout) -> Bool { (layout.detailWidth - 840) / 2 >= 260 + 32 }
+    @ViewBuilder private func projectActions(floating: Bool) -> some View {
+        if let project = store.project {
+            let root = store.thread?.workingDirectory ?? project.rootPath
+            ProjectActionsPanel(projectID: project.id, checkout: root, branch: review.branch, branches: review.branches,
+                                diffStat: review.diffStat, changeCount: review.files.count,
+                                agentRunning: project.threads.contains { store.running.contains($0.id) && $0.workingDirectory == root },
+                                floating: floating, store: store, review: review,
+                                openChanges: { showingProjectActions = false; showPanel { $0.showChanges() } })
+                .equatable()
+        }
+    }
     private var singleReview: Bool { store.isProjectChat && layout.detailWidth < 737 && store.showingReview && !store.showingTerminal }
     private func toggleSidebar() {
         NativeWorkspaceFocus.clear()
@@ -188,17 +208,28 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         ProjectSidebar(store: store, switchProject: { NativeWorkspaceFocus.clear(); palette = .projects }, didNavigate: { compactSidebarOpen = false })
     }
+    /// Searches every chat across Chats and projects, beside the sidebar toggle wherever that is shown.
+    private var searchAllButton: some View {
+        Button { NativeWorkspaceFocus.clear(); palette = .chats } label: { Image(systemName: "magnifyingglass") }
+            .hoverFeedback().shortcutHint("chats").help("Search all chats (⌘K)").accessibilityLabel("Search all chats")
+    }
     private func titlebar(showSidebarToggle: Bool) -> some View {
         HStack {
             if showSidebarToggle {
                 Button(action: toggleSidebar) { Image(systemName: "sidebar.left") }
                     .hoverFeedback().shortcutHint("sidebar").help("Show sidebar (⌘B)").accessibilityLabel("Show sidebar")
+                searchAllButton
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.showingTerminal ? "\(store.project?.name ?? "Octo") · Terminal" : store.thread?.title ?? "Welcome to Octo").font(.headline).lineLimit(1)
                 Text(store.showingTerminal ? "Project terminal workspace" : store.project?.isChatCollection == true ? "Chats" : "\(store.project?.name ?? "Local development")  /  \(review.branch)").font(.system(size: 13)).foregroundStyle(theme.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer()
+            if projectActionsAvailable && !projectActionsFloat(layout) {
+                Button { showingProjectActions.toggle() } label: { GitBranchIcon(size: 15) }
+                    .hoverFeedback().help("Open in, branches and changes").accessibilityLabel("Project actions")
+                    .popover(isPresented: $showingProjectActions, arrowEdge: .bottom) { projectActions(floating: false) }
+            }
             if store.isProjectChat && !store.showingTerminal {
                 Button { store.showingReview.toggle() } label: { Image(systemName: "sidebar.right") }
                     .hoverFeedback().shortcutHint("review")
@@ -237,9 +268,8 @@ struct WorkspaceView: View {
                                 Button("Private Browser") { openBrowserTab(isPrivate: true) }
                                 Button("Files") { showPanel { $0.showFiles() } }
                                 Button("Changes") { showPanel { $0.showChanges() } }
-                            } label: { Image(systemName: "plus") }
-                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                                .padding(.horizontal, 6).frame(minHeight: 28).hoverFeedback()
+                            } label: { Image(systemName: "plus").frame(minWidth: 16, minHeight: 16) }
+                                .hoverMenuStyle().fixedSize()
                                 .help("Open a browser, files or changes").accessibilityLabel("Open a surface")
                         }.padding(.vertical, 3)
                     }
@@ -493,6 +523,7 @@ private struct SidebarPresentation: Equatable {
     let terminalProjects: Set<UUID>
     let running: Set<UUID>
     let edit: UUID?
+    let threadLimits: [UUID: Int]
 
     @MainActor init(_ store: AppStore) {
         projects = store.archive.projects.map { project in
@@ -509,7 +540,18 @@ private struct SidebarPresentation: Equatable {
         recentCollapsed = store.archive.recentSectionCollapsed == true
         terminalVisible = store.showingTerminal
         terminalProjects = Set(store.terminal.tabs.map(\.projectID))
-        running = store.running; edit = store.sidebarEdit?.id
+        running = store.running; edit = store.sidebarEdit?.id; threadLimits = store.sidebarThreadLimits
+    }
+}
+
+/// Long thread lists start short and grow by a page at a time. The selected and running
+/// threads always stay listed, so navigation and working status are never hidden.
+enum SidebarThreadLimit {
+    static let initial = 5, page = 10
+    static func visible(_ threads: [WorkspaceThread], limit: Int, keeping keep: (UUID) -> Bool) -> (threads: [WorkspaceThread], hidden: Int) {
+        guard threads.count > limit else { return (threads, 0) }
+        let shown = threads.enumerated().filter { $0.offset < limit || keep($0.element.id) }.map(\.element)
+        return (shown, threads.count - shown.count)
     }
 }
 
@@ -525,6 +567,7 @@ private struct ProjectSidebarContent: View, Equatable {
     @State private var renaming: SidebarTarget?
     @State private var removing: SidebarTarget?
     @State private var name = ""
+    @State private var showingUsage = false
 
     var body: some View {
         let recentThreads = store.archive.recentThreads
@@ -546,13 +589,15 @@ private struct ProjectSidebarContent: View, Equatable {
                                     .help("New chat").accessibilityLabel("New chat")
                             }
                             VStack(alignment: .leading, spacing: 3) {
-                                ForEach(chats.orderedThreads) { thread in
+                                let window = threadWindow(chats)
+                                ForEach(window.threads) { thread in
                                     SidebarThreadRow(thread: thread, projectName: "Chats", running: store.running.contains(thread.id),
                                                      selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
                                                      select: { didNavigate(); store.selectThread(thread, project: chats) },
                                                      togglePin: { store.toggleThreadPin(thread.id) }).equatable()
                                         .contextMenu { threadMenu(thread, project: chats) }
                                 }
+                                threadLimitControls(chats, hidden: window.hidden)
                                 if chats.threads.isEmpty {
                                     Button { didNavigate(); store.newChat() } label: {
                                         Label("Start a chat", systemImage: "bubble.left")
@@ -567,7 +612,7 @@ private struct ProjectSidebarContent: View, Equatable {
                         sectionHeader("Projects", collapsed: store.archive.projectsSectionCollapsed == true,
                                       unread: unreadCount, toggle: store.toggleProjectsSection)
                         Button(action: switchProject) { Image(systemName: "magnifyingglass").frame(width: 26, height: 28) }
-                            .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects").help("Switch Project (⇧⌘K)")
+                            .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects", placement: .leading).help("Switch Project (⇧⌘K)")
                             .accessibilityLabel("Switch Project")
                         Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
                             .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
@@ -602,10 +647,17 @@ private struct ProjectSidebarContent: View, Equatable {
                 }.padding(10)
             }.frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
             Divider()
-            SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer() } }
-                .buttonStyle(HoverButtonStyle()).shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
-                .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(14)
-                .frame(maxWidth: .infinity).background(theme.panel)
+            HStack(spacing: 4) {
+                SettingsLink { HStack { Label("Settings", systemImage: "gearshape"); Spacer() } }
+                    .buttonStyle(HoverButtonStyle()).shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
+                Button { showingUsage.toggle() } label: { Image(systemName: "chart.bar.xaxis") }
+                    .buttonStyle(HoverButtonStyle()).help("Account usage limits").accessibilityLabel("Account usage limits")
+                    .popover(isPresented: $showingUsage, arrowEdge: .top) {
+                        AccountUsagePopover(store: store) { showingUsage = false }
+                    }
+            }
+            .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(14)
+            .frame(maxWidth: .infinity).background(theme.panel)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.panel)
@@ -641,6 +693,30 @@ private struct ProjectSidebarContent: View, Equatable {
             Button("Cancel", role: .cancel) { removing = nil }
         } message: {
             Text(removing?.threadID == nil ? "This removes the project and its saved conversations from Octo. Files on disk are kept. Stop agents and close this project's terminal tabs first." : "This permanently deletes the saved conversation and its draft from Octo. Files on disk and CLI history are kept.")
+        }
+    }
+    private func threadWindow(_ project: WorkspaceProject) -> (threads: [WorkspaceThread], hidden: Int) {
+        store.sidebarThreads(project, keeping: store.showingTerminal ? nil : store.archive.selectedThreadID)
+    }
+    @ViewBuilder private func threadLimitControls(_ project: WorkspaceProject, hidden: Int) -> some View {
+        let limit = store.sidebarThreadLimits[project.id] ?? SidebarThreadLimit.initial
+        if hidden > 0 || limit > SidebarThreadLimit.initial {
+            HStack(spacing: 2) {
+                if hidden > 0 {
+                    Button { store.sidebarThreadLimits[project.id] = limit + SidebarThreadLimit.page } label: {
+                        Text("Show more").padding(.horizontal, 10).frame(minHeight: 28).contentShape(Rectangle())
+                    }.buttonStyle(HoverButtonStyle(padded: false))
+                        .help("Show \(min(hidden, SidebarThreadLimit.page)) more of \(hidden) hidden")
+                        .accessibilityLabel("Show more threads in \(project.name)")
+                }
+                if limit > SidebarThreadLimit.initial {
+                    Button { store.sidebarThreadLimits[project.id] = nil } label: {
+                        Text("Show less").padding(.horizontal, 10).frame(minHeight: 28).contentShape(Rectangle())
+                    }.buttonStyle(HoverButtonStyle(padded: false))
+                        .accessibilityLabel("Show fewer threads in \(project.name)")
+                }
+                Spacer(minLength: 0)
+            }.font(.system(size: 12)).foregroundStyle(theme.secondary)
         }
     }
     private var unreadCount: Int { store.archive.orderedProjects.reduce(0) { $0 + $1.threads.filter(\.hasUnreadCompletion).count } }
@@ -695,13 +771,15 @@ private struct ProjectSidebarContent: View, Equatable {
                         .accessibilityLabel("New thread in \(project.name)")
                 }.contextMenu { projectMenu(project) }
                 VStack(spacing: 3) {
-                    ForEach(project.orderedThreads) { thread in
+                    let window = threadWindow(project)
+                    ForEach(window.threads) { thread in
                         SidebarThreadRow(thread: thread, projectName: project.name, running: store.running.contains(thread.id),
                                          selected: store.archive.selectedThreadID == thread.id && !store.showingTerminal,
                                          select: { didNavigate(); store.selectThread(thread, project: project) },
                                          togglePin: { store.toggleThreadPin(thread.id) }).equatable()
                             .contextMenu { threadMenu(thread, project: project) }
                     }
+                    threadLimitControls(project, hidden: window.hidden)
                     if !project.threads.isEmpty {
                         Divider().padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
                     }
@@ -850,6 +928,7 @@ private struct SidebarThreadRow: View, Equatable {
     private var showsPin: Bool { hovering || thread.isPinned }
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.thread.id == rhs.thread.id && lhs.thread.title == rhs.thread.title && lhs.thread.isPinned == rhs.thread.isPinned
+            && lhs.thread.harness == rhs.thread.harness
             && lhs.thread.hasUnreadCompletion == rhs.thread.hasUnreadCompletion
             && ThreadHoverDetails.activityDate(lhs.thread) == ThreadHoverDetails.activityDate(rhs.thread)
             && lhs.projectName == rhs.projectName && lhs.showsProjectName == rhs.showsProjectName
@@ -860,6 +939,7 @@ private struct SidebarThreadRow: View, Equatable {
         ZStack(alignment: .trailing) {
             Button(action: select) {
                 HStack(spacing: 9) {
+                    ProviderIcon(harness: thread.harness, size: 13).help(thread.harness.title)
                     VStack(alignment: .leading, spacing: 3) {
                         HoverScrollingTitle(title: thread.title, hovering: hovering, weight: thread.hasUnreadCompletion ? .semibold : .regular)
                         if showsProjectName {
@@ -1147,18 +1227,24 @@ private struct SidebarTarget {
 struct HoverButtonStyle: ButtonStyle {
     var padded = true
     var selected = false
+    /// Menus drawn with this style lose the native indicator; this draws it after the label.
+    var chevron = false
     func makeBody(configuration: Configuration) -> some View {
-        HoverButton(configuration: configuration, padded: padded, selected: selected)
+        HoverButton(configuration: configuration, padded: padded, selected: selected, chevron: chevron)
     }
     private struct HoverButton: View {
         @Environment(\.octoTheme) private var theme
         let configuration: ButtonStyle.Configuration
         let padded: Bool
         let selected: Bool
+        let chevron: Bool
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
         var body: some View {
-            configuration.label
+            HStack(spacing: 4) {
+                configuration.label
+                if chevron { Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.secondary) }
+            }
                 .padding(.horizontal, padded ? 8 : 0).padding(.vertical, padded ? 6 : 0)
                 .contentShape(RoundedRectangle(cornerRadius: 6))
                 .background(selected ? theme.selection.opacity(enabled && (hovering || configuration.isPressed) ? 1.2 : 1) : Color.primary.opacity(enabled && (hovering || configuration.isPressed) ? 0.10 : 0), in: RoundedRectangle(cornerRadius: 6))
@@ -1188,6 +1274,11 @@ private struct HoverFeedback: ViewModifier {
 
 extension View {
     func hoverFeedback() -> some View { modifier(HoverFeedback()) }
+    /// Draws a menu as a hover button so its whole highlighted box opens it. A borderless-button
+    /// menu takes clicks only on its label; padding or hover feedback around it is not clickable.
+    func hoverMenuStyle(padded: Bool = true, chevron: Bool = false) -> some View {
+        menuStyle(.button).buttonStyle(HoverButtonStyle(padded: padded, chevron: chevron)).menuIndicator(.hidden)
+    }
 }
 
 /// Geometry is independent of child ideal sizes so a hidden pane never sets the window minimum.

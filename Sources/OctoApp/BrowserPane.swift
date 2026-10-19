@@ -564,9 +564,8 @@ struct BrowserPane: View {
                 Button("Clear Cookies…") { clearingCookies = true }
                 Button("Clear Cache") { Task { await session.clearCache() } }
             }
-        } label: { Image(systemName: "ellipsis") }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .padding(.horizontal, 6).frame(minHeight: 26).hoverFeedback()
+        } label: { Image(systemName: "ellipsis").frame(minWidth: 16, minHeight: 14) }
+            .hoverMenuStyle().fixedSize()
             .help("More browser actions").accessibilityLabel("More browser actions")
     }
 }

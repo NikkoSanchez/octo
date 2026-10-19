@@ -28,7 +28,8 @@ import OctoCore
         defer { window.close() }
         try await Task.sleep(for: .milliseconds(300))
         let expanded = descendants(ThreadHoverAnchorView.self, in: host)
-        XCTAssertGreaterThanOrEqual(expanded.count, threads.count)
+        // Long lists start at the default page; the rest wait behind Show more.
+        XCTAssertGreaterThanOrEqual(expanded.count, SidebarThreadLimit.initial)
         XCTAssertTrue(expanded.allSatisfy { !$0.visibleRect.isEmpty })
 
         store.toggleProjectCollapse(project.id)

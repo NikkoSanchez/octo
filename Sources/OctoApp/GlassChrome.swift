@@ -167,27 +167,52 @@ struct CapsulePicker<Value: Hashable>: View {
     }
 }
 
-/// The capsule search field at the top of the sidebar. It opens the existing all-chats search (⌘K).
+/// The capsule search field at the top of the sidebar. Clicking it (or ⌘K while the sidebar shows)
+/// edits in place and the sidebar lists the results, as in Messages.
 struct SidebarSearchField: View {
-    let action: () -> Void
+    @Binding var text: String
+    let active: Bool
+    var focus: FocusState<Bool>.Binding
+    let activate: () -> Void
+    /// Escape clears the text first, then leaves search.
+    let cancel: () -> Void
+    let submit: () -> Void
+    /// Moves the highlighted result by this many rows.
+    let move: (Int) -> Void
     @Environment(\.octoTheme) private var theme
     @State private var hovering = false
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium))
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium))
+            if active {
+                TextField("Search", text: $text).textFieldStyle(.plain).foregroundStyle(theme.foreground)
+                    .focused(focus)
+                    .onSubmit(submit)
+                    .onExitCommand(perform: cancel)
+                    .onKeyPress(.downArrow) { move(1); return .handled }
+                    .onKeyPress(.upArrow) { move(-1); return .handled }
+                    .accessibilityLabel("Search all chats")
+                Button { text = ""; cancel() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 13)) }
+                    .buttonStyle(.plain).foregroundStyle(theme.subtle).help("End search").accessibilityLabel("End search")
+            } else {
                 Text("Search")
                 Spacer(minLength: 0)
                 Text("⌘K").font(.system(size: 11)).foregroundStyle(theme.subtle)
             }
-            .font(.system(size: 13.5)).foregroundStyle(theme.secondary)
-            .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 34)
-            .background(Color.primary.opacity(hovering ? 0.05 : 0), in: Capsule())
-            .glassControl()
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain).onHover { hovering = $0 }
-        .shortcutHint("chats").help("Search all chats (⌘K)").accessibilityLabel("Search all chats")
+        .font(.system(size: 13.5)).foregroundStyle(theme.secondary)
+        .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 34)
+        .background(Color.primary.opacity(hovering && !active ? 0.05 : 0), in: Capsule())
+        .overlay(Capsule().strokeBorder(theme.accent.opacity(active ? 0.55 : 0), lineWidth: 1))
+        .glassControl()
+        .contentShape(Capsule())
+        .onTapGesture { if !active { activate() } }
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: active ? .contain : .ignore)
+        .accessibilityAddTraits(active ? [] : .isButton)
+        .accessibilityLabel(active ? "" : "Search all chats")
+        .accessibilityAction { if !active { activate() } }
+        .shortcutHint("chats").help(active ? "" : "Search all chats (⌘K)")
     }
 }
 

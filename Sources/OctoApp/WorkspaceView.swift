@@ -26,6 +26,7 @@ struct WorkspaceView: View {
     @State private var surfacePickerFocus = 0
     @State private var showingShortcutHints = false
     @State private var showingProjectActions = false
+    @State private var sidebarSearchRequest = 0
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @Environment(\.octoTheme) private var theme
@@ -211,6 +212,7 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         ProjectSidebar(store: store, switchProject: { NativeWorkspaceFocus.clear(); palette = .projects },
                        searchChats: { NativeWorkspaceFocus.clear(); palette = .chats }, hideSidebar: toggleSidebar,
+                       searchRequest: sidebarSearchRequest,
                        didNavigate: { compactSidebarOpen = false })
     }
     /// Searches every chat across Chats and projects; the sidebar's search field does the same while it is shown.
@@ -506,16 +508,18 @@ struct ProjectSidebar: View {
     let searchChats: () -> Void
     let hideSidebar: (() -> Void)?
     let didNavigate: () -> Void
+    /// Each increment (⌘K while the sidebar shows) starts searching in the sidebar.
+    var searchRequest = 0
     @StateObject private var observation: SidebarObservation
     init(store: AppStore, switchProject: @escaping () -> Void, searchChats: @escaping () -> Void = {},
-         hideSidebar: (() -> Void)? = nil, didNavigate: @escaping () -> Void) {
+         hideSidebar: (() -> Void)? = nil, searchRequest: Int = 0, didNavigate: @escaping () -> Void) {
         self.store = store; self.switchProject = switchProject; self.searchChats = searchChats
-        self.hideSidebar = hideSidebar; self.didNavigate = didNavigate
+        self.hideSidebar = hideSidebar; self.searchRequest = searchRequest; self.didNavigate = didNavigate
         _observation = StateObject(wrappedValue: SidebarObservation(store))
     }
     var body: some View {
         ProjectSidebarContent(store: store, switchProject: switchProject, searchChats: searchChats, hideSidebar: hideSidebar, didNavigate: didNavigate,
-                              presentation: observation.presentation).equatable()
+                              presentation: observation.presentation, searchRequest: searchRequest).equatable()
     }
 }
 
@@ -642,18 +646,29 @@ private struct ProjectSidebarContent: View, Equatable {
     let hideSidebar: (() -> Void)?
     let didNavigate: () -> Void
     let presentation: SidebarPresentation
+    let searchRequest: Int
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.store === rhs.store && lhs.presentation == rhs.presentation
+        lhs.store === rhs.store && lhs.presentation == rhs.presentation && lhs.searchRequest == rhs.searchRequest
     }
     @Environment(\.octoTheme) private var theme
     @State private var renaming: SidebarTarget?
     @State private var removing: SidebarTarget?
     @State private var name = ""
     @State private var showingUsage = false
+    @State private var searching = false
+    @State private var query = ""
+    @State private var results: [ThreadSearch.Result] = []
+    @State private var highlighted: UUID?
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         floatingList
             .frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+            .onChange(of: searchRequest) { _, _ in beginSearch() }
+            .onChange(of: query) { _, _ in updateResults() }
+            // New replies, renames and deletions while searching.
+            .onChange(of: presentation) { _, _ in if searching && !query.isEmpty { updateResults() } }
+            .onChange(of: searchFocused) { _, focused in if !focused && query.isEmpty { searching = false } }
         .onChange(of: store.sidebarEdit?.id) { _, _ in
             guard let edit = store.sidebarEdit else { return }
             let target = SidebarTarget(projectID: edit.projectID, threadID: edit.threadID)
@@ -689,8 +704,64 @@ private struct ProjectSidebarContent: View, Equatable {
         }
     }
     /// As in Messages, the list scrolls beneath the search field and the footer controls.
+    /// While searching, results cover the list, which stays mounted to keep its scroll position.
     private var floatingList: some View {
-        list.floatingBar(.top) { searchBar }.floatingBar(.bottom) { footer }
+        let showingResults = searching && !query.isEmpty
+        return ZStack {
+            list.opacity(showingResults ? 0 : 1).allowsHitTesting(!showingResults).accessibilityHidden(showingResults)
+            if showingResults { searchResults }
+        }
+        .floatingBar(.top) { searchBar }.floatingBar(.bottom) { footer }
+    }
+    private func beginSearch() {
+        NativeWorkspaceFocus.clear()
+        searching = true
+        DispatchQueue.main.async { searchFocused = true }
+    }
+    /// Escape clears the text first, then leaves search.
+    private func cancelSearch() {
+        if !query.isEmpty { query = ""; return }
+        searching = false; searchFocused = false; highlighted = nil
+    }
+    private func updateResults() {
+        results = ThreadSearch.results(query, in: store.archive.searchableThreads)
+        if !results.contains(where: { $0.id == highlighted }) { highlighted = results.first?.id }
+    }
+    private func moveHighlight(_ offset: Int) {
+        guard !results.isEmpty else { return }
+        let index = results.firstIndex { $0.id == highlighted } ?? (offset > 0 ? -1 : results.count)
+        highlighted = results[min(results.count - 1, max(0, index + offset))].id
+    }
+    private func openHighlighted() {
+        guard let id = highlighted ?? results.first?.id, let entry = searchEntry(id) else { return }
+        didNavigate(); store.selectThread(entry.thread, project: entry.project)
+    }
+    private func searchEntry(_ id: UUID) -> SidebarEntry? {
+        for project in store.archive.projects {
+            if let thread = project.threads.first(where: { $0.id == id }) { return SidebarEntry(thread: thread, project: project) }
+        }
+        return nil
+    }
+    /// Conversation rows as in Recent, with the matching message in place of the latest reply.
+    private var searchResults: some View {
+        let entries = results.compactMap { searchEntry($0.id) }
+        let snippets = Dictionary(results.compactMap { result in result.snippet.map { (result.id, $0) } }, uniquingKeysWith: { first, _ in first })
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(entries.isEmpty ? "No results" : "Conversations · \(entries.count)")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(theme.subtle).textCase(.uppercase)
+                        .padding(.leading, 20).padding(.top, 8).padding(.bottom, 4)
+                        .accessibilityAddTraits(.isHeader)
+                    if entries.isEmpty {
+                        Text("No chat titles, projects or messages contain “\(query)”.")
+                            .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 20).padding(.top, 4)
+                    }
+                    rows(entries, showsProjectName: true, previews: snippets.merging(presentation.previews) { snippet, _ in snippet }, highlighted: highlighted)
+                }.padding(.horizontal, 8).padding(.bottom, 8)
+            }
+            .onChange(of: highlighted) { _, id in if let id { proxy.scrollTo(id) } }
+        }
     }
     /// The traffic-light row and search field share one floating bar, so the top of the card
     /// has a single backdrop; the traffic lights sit in the row's leading space (see WindowChrome).
@@ -704,7 +775,9 @@ private struct ProjectSidebarContent: View, Equatable {
                         .shortcutHint("sidebar").help("Hide sidebar (⌘B)").accessibilityLabel("Hide sidebar")
                 }.padding(.trailing, 12).padding(.top, 4).frame(height: 32, alignment: .top)
             }
-            SidebarSearchField(action: searchChats).padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 6)
+            SidebarSearchField(text: $query, active: searching, focus: $searchFocused, activate: beginSearch,
+                               cancel: cancelSearch, submit: openHighlighted, move: moveHighlight)
+                .padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 6)
         }
     }
     /// The scrolling sections; the search field and footer float over its edges.
@@ -801,14 +874,18 @@ private struct ProjectSidebarContent: View, Equatable {
         }
     }
     /// Rows separated by inset hairlines, hidden beside the selected row as in Messages.
-    @ViewBuilder private func rows(_ entries: [SidebarEntry], showsProjectName: Bool = false) -> some View {
+    @ViewBuilder private func rows(_ entries: [SidebarEntry], showsProjectName: Bool = false, previews: [UUID: String]? = nil, highlighted: UUID? = nil) -> some View {
         let selected = selectedThreadID
         ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
             SidebarThreadRow(thread: entry.thread, projectID: entry.project.id, projectName: entry.project.isChatCollection ? "Chats" : entry.project.name,
-                             showsProjectName: showsProjectName, preview: presentation.previews[entry.id],
+                             showsProjectName: showsProjectName, preview: (previews ?? presentation.previews)[entry.id],
                              running: store.running.contains(entry.id), selected: selected == entry.id,
                              select: { didNavigate(); store.selectThread(entry.thread, project: entry.project) },
                              togglePin: { store.toggleThreadPin(entry.id) }).equatable()
+                // The keyboard's place in search results, drawn like a hover.
+                .background(highlighted == entry.id && selected != entry.id ? Color.primary.opacity(0.07) : .clear,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .id(entry.id)
                 .contextMenu { threadMenu(entry.thread, project: entry.project) }
             if index < entries.count - 1 {
                 SidebarSeparator(hidden: selected == entry.id || selected == entries[index + 1].id)
@@ -1652,7 +1729,10 @@ extension WorkspaceView {
             .init(id: "newChat", title: "New Chat Without a Project", group: "Create") { store.newChat() },
             .init(id: "openChats", title: "Go to Chats", group: "Navigate") { store.openChats() },
             .init(id: "addProject", title: "Add Project…", group: "Create", key: "o", modifiers: [.command, .shift]) { store.chooseProject() },
-            .init(id: "chats", title: "Search Chats…", group: "Navigate", key: "k") { NativeWorkspaceFocus.clear(); palette = .chats },
+            // In the sidebar while it shows, as in Messages; otherwise the palette.
+            .init(id: "chats", title: "Search Chats…", group: "Navigate", key: "k") {
+                if layout.sidebarVisible { sidebarSearchRequest += 1 } else { NativeWorkspaceFocus.clear(); palette = .chats }
+            },
             .init(id: "projects", title: "Switch Project…", group: "Navigate", key: "k", modifiers: [.command, .shift]) { NativeWorkspaceFocus.clear(); palette = .projects },
             .init(id: "commands", title: "Command Palette…", group: "Navigate", key: "p", modifiers: [.command, .shift]) { NativeWorkspaceFocus.clear(); palette = .commands },
             .init(id: "files", title: "Find File…", group: "Navigate", key: "p", enabled: hasProject) { NativeWorkspaceFocus.clear(); palette = .files },

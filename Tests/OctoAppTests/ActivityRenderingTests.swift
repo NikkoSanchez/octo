@@ -65,13 +65,16 @@ import OctoCore
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(titles().contains("Renamed working conversation"), "Display metadata changes must still reach the native title")
-        XCTAssertFalse(descendants(LiveDotView.self, in: host).isEmpty)
+        // Working rows ring their avatar and show typing dots in place of the streamed text.
+        XCTAssertFalse(descendants(AvatarRingView.self, in: host).isEmpty)
+        XCTAssertFalse(descendants(TypingDotsView.self, in: host).isEmpty)
         store.running.removeAll()
         for _ in 0..<100 {
-            if descendants(LiveDotView.self, in: host).isEmpty { break }
+            if descendants(AvatarRingView.self, in: host).isEmpty { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(descendants(LiveDotView.self, in: host).isEmpty, "Working state must update independently of transcript text")
+        XCTAssertTrue(descendants(AvatarRingView.self, in: host).isEmpty, "Working state must update independently of transcript text")
+        XCTAssertTrue(descendants(TypingDotsView.self, in: host).isEmpty)
     }
 
     func testPulseKeepsItsPhaseAcrossUpdatesAndStopsWhenInactiveHiddenOrDetached() throws {
@@ -131,6 +134,35 @@ import OctoCore
         XCTAssertNotNil(dot.ring.animation(forKey: "liveRing"))
         dot.removeFromSuperview()
         XCTAssertNil(dot.ring.animation(forKey: "liveRing"))
+    }
+
+    func testAvatarRingAndTypingDotsKeepTheirPhaseAndStopWhenStillHiddenOrDetached() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 44, height: 44),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let container = NSView(frame: window.contentLayoutRect)
+        let ring = AvatarRingView(frame: container.bounds), dots = TypingDotsView(frame: NSRect(x: 0, y: 0, width: 20, height: 10))
+        container.addSubview(ring); container.addSubview(dots); window.contentView = container
+        defer { window.close() }
+        ring.update(color: .systemBlue, animate: true); dots.update(color: .systemGray, animate: true)
+        let ringStart = try XCTUnwrap(ring.ring.animation(forKey: "avatarRing")?.beginTime)
+        let dotStart = try XCTUnwrap(dots.dots[0].animation(forKey: "typing")?.beginTime)
+        for _ in 0..<1_000 { ring.update(color: .systemBlue, animate: true); dots.update(color: .systemGray, animate: true) }
+        ring.update(color: .systemRed, animate: true); dots.update(color: .white, animate: true)
+        XCTAssertEqual(ring.ring.animation(forKey: "avatarRing")?.beginTime, ringStart, "Updates and theme changes must not restart the ring")
+        XCTAssertEqual(dots.dots[0].animation(forKey: "typing")?.beginTime, dotStart, "Updates and theme changes must not restart the dots")
+        XCTAssertNotEqual(dots.dots[0].animation(forKey: "typing")?.beginTime, dots.dots[1].animation(forKey: "typing")?.beginTime,
+                          "The dots fade in sequence")
+        ring.update(color: .systemRed, animate: false); dots.update(color: .white, animate: false)
+        XCTAssertNil(ring.ring.animation(forKey: "avatarRing"), "Reduce Motion and inactive scenes keep a still ring")
+        XCTAssertNil(dots.dots[0].animation(forKey: "typing"))
+        ring.update(color: .systemRed, animate: true); dots.update(color: .white, animate: true)
+        container.isHidden = true
+        XCTAssertNil(ring.ring.animation(forKey: "avatarRing")); XCTAssertNil(dots.dots[0].animation(forKey: "typing"))
+        container.isHidden = false
+        XCTAssertNotNil(ring.ring.animation(forKey: "avatarRing")); XCTAssertNotNil(dots.dots[0].animation(forKey: "typing"))
+        ring.removeFromSuperview(); dots.removeFromSuperview()
+        XCTAssertNil(ring.ring.animation(forKey: "avatarRing")); XCTAssertNil(dots.dots[0].animation(forKey: "typing"))
     }
 
     func testShimmerSurvivesTimerTextChangesAndStopsWhenStill() throws {

@@ -13,9 +13,18 @@ public struct ChangedFile: Identifiable, Equatable, Sendable {
 }
 
 public struct DiffStat: Equatable, Sendable {
+    public struct Lines: Equatable, Sendable {
+        public var additions: Int
+        public var deletions: Int
+        public init(additions: Int, deletions: Int) { self.additions = additions; self.deletions = deletions }
+    }
     public var additions = 0
     public var deletions = 0
-    public init(additions: Int = 0, deletions: Int = 0) { self.additions = additions; self.deletions = deletions }
+    /// Per checkout-relative path. Binary files and renames are counted in the totals only.
+    public var files: [String: Lines] = [:]
+    public init(additions: Int = 0, deletions: Int = 0, files: [String: Lines] = [:]) {
+        self.additions = additions; self.deletions = deletions; self.files = files
+    }
 }
 
 public actor GitService {
@@ -54,8 +63,13 @@ public actor GitService {
             let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
             guard fields.count == 3 else { continue }
             // Binary files report "-" for both counts.
-            stat.additions += Int(fields[0]) ?? 0
-            stat.deletions += Int(fields[1]) ?? 0
+            let additions = Int(fields[0]), deletions = Int(fields[1])
+            stat.additions += additions ?? 0
+            stat.deletions += deletions ?? 0
+            // Without -z a rename reads "old => new" or "dir/{old => new}"; those paths are not usable.
+            if let additions, let deletions, !fields[2].contains(" => ") {
+                stat.files[String(fields[2])] = .init(additions: additions, deletions: deletions)
+            }
         }
         return stat
     }

@@ -21,7 +21,42 @@ final class ThreadTitleTests: XCTestCase {
     }
     @MainActor func testAdapterConfiguration() {
         XCTAssertEqual(HarnessRegistry.titleConfiguration(.codex), .init(model: "gpt-6-luna", reasoningEffort: "low"))
-        XCTAssertNil(HarnessRegistry.titleConfiguration(.claude))
+        XCTAssertEqual(HarnessRegistry.titleConfiguration(.claude), .init(model: "haiku"))
+    }
+    @MainActor func testClaudeTitleRequestHasNoToolsSettingsOrSession() async throws {
+        let root = try PrivateTemporaryDirectory()
+        let fixture = root.url.appendingPathComponent("claude")
+        let script = #"""
+        #!/usr/bin/python3
+        import sys, json, os
+        args = sys.argv[1:]
+        assert args[0] == '-p'
+        assert args[args.index('--model')+1] == 'fixture-model'
+        assert args[args.index('--effort')+1] == 'low'
+        assert args[args.index('--output-format')+1] == 'json'
+        assert args[args.index('--tools')+1] == ''
+        assert args[args.index('--setting-sources')+1] == ''
+        assert all(x in args for x in ['--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence'])
+        assert not any('dangerously' in x or 'bypass' in x for x in args)
+        assert '--permission-mode' not in args and '--resume' not in args
+        assert json.loads(args[args.index('--json-schema')+1])['required'] == ['title']
+        assert oct(os.stat(os.getcwd()).st_mode & 0o777) == '0o700'
+        prompt = sys.stdin.read()
+        assert 'Do not answer the message' in prompt
+        assert json.loads(prompt.split('Message (JSON string):\n')[1]) == 'Name "this" chat'
+        print(json.dumps({'type': 'result', 'is_error': False, 'result': '{}', 'structured_output': {'title': 'A Claude fixture title'}}))
+        """#
+        try Data(script.utf8).write(to: fixture)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
+        let config = ThreadTitleConfiguration(model: "fixture-model", reasoningEffort: "low")
+        let title = try await ClaudeHarness.generateTitle("Name \"this\" chat", configuration: config, executable: fixture)
+        XCTAssertEqual(title, "A Claude fixture title")
+
+        let failing = root.url.appendingPathComponent("claude-error")
+        try Data("#!/bin/sh\necho '{\"type\":\"result\",\"is_error\":true,\"structured_output\":{\"title\":\"Nope\"}}'\n".utf8).write(to: failing)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: failing.path)
+        let errored = try await ClaudeHarness.generateTitle("Prompt", configuration: config, executable: failing)
+        XCTAssertNil(errored, "An error result keeps the first-message title")
     }
     @MainActor func testFiniteTitleRequestUsesExplicitModelAndIsolatedCLIArguments() async throws {
         let root = try PrivateTemporaryDirectory()

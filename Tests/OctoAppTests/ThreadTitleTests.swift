@@ -53,24 +53,25 @@ import OctoAgents
         XCTAssertEqual(try storage.load().projects[0].threads[0].title, "Improve sidebar navigation")
     }
 
-    func testNoConfigEmptyTextFailureAndExistingChatKeepFallback() async throws {
+    func testEmptyTextFailureAndExistingChatKeepFallback() async throws {
         var calls = 0
         let (store, root, _) = try fixture { _, _, _ in calls += 1; throw ProcessFailure.timedOut }
         defer { store.shutdown(); withExtendedLifetime(root) {} }
+        // Both providers now have a title model; a failed Claude request keeps the first-message title.
         store.archive.projects[0].threads[0].harness = .claude
         store.prepareThreadTitle(store.thread!, text: "First message")
-        await settle(); XCTAssertEqual(calls, 0); XCTAssertEqual(store.thread?.title, "First message")
+        await settle(); XCTAssertEqual(calls, 1); XCTAssertEqual(store.thread?.title, "First message")
         store.archive.projects[0].threads[0] = WorkspaceThread(workingDirectory: root.url.path)
         store.archive.selectedThreadID = store.archive.projects[0].threads[0].id
         store.prepareThreadTitle(store.thread!, text: "")
-        await settle(); XCTAssertEqual(calls, 0); XCTAssertEqual(store.thread?.title, "Screenshot discussion")
+        await settle(); XCTAssertEqual(calls, 1); XCTAssertEqual(store.thread?.title, "Screenshot discussion")
         store.archive.projects[0].threads[0].title = "New thread"
         store.prepareThreadTitle(store.thread!, text: "Failed generation fallback")
-        await settle(); XCTAssertEqual(calls, 1); XCTAssertEqual(store.thread?.title, "Failed generation fallback")
+        await settle(); XCTAssertEqual(calls, 2); XCTAssertEqual(store.thread?.title, "Failed generation fallback")
         store.archive.projects[0].threads[0].title = "New thread"
         store.archive.projects[0].threads[0].messages = [.init(role: .user, text: "Existing")]
         store.prepareThreadTitle(store.thread!, text: "Don't rename history")
-        await settle(); XCTAssertEqual(calls, 1)
+        await settle(); XCTAssertEqual(calls, 2)
     }
 
     func testLateResultsCannotOverwriteManualRenameOrRecreateDeletedThreads() async throws {

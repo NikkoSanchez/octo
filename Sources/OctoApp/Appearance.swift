@@ -33,6 +33,26 @@ extension AppTheme {
     var onAccent: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.base)) } ?? .white }
     var border: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.overlay0)) } ?? Color.primary.opacity(0.12) }
     var activeBorder: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.lavender)) } ?? .accentColor }
+    /// Messages-style solid row selection: the macOS accent in System, the palette accent otherwise.
+    var rowSelection: Color { accent }
+    var onRowSelection: Color { Color(nsColor: onRowSelectionColor) }
+    var onRowSelectionColor: NSColor { palette.map { NSColor(themeHex: $0.base) } ?? .white }
+    /// Inset separators between conversation rows.
+    var hairline: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.overlay0)).opacity(0.3) } ?? Color(nsColor: .separatorColor) }
+    /// Capsule fields and segmented tracks drawn on glass.
+    var field: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.surface)).opacity(0.7) } ?? Color.primary.opacity(0.06) }
+    /// Palette themes tint Liquid Glass with their panel colour so it stays on-palette; System keeps it clear.
+    var glassTint: Color? { palette.map { Color(nsColor: NSColor(themeHex: $0.mantle)).opacity(0.8) } }
+    /// The monogram circle behind provider marks, after Messages' contact avatars.
+    var avatarFill: LinearGradient {
+        let stops: [NSColor]
+        if let palette { stops = colorScheme == .dark ? [NSColor(themeHex: palette.overlay0), NSColor(themeHex: palette.surface)]
+                                                      : [NSColor(themeHex: palette.surface), NSColor(themeHex: palette.overlay0)] }
+        else { stops = [NSColor(name: nil) { $0.isDark ? NSColor(themeHex: "6f7489") : NSColor(themeHex: "a9afc6") },
+                        NSColor(name: nil) { $0.isDark ? NSColor(themeHex: "51556a") : NSColor(themeHex: "858aa2") }] }
+        return LinearGradient(colors: stops.map { Color(nsColor: $0) }, startPoint: .top, endPoint: .bottom)
+    }
+    var avatarForeground: Color { palette.map { Color(nsColor: NSColor(themeHex: colorScheme == .dark ? $0.text : $0.base)) } ?? .white }
     func searchHighlight(active: Bool) -> Color {
         guard let palette else { return accent.opacity(active ? 0.20 : 0.07) }
         // Highlight whole messages softly; occurrence-level search is not yet supported.
@@ -278,4 +298,8 @@ final class ShimmerTextView: NSView {
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateAnimation() }
     override func viewDidHide() { super.viewDidHide(); updateAnimation() }
     override func viewDidUnhide() { super.viewDidUnhide(); updateAnimation() }
+}
+
+extension NSAppearance {
+    var isDark: Bool { bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 }

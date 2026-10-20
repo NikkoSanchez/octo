@@ -26,6 +26,9 @@ import OctoTerminal
                 }
         }
         .defaultSize(width: 1380, height: 880)
+        // SwiftUI otherwise restores an opaque titlebar over the full-size content whenever the
+        // colour scheme changes (every theme switch); this style keeps it transparent.
+        .windowStyle(.hiddenTitleBar)
         .commands { WorkspaceCommandMenu() }
         Window("Usage", id: UsageDashboardWindow.id) {
             UsageDashboardView(store: store).modifier(ThemedContent(theme: store.theme)).frame(minWidth: 820, minHeight: 560)

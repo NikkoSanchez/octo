@@ -244,7 +244,8 @@ struct ChatPane: View {
             }
 
         }.padding(12).background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary)).padding(14)
+            // 8 pt from the window's bottom edge, level with the sidebar and review cards.
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary)).padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 8)
     }
     @ViewBuilder private func queuedMessages(_ thread: WorkspaceThread) -> some View {
         let messages = store.queuedMessages[thread.id] ?? []

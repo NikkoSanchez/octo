@@ -105,8 +105,12 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(restored, ["tracked.txt"])
     }
     func testNumstatSumsTextAndSkipsBinaryCounts() {
-        let stat = GitService.parseNumstat("3\t1\tSources/a.swift\n-\t-\timage.png\n10\t0\tpath\twith tab.txt\n")
-        XCTAssertEqual(stat, DiffStat(additions: 13, deletions: 1))
+        let stat = GitService.parseNumstat("3\t1\tSources/a.swift\n-\t-\timage.png\n10\t0\tpath\twith tab.txt\n2\t2\tSources/{old => new}.swift\n")
+        XCTAssertEqual(stat.additions, 15)
+        XCTAssertEqual(stat.deletions, 3)
+        // Per-file counts for the review list; binary files and renames stay in the totals only.
+        XCTAssertEqual(stat.files, ["Sources/a.swift": .init(additions: 3, deletions: 1),
+                                    "path\twith tab.txt": .init(additions: 10, deletions: 0)])
         XCTAssertEqual(GitService.parseNumstat(""), DiffStat())
     }
     func testLocalBranchesAndSwitchRejectUnknownNames() async throws {
@@ -136,6 +140,6 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(unchanged, "feature/one")
         try "changed\nmore\n".write(to: root.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
         let stat = try await service.diffStat(root: root.path)
-        XCTAssertEqual(stat, DiffStat(additions: 2, deletions: 1))
+        XCTAssertEqual(stat, DiffStat(additions: 2, deletions: 1, files: ["file.txt": .init(additions: 2, deletions: 1)]))
     }
 }

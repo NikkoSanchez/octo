@@ -109,6 +109,51 @@ import OctoCore
             }
         }
     }
+    private final class Probes { var leading: [NSView] = []; var trailing: [NSView] = [] }
+    private struct FrameProbe: NSViewRepresentable {
+        let record: (NSView) -> Void
+        func makeNSView(context: Context) -> NSView { let view = NSView(); record(view); return view }
+        func updateNSView(_ view: NSView, context: Context) {}
+    }
+    private struct StackedPanels: View {
+        @ObservedObject var input: Input
+        let probes: Probes
+        var body: some View {
+            ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3,
+                             stackedLeadingHeight: input.reviewVisible ? 120 : nil, opaqueTrailing: false) {
+                FrameProbe { probes.leading.append($0) }
+            } trailing: { FrameProbe { probes.trailing.append($0) } }
+        }
+    }
+
+    /// Changes stacks its file rows above the diff and Files puts its tree beside the editor; switching
+    /// between them must move the same mounted panes, never rebuild the editor.
+    func testStackedColumnsPlaceLeadingAboveTrailingWithoutRemounting() async throws {
+        let input = Input(), probes = Probes()
+        let host = NSHostingView(rootView: StackedPanels(input: input, probes: probes))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        func frames() async throws -> (leading: CGRect, trailing: CGRect) {
+            for _ in 0..<5 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(16)) }
+            let leading = try XCTUnwrap(probes.leading.last), trailing = try XCTUnwrap(probes.trailing.last)
+            XCTAssertTrue(host.isFlipped)
+            return (leading.convert(leading.bounds, to: host), trailing.convert(trailing.bounds, to: host))
+        }
+        // 30% of the 493 pt beside the divider is under the 150 pt minimum.
+        let side = try await frames()
+        XCTAssertEqual(side.leading, CGRect(x: 0, y: 0, width: 150, height: 600))
+        XCTAssertEqual(side.trailing, CGRect(x: 157, y: 0, width: 343, height: 600))
+        input.reviewVisible = true
+        let stacked = try await frames()
+        XCTAssertEqual(stacked.leading, CGRect(x: 0, y: 0, width: 500, height: 120))
+        XCTAssertEqual(stacked.trailing, CGRect(x: 0, y: 120, width: 500, height: 480))
+        input.reviewVisible = false
+        _ = try await frames()
+        XCTAssertEqual(probes.leading.count, 1, "The leading pane must stay mounted across layouts")
+        XCTAssertEqual(probes.trailing.count, 1, "The trailing pane must stay mounted across layouts")
+    }
+
     func testLongTranscriptKeepsMeasuredHeightAndReadingPositionAcrossScrolls() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

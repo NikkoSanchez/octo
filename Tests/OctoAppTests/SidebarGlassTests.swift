@@ -39,6 +39,11 @@ import OctoCore
         XCTAssertEqual(cache.previews([settled], running: [])[settled.id], "Rewritten", "Changed text is reduced again")
     }
 
+    func testTrafficLightsRiseToFitAShorterTitlebar() {
+        // Measured: 14 pt buttons in a 32 pt titlebar on macOS 26; 16 pt buttons in 28 pt on CI's macOS 15.
+        XCTAssertEqual(WindowChromeView.buttonTop(titlebarHeight: 32, buttonHeight: 14), 17, "macOS 26 keeps its placement")
+        XCTAssertEqual(WindowChromeView.buttonTop(titlebarHeight: 28, buttonHeight: 16), 12, "Earlier macOS rises to fit")
+    }
     func testChromePlacesTheTrafficLightsInsideTheSidebarCardAndKeepsTheTopStripInteractive() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 600),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -51,8 +56,8 @@ import OctoCore
         XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertNil(window.toolbar, "On macOS 26 a toolbar draws a full-width glass band over the content")
-        // The sidebar card is inset 8 pt with a 16 pt radius; every light must clear its corner
-        // and stay inside the titlebar, where it keeps all of its clicks.
+        // The sidebar card is inset 8 pt with a 16 pt radius; every light must sit inside its rounded
+        // corner and stay inside the titlebar (32 pt on macOS 26, 28 pt before), where it keeps all its clicks.
         let titlebarHeight = host.bounds.height - window.contentLayoutRect.height
         func check() throws {
             for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
@@ -60,7 +65,10 @@ import OctoCore
                 let frame = button.convert(button.bounds, to: nil)
                 let top = host.bounds.height - frame.maxY
                 XCTAssertGreaterThanOrEqual(frame.minX, 18, "\(kind) sits inside the card's leading edge")
-                XCTAssertGreaterThanOrEqual(top, 16, "\(kind) sits below the card's top edge")
+                XCTAssertGreaterThanOrEqual(top, 8, "\(kind) sits below the card's top edge")
+                if frame.minX < 24 && top < 24 {
+                    XCTAssertLessThanOrEqual(hypot(24 - frame.minX, 24 - top), 16, "\(kind) clears the card's rounded corner")
+                }
                 XCTAssertLessThanOrEqual(top + frame.height, titlebarHeight, "\(kind) stays inside the titlebar")
                 let titlebar = try XCTUnwrap(button.superview)
                 XCTAssertTrue(titlebar.bounds.contains(button.frame), "\(kind) is not clipped by the titlebar")

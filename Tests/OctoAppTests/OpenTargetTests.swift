@@ -43,7 +43,10 @@ import XCTest
         host.layoutSubtreeIfNeeded()
         func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
         let divider = try XCTUnwrap(views(host).compactMap { $0 as? ResizeCursorView }.first { $0.vertical })
-        XCTAssertEqual(divider.convert(divider.bounds, to: nil), NSRect(x: 0, y: 396.5, width: 400, height: 7))
+        let frame = divider.convert(divider.bounds, to: nil)
+        XCTAssertEqual([frame.minX, frame.width, frame.height], [0, 400, 7])
+        // 396.5 on a Retina display; a 1x display (such as CI's) rounds to whole points.
+        XCTAssertEqual(frame.minY, 396.5, accuracy: 0.5)
         // SwiftUI reports a visible rect as tall as the whole panel; tracking it lit the divider on entering the panel.
         XCTAssertEqual(divider.trackingAreas.map(\.rect), [divider.bounds])
         XCTAssertTrue(window.contentView?.hitTest(NSPoint(x: 200, y: 400)) === divider)

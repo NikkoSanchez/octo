@@ -128,7 +128,9 @@ import OctoCore
         let tab = workspace.newTab(projectID: projectID, directory: "/tmp")
         let host = NSHostingView(rootView: TerminalSurfaces(workspace: workspace, projectID: projectID, visible: true) { _ in Color.clear })
         host.frame = NSRect(x: 0, y: 0, width: 801, height: 400)
-        host.layoutSubtreeIfNeeded()
+        // On CI (macOS 15) a published change was not applied by layout alone; let the run loop deliver it.
+        func layout() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)); host.layoutSubtreeIfNeeded() }
+        layout()
         let first = tab.state
         let view = try XCTUnwrap(first.view)
         XCTAssertNotNil(view.superview)
@@ -136,14 +138,14 @@ import OctoCore
 
         tab.split(.right)
         let second = tab.state
-        host.layoutSubtreeIfNeeded()
+        layout()
         XCTAssertTrue(first.view === view, "The first pane keeps its native view")
         XCTAssertNotNil(view.superview)
         XCTAssertEqual(view.frame.width, 400, accuracy: 0.5)
         XCTAssertEqual(try XCTUnwrap(second.view).frame.width, 400, accuracy: 0.5)
 
         second.onClose?(false)
-        host.layoutSubtreeIfNeeded()
+        layout()
         XCTAssertTrue(first.view === view)
         XCTAssertNotNil(view.superview)
         XCTAssertEqual(view.frame.width, 801, accuracy: 0.5)

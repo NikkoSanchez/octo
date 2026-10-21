@@ -435,9 +435,13 @@ struct WindowChrome: NSViewRepresentable {
 }
 
 final class WindowChromeView: NSView {
-    /// The close button's top-left corner in window coordinates, measured from the top. It must stay
-    /// inside the 32 pt titlebar: a button extending below it is clipped and loses its lower clicks.
+    /// The close button's top-left corner in window coordinates, measured from the top, on macOS 26's
+    /// 32 pt titlebar. A button extending below the titlebar is clipped and loses its lower clicks.
     static let buttonOrigin = CGPoint(x: 20, y: 17)
+    /// Earlier macOS has a 28 pt titlebar, so the buttons rise until they fit; they stay inside the card.
+    static func buttonTop(titlebarHeight: CGFloat, buttonHeight: CGFloat) -> CGFloat {
+        min(buttonOrigin.y, titlebarHeight - buttonHeight)
+    }
     private static let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
     private var observers: [NSObjectProtocol] = []
     private var transparency: NSKeyValueObservation?
@@ -484,7 +488,8 @@ final class WindowChromeView: NSView {
         if spacing == nil { spacing = buttons.map { $0.frame.minX - buttons[0].frame.minX } }
         for (button, offset) in zip(buttons, spacing ?? []) {
             guard let titlebar = button.superview else { continue }
-            let top = Self.buttonOrigin.y, height = button.frame.height
+            let height = button.frame.height
+            let top = Self.buttonTop(titlebarHeight: titlebar.bounds.height, buttonHeight: height)
             let y = titlebar.isFlipped ? top : titlebar.bounds.height - top - height
             let origin = CGPoint(x: Self.buttonOrigin.x + offset, y: y)
             if button.frame.origin != origin { button.setFrameOrigin(origin) }

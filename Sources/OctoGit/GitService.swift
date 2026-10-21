@@ -29,9 +29,17 @@ public struct DiffStat: Equatable, Sendable {
 
 public actor GitService {
     public init() {}
+    /// A checkout can contain a folder laid out as a bare repository, whose config Git would otherwise
+    /// apply when run inside it; `explicit` opens bare repositories only when named. Git before 2.38 ignores it.
+    nonisolated static func invocation(_ arguments: [String]) -> [String] {
+        ["--no-optional-locks", "-c", "core.quotepath=false", "-c", "safe.bareRepository=explicit"] + arguments
+    }
+    /// `core.fsmonitor` names a command run on each index refresh. Listing files does not need it,
+    /// so a repository's config cannot run one there; status keeps it for large repositories.
+    nonisolated static let listingConfiguration = ["-c", "core.fsmonitor=false"]
     private func git(_ arguments: [String], root: String) async throws -> ProcessResult {
         guard let executable = Executables.find("git") else { throw ProcessFailure.missing("git") }
-        return try await ProcessRunner.run(executable, arguments: ["--no-optional-locks", "-c", "core.quotepath=false"] + arguments, directory: URL(fileURLWithPath: root))
+        return try await ProcessRunner.run(executable, arguments: Self.invocation(arguments), directory: URL(fileURLWithPath: root))
     }
     private func text(_ arguments: [String], root: String) async throws -> String {
         let result = try await git(arguments, root: root)
@@ -90,10 +98,10 @@ public actor GitService {
         return result.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
     public func filePaths(root: String) async throws -> [String] {
-        let result = try await git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root: root)
+        let result = try await git(Self.listingConfiguration + ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root: root)
         guard result.status == 0 else { throw ProcessFailure.exited(String(decoding: result.error, as: UTF8.self)) }
         // Cached paths include tracked files deleted from disk; those belong in Changes only.
-        let deleted = try await git(["ls-files", "--deleted", "-z"], root: root)
+        let deleted = try await git(Self.listingConfiguration + ["ls-files", "--deleted", "-z"], root: root)
         guard deleted.status == 0 else { throw ProcessFailure.exited(String(decoding: deleted.error, as: UTF8.self)) }
         let missing = Set(String(decoding: deleted.output, as: UTF8.self).split(separator: "\0").map(String.init))
         return Array(Set(String(decoding: result.output, as: UTF8.self).split(separator: "\0").map(String.init)).subtracting(missing)).sorted()

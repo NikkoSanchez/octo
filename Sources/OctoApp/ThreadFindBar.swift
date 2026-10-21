@@ -97,7 +97,10 @@ extension AttributedString {
             let length = text.distance(from: range.lowerBound, to: range.upperBound)
             let start = value.characters.index(value.startIndex, offsetBy: offset)
             let end = value.characters.index(start, offsetBy: length)
-            if highlight.current {
+            if let palette = theme.palette, let current = palette.findCurrent, let other = palette.findOther {
+                // Themes with their own find colors (Catppuccin: Red current, Sky others, at 30%).
+                value[start..<end].backgroundColor = Color(nsColor: NSColor(themeHex: highlight.current ? current : other)).opacity(0.30)
+            } else if highlight.current {
                 value[start..<end].backgroundColor = Color(nsColor: NSColor(srgbRed: 1, green: 0.84, blue: 0.2, alpha: 1))
                 value[start..<end].foregroundColor = .black
             } else {

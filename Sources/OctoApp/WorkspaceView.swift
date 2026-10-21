@@ -998,7 +998,7 @@ private struct ProjectSidebarContent: View, Equatable {
         return Button { didNavigate(); store.selectThread(thread, project: entry.project) } label: {
             VStack(spacing: 6) {
                 ThreadAvatar(harness: thread.harness, size: 48, running: running)
-                    .overlay(Circle().strokeBorder(theme.rowSelection, lineWidth: 2.5).padding(-4).opacity(selected ? 1 : 0))
+                    .overlay(Circle().strokeBorder(theme.activeBorder, lineWidth: 2.5).padding(-4).opacity(selected ? 1 : 0))
                     .overlay(alignment: .topLeading) {
                         if thread.hasUnreadCompletion { Circle().fill(theme.blue).frame(width: 10, height: 10).offset(x: -3, y: -1) }
                     }

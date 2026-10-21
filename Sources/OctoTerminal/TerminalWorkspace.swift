@@ -64,9 +64,9 @@ import OctoCore
         var colors: GhosttyColors?
         if let palette = theme.palette {
             colors = GhosttyColors(background: palette.base, foreground: palette.text,
-                cursor: palette.rosewater, cursorText: palette.cursorText,
+                cursor: palette.cursor, cursorText: palette.cursorText,
                 selectionBackground: palette.terminalSelectionBackground, selectionForeground: palette.text,
-                palette: palette.ansi + [palette.peach, palette.rosewater])
+                palette: palette.ansi)
         }
         // Live config updates preserve the surface, PTY, editor and scrollback.
         return tab.state.setColors(colors)

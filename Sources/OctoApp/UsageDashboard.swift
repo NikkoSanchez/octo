@@ -126,7 +126,7 @@ struct UsageDashboardView: View {
     private func color(_ provider: HarnessID) -> Color {
         switch provider {
         case .codex: return theme.foreground.opacity(0.85)
-        case .claude: return theme.palette.map { Color(nsColor: NSColor(themeHex: $0.peach)) } ?? .orange
+        case .claude: return theme.palette.map { Color(nsColor: NSColor(themeHex: $0.orange)) } ?? .orange
         }
     }
 

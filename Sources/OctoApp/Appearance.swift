@@ -9,7 +9,7 @@ extension NSColor {
     }
 }
 extension AppTheme {
-    var colorScheme: ColorScheme? { self == .system ? nil : self == .latte ? .light : .dark }
+    var colorScheme: ColorScheme? { isDark.map { $0 ? .dark : .light } }
     var background: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.base)) } ?? Color(nsColor: .windowBackgroundColor) }
     var panel: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.mantle)) } ?? Color(nsColor: .controlBackgroundColor) }
     var foreground: Color { Color(nsColor: textColor) }
@@ -29,14 +29,15 @@ extension AppTheme {
     var yellow: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.yellow)) } ?? .orange }
     var selection: Color { Color(nsColor: selectionColor) }
     var selectionColor: NSColor { palette.map { NSColor(themeHex: $0.selectionBackground).withAlphaComponent($0.selectionOpacity) } ?? .selectedTextBackgroundColor }
-    var cursorColor: NSColor { palette.map { NSColor(themeHex: $0.rosewater) } ?? .textColor }
-    var onAccent: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.base)) } ?? .white }
+    var cursorColor: NSColor { palette.map { NSColor(themeHex: $0.cursor) } ?? .textColor }
+    var onAccent: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.onAccent)) } ?? .white }
     var border: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.overlay0)) } ?? Color.primary.opacity(0.12) }
-    var activeBorder: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.lavender)) } ?? .accentColor }
-    /// Messages-style solid row selection: the macOS accent in System, the palette accent otherwise.
-    var rowSelection: Color { accent }
+    var activeBorder: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.activeBorder)) } ?? .accentColor }
+    /// Selected sidebar rows: the macOS accent in System; otherwise the palette's list selection
+    /// (Catppuccin uses Surface0 with Text, as its VS Code port does; other themes keep their accent).
+    var rowSelection: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.listSelection)) } ?? accent }
     var onRowSelection: Color { Color(nsColor: onRowSelectionColor) }
-    var onRowSelectionColor: NSColor { palette.map { NSColor(themeHex: $0.base) } ?? .white }
+    var onRowSelectionColor: NSColor { palette.map { NSColor(themeHex: $0.listSelectionText) } ?? .white }
     /// Inset separators between conversation rows.
     var hairline: Color { palette.map { Color(nsColor: NSColor(themeHex: $0.overlay0)).opacity(0.3) } ?? Color(nsColor: .separatorColor) }
     /// Capsule fields and segmented tracks drawn on glass.
@@ -56,7 +57,7 @@ extension AppTheme {
     func searchHighlight(active: Bool) -> Color {
         guard let palette else { return accent.opacity(active ? 0.20 : 0.07) }
         // Highlight whole messages softly; occurrence-level search is not yet supported.
-        return Color(nsColor: NSColor(themeHex: active ? palette.red : palette.teal)).opacity(0.20)
+        return Color(nsColor: NSColor(themeHex: active ? palette.findCurrent ?? palette.red : palette.findOther ?? palette.teal)).opacity(0.20)
     }
 }
 private struct OctoThemeKey: EnvironmentKey { static let defaultValue = AppTheme.system }

@@ -44,6 +44,9 @@ enum BrowserDevice: String, CaseIterable, Identifiable {
     @Published var landscape = false
     @Published private(set) var detached = false
     @Published var error: String?
+    /// A clicked link to another app, waiting for the user to allow it.
+    @Published var pendingExternalLink: ExternalLink?
+    struct ExternalLink: Equatable { var url: URL; var application: String }
     let webView: WKWebView
     /// Private tabs use a non-persistent data store; pop-ups share their opener's store.
     let isPrivate: Bool
@@ -369,8 +372,23 @@ extension BrowserSession: WKNavigationDelegate, WKUIDelegate {
         let scheme = action.request.url?.scheme?.lowercased() ?? ""
         if ["http", "https", "about", "data", "blob"].contains(scheme) { decisionHandler(.allow); return }
         // Other schemes (mailto:, app links) leave the browser only on an explicit click.
-        if action.navigationType == .linkActivated, let url = action.request.url, !["javascript", "file"].contains(scheme) { NSWorkspace.shared.open(url) }
+        if action.navigationType == .linkActivated, let url = action.request.url { requestExternalOpen(url) }
         decisionHandler(.cancel)
+    }
+    /// Any page can link to an app's URL scheme, so like Safari, the user confirms which app opens it.
+    /// Mail links open directly.
+    func requestExternalOpen(_ url: URL) {
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard !scheme.isEmpty, !["javascript", "file"].contains(scheme) else { return }
+        guard let application = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+            error = "No app on this Mac opens \(scheme): links."; return
+        }
+        if scheme == "mailto" { NSWorkspace.shared.open(url); return }
+        pendingExternalLink = ExternalLink(url: url, application: application.deletingPathExtension().lastPathComponent)
+    }
+    func confirmExternalLink() {
+        if let link = pendingExternalLink { NSWorkspace.shared.open(link.url) }
+        pendingExternalLink = nil
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { annotating = false; error = nil }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { report(error) }
@@ -513,6 +531,13 @@ struct BrowserPane: View {
             Text(session.isPrivate
                  ? "This signs you out of sites in this private tab and the pop-ups it opened."
                  : "This signs you out of sites in every non-private browser tab in Octo. Private tabs are unaffected.")
+        }
+        .alert("Open in \(session.pendingExternalLink?.application ?? "another app")?",
+               isPresented: Binding(get: { session.pendingExternalLink != nil }, set: { if !$0 { session.pendingExternalLink = nil } })) {
+            Button("Open") { session.confirmExternalLink() }
+            Button("Cancel", role: .cancel) { session.pendingExternalLink = nil }
+        } message: {
+            Text("This page wants to open a link outside Octo:\n\(String(session.pendingExternalLink?.url.absoluteString.prefix(200) ?? ""))")
         }
     }
     /// The web view keeps one position in the hierarchy, so toggling the device toolbar never reloads the page.

@@ -75,29 +75,7 @@ struct SettingsView: View {
             }
     }
     private var appearance: some View {
-        Form {
-            Section("Color theme") {
-                Picker("Appearance", selection: $store.theme) {
-                    ForEach(AppTheme.allCases) { theme in Text(theme.title).tag(theme) }
-                }.pickerStyle(.radioGroup)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 12)], spacing: 12) {
-                    ForEach(AppTheme.allCases.filter { $0.palette != nil }) { theme in
-                        let syntax = theme.syntax!
-                        Button { store.theme = theme } label: {
-                            VStack(alignment: .leading, spacing: 14) {
-                                HStack { Circle().fill(theme.accent).frame(width: 10, height: 10); Text(theme.title).font(.headline); Spacer() }
-                                (Text("let ").foregroundColor(Color(nsColor: NSColor(themeHex: syntax.keyword))) + Text("idea = ").foregroundColor(theme.foreground) + Text("\"Hello, Octo\"").foregroundColor(Color(nsColor: NSColor(themeHex: syntax.string)))).font(.system(size: 12, design: .monospaced))
-                                Text(store.theme == theme ? "Selected" : "Select theme").font(.system(size: 12)).foregroundStyle(theme.secondary)
-                            }.padding(18).frame(maxWidth: .infinity).foregroundStyle(theme.foreground)
-                                .background(theme.background, in: RoundedRectangle(cornerRadius: 10))
-                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.accent.opacity(store.theme == theme ? 1 : 0.2), lineWidth: 2))
-                        }.buttonStyle(.plain)
-                    }
-                }.padding(.vertical, 12)
-                Text("Applies immediately to Octo, code previews, and terminal colors. macOS System follows your Mac's appearance and uses your Ghostty configuration where supported. Neovim uses its own installed theme.")
-                    .font(.system(size: 13)).foregroundStyle(store.theme.secondary)
-            }
-        }.formStyle(.grouped).scrollContentBackground(.hidden)
+        Form { ThemeGallery(selection: $store.theme) }.formStyle(.grouped).scrollContentBackground(.hidden)
     }
     private var shortcuts: some View {
         ScrollView {

@@ -27,6 +27,23 @@ import OctoAgents
         return rep.representation(using: .png, properties: [:])!
     }
 
+    func testAppLinksWaitForConfirmation() throws {
+        let session = BrowserSession(isPrivate: true)
+        let settings = try XCTUnwrap(URL(string: "x-apple.systempreferences:com.apple.preference.security"))
+        session.requestExternalOpen(settings)
+        XCTAssertEqual(session.pendingExternalLink?.url, settings)
+        XCTAssertFalse(session.pendingExternalLink?.application.isEmpty ?? true)
+        session.pendingExternalLink = nil
+
+        session.requestExternalOpen(try XCTUnwrap(URL(string: "octo-unhandled-scheme-test:payload")))
+        XCTAssertNil(session.pendingExternalLink)
+        XCTAssertEqual(session.error, "No app on this Mac opens octo-unhandled-scheme-test: links.")
+        session.error = nil
+        for blocked in ["javascript:alert(1)", "file:///etc/hosts"] {
+            session.requestExternalOpen(try XCTUnwrap(URL(string: blocked)))
+            XCTAssertNil(session.pendingExternalLink); XCTAssertNil(session.error)
+        }
+    }
     func testAddressNormalization() {
         XCTAssertEqual(BrowserSession.url(from: "localhost:3000")?.absoluteString, "http://localhost:3000")
         XCTAssertEqual(BrowserSession.url(from: " 127.0.0.1:8080/admin ")?.absoluteString, "http://127.0.0.1:8080/admin")

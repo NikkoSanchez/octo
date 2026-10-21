@@ -13,6 +13,11 @@ import OctoCore
         let current = text.highlighting(FindHighlight(query: "find", current: true), theme: .system)
         XCTAssertEqual(current.runs.filter { $0.foregroundColor == .black }.count, 2, "The current message's matches use dark text on yellow")
         XCTAssertEqual(text.highlighting(nil, theme: .system), text)
+        // Catppuccin follows its VS Code port: Red for the current match, Sky for others, at 30%.
+        let mocha = text.highlighting(FindHighlight(query: "find", current: true), theme: .mocha)
+        let run = try! XCTUnwrap(mocha.runs.first { $0.backgroundColor != nil })
+        XCTAssertEqual(run.backgroundColor, Color(nsColor: NSColor(themeHex: "f38ba8")).opacity(0.30))
+        XCTAssertNil(run.foregroundColor)
     }
 
     func testTypingInFindDoesNotRepublishTheStore() {

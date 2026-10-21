@@ -1,65 +1,143 @@
 import Foundation
 
-/// Official Catppuccin 1.8.0 and Dracula Classic palettes and semantic roles.
-/// https://draculatheme.com/spec
-/// https://github.com/dracula/draculatheme.com/blob/main/content/spec.mdx
-/// https://github.com/catppuccin/catppuccin/blob/main/docs/style-guide.md
-/// https://github.com/catppuccin/palette/blob/main/palette.json
+/// The app's colour themes. Raw values are persisted; never rename an existing case's value.
+/// Palettes and their upstream sources live in ThemeCatalog.swift.
 public enum AppTheme: String, CaseIterable, Identifiable, Sendable {
-    case system, latte, mocha, dracula
+    case system
+    case latte, frappe, macchiato, mocha
+    case dracula
+    case githubLight, githubDark
+    case gruvboxLight, gruvboxDark
+    case nord
+    case oneLight, oneDark
+    case rosePineDawn, rosePine
+    case solarizedLight, solarizedDark
+    case tokyoNightDay, tokyoNight
+
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .system: return "macOS System"; case .latte: return "Catppuccin Latte"; case .mocha: return "Catppuccin Mocha"; case .dracula: return "Dracula Classic" }
-    }
-    public var palette: ThemePalette? {
         switch self {
-        case .system: return nil
-        case .latte: return ThemePalette(
-            base: "eff1f5", mantle: "e6e9ef", crust: "dce0e8", surface: "ccd0da",
-            overlay0: "9ca0b0", overlay1: "8c8fa1", overlay2: "7c7f93", text: "4c4f69",
-            secondary: "6c6f85", accent: "8839ef", green: "40a02b", red: "d20f39",
-            yellow: "df8e1d", blue: "1e66f5", teal: "179299", rosewater: "dc8a78",
-            pink: "ea76cb", peach: "fe640b", sky: "04a5e5", lavender: "7287fd",
-            selectionBackground: "7c7f93", selectionOpacity: 0.25, cursorText: "eff1f5", terminalSelectionBackground: "d2d4dc", ansi: ["5c5f77", "d20f39", "40a02b", "df8e1d", "1e66f5", "ea76cb", "179299", "acb0be", "6c6f85", "de293e", "49af3d", "eea02d", "456eff", "fe85d8", "2d9fa8", "bcc0cc"])
-        case .mocha: return ThemePalette(
-            base: "1e1e2e", mantle: "181825", crust: "11111b", surface: "313244",
-            overlay0: "6c7086", overlay1: "7f849c", overlay2: "9399b2", text: "cdd6f4",
-            secondary: "a6adc8", accent: "cba6f7", green: "a6e3a1", red: "f38ba8",
-            yellow: "f9e2af", blue: "89b4fa", teal: "94e2d5", rosewater: "f5e0dc",
-            pink: "f5c2e7", peach: "fab387", sky: "89dceb", lavender: "b4befe",
-            selectionBackground: "9399b2", selectionOpacity: 0.25, cursorText: "11111b", terminalSelectionBackground: "3b3d4f", ansi: ["45475a", "f38ba8", "a6e3a1", "f9e2af", "89b4fa", "f5c2e7", "94e2d5", "a6adc8", "585b70", "f37799", "89d88b", "ebd391", "74a8fc", "f2aede", "6bd7ca", "bac2de"])
-        case .dracula: return ThemePalette(
-            base: "282a36", mantle: "21222c", crust: "191a21", surface: "343746",
-            overlay0: "6272a4", overlay1: "6272a4", overlay2: "6272a4", text: "f8f8f2",
-            secondary: "a9abb6", accent: "bd93f9", green: "50fa7b", red: "ff5555",
-            yellow: "f1fa8c", blue: "8be9fd", teal: "8be9fd", rosewater: "f8f8f2",
-            pink: "ff79c6", peach: "ffb86c", sky: "8be9fd", lavender: "bd93f9",
-            selectionBackground: "44475a", selectionOpacity: 1, cursorText: "282a36",
-            terminalSelectionBackground: "44475a", ansi: ["21222c", "ff5555", "50fa7b", "f1fa8c", "bd93f9", "ff79c6", "8be9fd", "f8f8f2", "6272a4", "ff6e6e", "69ff94", "ffffa5", "d6acff", "ff92df", "a4ffff", "ffffff"])
+        case .system: return "macOS System"
+        case .latte: return "Catppuccin Latte"
+        case .frappe: return "Catppuccin Frappé"
+        case .macchiato: return "Catppuccin Macchiato"
+        case .mocha: return "Catppuccin Mocha"
+        case .dracula: return "Dracula Classic"
+        case .githubLight: return "GitHub Light"
+        case .githubDark: return "GitHub Dark"
+        case .gruvboxLight: return "Gruvbox Light"
+        case .gruvboxDark: return "Gruvbox Dark"
+        case .nord: return "Nord"
+        case .oneLight: return "One Light"
+        case .oneDark: return "One Dark"
+        case .rosePineDawn: return "Rosé Pine Dawn"
+        case .rosePine: return "Rosé Pine"
+        case .solarizedLight: return "Solarized Light"
+        case .solarizedDark: return "Solarized Dark"
+        case .tokyoNightDay: return "Tokyo Night Day"
+        case .tokyoNight: return "Tokyo Night"
         }
     }
-    public var syntax: ThemeSyntaxPalette? {
-        guard let p = palette else { return nil }
-        return ThemeSyntaxPalette(keyword: self == .dracula ? p.pink : p.accent,
-            string: self == .dracula ? p.yellow : p.green,
-            escape: self == .dracula ? p.yellow : p.pink,
-            comment: p.overlay2, number: p.peach,
-            function: self == .dracula ? p.green : p.blue, key: p.blue,
-            punctuation: self == .dracula ? p.text : p.overlay2,
-            operatorColor: self == .dracula ? p.pink : p.sky)
-    }
+    /// nil for System, which follows the Mac's appearance.
+    public var isDark: Bool? { palette?.isDark }
 }
+
+/// Lexical token classes the review highlighter recognizes.
+public enum SyntaxRole: Sendable, Hashable {
+    case keyword, string, escape, comment, number, function, key, punctuation, operatorSymbol, builtin
+}
+
 public struct ThemeSyntaxPalette: Sendable {
     public let keyword, string, escape, comment, number, function, key, punctuation, operatorColor: String
+    /// `self`, `this`, `super`.
+    public let builtin: String
+    /// Diff header lines: `@@` hunks, `diff --git` and `---`/`+++` paths. Other headers use comment.
+    public let hunk, diffFile, diffPath: String
+    public let italic: Set<SyntaxRole>
+    public init(keyword: String, string: String, escape: String, comment: String, number: String,
+                function: String, key: String, punctuation: String, operatorColor: String, builtin: String,
+                hunk: String? = nil, diffFile: String? = nil, diffPath: String? = nil, italic: Set<SyntaxRole> = []) {
+        self.keyword = keyword; self.string = string; self.escape = escape; self.comment = comment
+        self.number = number; self.function = function; self.key = key; self.punctuation = punctuation
+        self.operatorColor = operatorColor; self.builtin = builtin
+        self.hunk = hunk ?? number; self.diffFile = diffFile ?? function; self.diffPath = diffPath ?? keyword
+        self.italic = italic
+    }
+    public func color(_ role: SyntaxRole) -> String {
+        switch role {
+        case .keyword: return keyword
+        case .string: return string
+        case .escape: return escape
+        case .comment: return comment
+        case .number: return number
+        case .function: return function
+        case .key: return key
+        case .punctuation: return punctuation
+        case .operatorSymbol: return operatorColor
+        case .builtin: return builtin
+        }
+    }
 }
+
+/// Semantic UI roles, named after Catppuccin's ladder (Base → Mantle → Crust for panes,
+/// Surface for controls, Overlay 0–2 for borders and subtle text).
 public struct ThemePalette: Sendable {
+    public let isDark: Bool
     public let base, mantle, crust, surface, overlay0, overlay1, overlay2, text, secondary: String
-    public let accent, green, red, yellow, blue, teal, rosewater, pink, peach, sky, lavender: String
+    public let accent, green, red, yellow, blue, teal, orange: String
+    /// Focused borders.
+    public let activeBorder: String
+    /// Text and icons on an accent fill.
+    public let onAccent: String
+    /// Selected list rows (sidebar threads) and their text.
+    public let listSelection, listSelectionText: String
+    public let cursor, cursorText: String
     public let selectionBackground: String
     public let selectionOpacity: Double
-    public let cursorText: String
-    /// Selection precomposited for Ghostty’s opaque RGB setting (Dracula uses its exact token).
+    /// Ghostty takes opaque RGB, so translucent selections are precomposed over Base.
     public let terminalSelectionBackground: String
-    /// Official normal and bright ANSI colors, in index order (0...15).
+    /// Hovered source lines are drawn over the text, so this is always translucent.
+    public let lineHighlight: String
+    public let lineHighlightOpacity: Double
+    /// Opacity of added/deleted line backgrounds in diffs.
+    public let diffLineOpacity: Double
+    /// Find highlights: the current match and other matches. nil keeps the default (Red/Teal tints, yellow occurrences).
+    public let findCurrent, findOther: String?
+    /// Terminal palette in index order: ANSI 0–15, then any extended slots the theme defines.
     public let ansi: [String]
+
+    public init(isDark: Bool, base: String, mantle: String, crust: String? = nil, surface: String,
+                overlay0: String, overlay1: String, overlay2: String, text: String, secondary: String,
+                accent: String, green: String, red: String, yellow: String, blue: String, teal: String, orange: String,
+                activeBorder: String? = nil, onAccent: String? = nil, listSelection: String? = nil, listSelectionText: String? = nil,
+                cursor: String, cursorText: String? = nil,
+                selectionBackground: String, selectionOpacity: Double = 1, terminalSelectionBackground: String? = nil,
+                lineHighlight: String? = nil, lineHighlightOpacity: Double = 0.08, diffLineOpacity: Double = 0.20,
+                findCurrent: String? = nil, findOther: String? = nil, ansi: [String]) {
+        self.isDark = isDark
+        self.base = base; self.mantle = mantle; self.crust = crust ?? mantle; self.surface = surface
+        self.overlay0 = overlay0; self.overlay1 = overlay1; self.overlay2 = overlay2
+        self.text = text; self.secondary = secondary
+        self.accent = accent; self.green = green; self.red = red; self.yellow = yellow
+        self.blue = blue; self.teal = teal; self.orange = orange
+        self.activeBorder = activeBorder ?? accent
+        self.onAccent = onAccent ?? base
+        self.listSelection = listSelection ?? accent; self.listSelectionText = listSelectionText ?? onAccent ?? base
+        self.cursor = cursor; self.cursorText = cursorText ?? base
+        self.selectionBackground = selectionBackground; self.selectionOpacity = selectionOpacity
+        self.terminalSelectionBackground = terminalSelectionBackground
+            ?? Self.composite(selectionBackground, opacity: selectionOpacity, over: base)
+        self.lineHighlight = lineHighlight ?? text; self.lineHighlightOpacity = lineHighlightOpacity
+        self.diffLineOpacity = diffLineOpacity; self.findCurrent = findCurrent; self.findOther = findOther
+        self.ansi = ansi
+    }
+
+    /// `top` at `opacity` over `bottom`, as six-digit hex.
+    public static func composite(_ top: String, opacity: Double, over bottom: String) -> String {
+        guard let t = UInt32(top, radix: 16), let b = UInt32(bottom, radix: 16) else { return top }
+        return [16, 8, 0].map { shift -> String in
+            let value = Double((t >> shift) & 255) * opacity + Double((b >> shift) & 255) * (1 - opacity)
+            return String(format: "%02x", Int(value.rounded()))
+        }.joined()
+    }
 }

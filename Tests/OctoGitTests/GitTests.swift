@@ -142,4 +142,47 @@ final class GitTests: XCTestCase {
         let stat = try await service.diffStat(root: root.path)
         XCTAssertEqual(stat, DiffStat(additions: 2, deletions: 1, files: ["file.txt": .init(additions: 2, deletions: 1)]))
     }
+    func testFileListingDoesNotRunRepositoryFsmonitor() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = base.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let git = try XCTUnwrap(Executables.find("git"))
+        func run(_ args: [String]) async throws {
+            let result = try await ProcessRunner.run(git, arguments: args, directory: root)
+            XCTAssertEqual(result.status, 0, String(decoding: result.error, as: UTF8.self))
+        }
+        try await run(["init", "-b", "main"])
+        try "a\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try await run(["add", "--", "a.txt"])
+        let marker = base.appendingPathComponent("fired"), hook = base.appendingPathComponent("hook.sh")
+        try "#!/bin/sh\ntouch \(Executables.shellQuote(marker.path))\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hook.path)
+        try await run(["config", "core.fsmonitor", hook.path])
+        // The fixture is live: plain Git listing runs the hook.
+        try await run(["ls-files", "--cached", "--others", "-z"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        try FileManager.default.removeItem(at: marker)
+
+        let paths = try await GitService().filePaths(root: root.path)
+        XCTAssertEqual(paths, ["a.txt"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    func testEmbeddedBareRepositoryIsNotOpened() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let embedded = root.appendingPathComponent("embedded")
+        for folder in ["objects", "refs"] {
+            try FileManager.default.createDirectory(at: embedded.appendingPathComponent(folder), withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let git = try XCTUnwrap(Executables.find("git"))
+        _ = try await ProcessRunner.run(git, arguments: ["init", "-b", "main"], directory: root)
+        try "ref: refs/heads/main\n".write(to: embedded.appendingPathComponent("HEAD"), atomically: true, encoding: .utf8)
+        try "[core]\n\tbare = true\n".write(to: embedded.appendingPathComponent("config"), atomically: true, encoding: .utf8)
+        // Without the setting Git opens the folder as a repository and applies its config.
+        let plain = try await ProcessRunner.run(git, arguments: ["for-each-ref", "refs/heads"], directory: embedded)
+        XCTAssertEqual(plain.status, 0)
+
+        do { _ = try await GitService().localBranches(root: embedded.path); XCTFail("Opened an embedded bare repository") } catch {}
+    }
 }

@@ -16,46 +16,45 @@ enum ReviewSyntax {
         let json = ["json", "jsonc"].contains(ext)
         guard python || json || ["swift", "js", "jsx", "ts", "tsx", "c", "h", "cc", "cpp", "hpp", "m", "mm", "rs", "go", "java", "kt", "kts", "cs"].contains(ext) else { return }
         var old = State(), new = State()
+        let colors = theme.syntax
+        let italic = NSFontManager.shared.convert(NSFont.monospacedSystemFont(ofSize: 14, weight: .regular), toHaveTrait: .italicFontMask)
         for segment in document.segments {
             if segment.line.kind == .header {
                 if segment.line.text.hasPrefix("@@") { old = State(); new = State() }
                 continue
             }
-            let spans: [(NSRange, String?)]
+            let spans: [(NSRange, SyntaxRole?)]
             switch segment.line.kind {
-            case .deletion: spans = scan(segment.line.text, state: &old, python: python, json: json, theme: theme)
-            case .addition: spans = scan(segment.line.text, state: &new, python: python, json: json, theme: theme)
+            case .deletion: spans = scan(segment.line.text, state: &old, python: python, json: json)
+            case .addition: spans = scan(segment.line.text, state: &new, python: python, json: json)
             default:
-                let oldSpans = scan(segment.line.text, state: &old, python: python, json: json, theme: theme)
-                let newSpans = scan(segment.line.text, state: &new, python: python, json: json, theme: theme)
+                let oldSpans = scan(segment.line.text, state: &old, python: python, json: json)
+                let newSpans = scan(segment.line.text, state: &new, python: python, json: json)
                 spans = document.side == .before ? oldSpans : newSpans
             }
-            for (range, hex) in spans {
+            for (range, role) in spans {
+                guard let role else { continue }
                 // System appearance also benefits from lexical isolation, using native colors.
-                if let hex {
-                    let target = NSRange(location: segment.contentRange.location + range.location, length: range.length)
-                    result.addAttribute(.foregroundColor, value: NativeDiffView.color(hex, fallback: .labelColor), range: target)
-                    if theme == .dracula && (hex == theme.syntax?.comment || hex == theme.palette?.accent) {
-                        let font = NSFontManager.shared.convert(NSFont.monospacedSystemFont(ofSize: 14, weight: .regular), toHaveTrait: .italicFontMask)
-                        result.addAttribute(.font, value: font, range: target)
-                    }
-                }
+                guard let hex = colors.map({ $0.color(role) }) ?? ([.keyword, .builtin].contains(role) ? "af52de" : nil) else { continue }
+                let target = NSRange(location: segment.contentRange.location + range.location, length: range.length)
+                result.addAttribute(.foregroundColor, value: NativeDiffView.color(hex, fallback: .labelColor), range: target)
+                if colors?.italic.contains(role) == true { result.addAttribute(.font, value: italic, range: target) }
             }
         }
     }
 
-    private static func scan(_ text: String, state: inout State, python: Bool, json: Bool, theme: AppTheme) -> [(NSRange, String?)] {
-        let source = text as NSString, p = theme.palette, colors = theme.syntax
-        var offset = 0, spans: [(NSRange, String?)] = []
-        func append(_ range: NSRange, _ color: String?) { spans.append((range, color)) }
+    private static func scan(_ text: String, state: inout State, python: Bool, json: Bool) -> [(NSRange, SyntaxRole?)] {
+        let source = text as NSString
+        var offset = 0, spans: [(NSRange, SyntaxRole?)] = []
+        func append(_ range: NSRange, _ role: SyntaxRole?) { spans.append((range, role)) }
         func nextCharacter() -> unichar? {
             var index = offset
             while index < source.length && (source.character(at: index) == 32 || source.character(at: index) == 9) { index += 1 }
             return index < source.length ? source.character(at: index) : nil
         }
         func string(_ range: NSRange) {
-            append(range, colors?.string)
-            for escape in escapes.matches(in: text, range: range) { append(escape.range, colors?.escape) }
+            append(range, .string)
+            for escape in escapes.matches(in: text, range: range) { append(escape.range, .escape) }
         }
         while offset < source.length {
             let remaining = NSRange(location: offset, length: source.length - offset)
@@ -65,7 +64,7 @@ enum ReviewSyntax {
                 let nested = open.location != NSNotFound && (close.location == NSNotFound || open.location < close.location)
                 let boundary = nested ? open : close
                 let end = boundary.location == NSNotFound ? source.length : NSMaxRange(boundary)
-                append(NSRange(location: offset, length: end - offset), colors?.comment)
+                append(NSRange(location: offset, length: end - offset), .comment)
                 if boundary.location != NSNotFound { state.blockDepth += nested ? 1 : -1 }
                 offset = end; continue
             }
@@ -84,24 +83,24 @@ enum ReviewSyntax {
             guard let match = (python ? pythonToken : token).firstMatch(in: text, range: remaining) else { break }
             let value = source.substring(with: match.range)
             offset = NSMaxRange(match.range)
-            let color: String?
-            if !python && value == "/*" { state.blockDepth = 1; color = colors?.comment }
-            else if (!python && value.hasPrefix("//")) || (python && value.hasPrefix("#")) { color = colors?.comment }
-            else if value == "\"\"\"" || (python && value == "'''") || (!python && value == "`") { state.stringDelimiter = value; color = colors?.string }
+            let role: SyntaxRole?
+            if !python && value == "/*" { state.blockDepth = 1; role = .comment }
+            else if (!python && value.hasPrefix("//")) || (python && value.hasPrefix("#")) { role = .comment }
+            else if value == "\"\"\"" || (python && value == "'''") || (!python && value == "`") { state.stringDelimiter = value; role = .string }
             else if value.hasPrefix("\"") || value.hasPrefix("'") {
-                if json && nextCharacter() == 58 { color = colors?.key }
+                if json && nextCharacter() == 58 { role = .key }
                 else { string(match.range); continue }
             }
-            else if value.first?.isNumber == true { color = colors?.number }
-            else if ["true", "false", "nil", "null", "None", "True", "False"].contains(value) { color = colors?.number }
-            else if theme == .dracula && ["this", "self", "super"].contains(value) { color = p?.accent }
-            else if keywords.contains(value) { color = colors?.keyword ?? "af52de" }
+            else if value.first?.isNumber == true { role = .number }
+            else if ["true", "false", "nil", "null", "None", "True", "False"].contains(value) { role = .number }
+            else if ["this", "self", "super"].contains(value) { role = .builtin }
+            else if keywords.contains(value) { role = .keyword }
             else if value.first?.isLetter == true || value.hasPrefix("_") {
-                color = nextCharacter() == 40 ? colors?.function : nil
+                role = nextCharacter() == 40 ? .function : nil
             }
-            else if value.rangeOfCharacter(from: CharacterSet(charactersIn: "{}[](),;.:")) != nil { color = colors?.punctuation }
-            else { color = colors?.operatorColor }
-            append(match.range, color)
+            else if value.rangeOfCharacter(from: CharacterSet(charactersIn: "{}[](),;.:")) != nil { role = .punctuation }
+            else { role = .operatorSymbol }
+            append(match.range, role)
         }
         return spans
     }

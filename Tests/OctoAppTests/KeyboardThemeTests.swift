@@ -135,6 +135,11 @@ import OctoCore
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .mocha)
         store.theme = .dracula
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .dracula)
+        store.theme = .tokyoNightDay
+        XCTAssertEqual(preferences.string(forKey: "appearanceTheme"), "tokyoNightDay")
+        XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .tokyoNightDay)
+        // Persisted identifiers from earlier releases must keep resolving.
+        XCTAssertEqual(["latte", "mocha", "dracula"].compactMap(AppTheme.init(rawValue:)), [.latte, .mocha, .dracula])
         store.theme = .system
         XCTAssertEqual(AppStore(storage: storage, preferences: preferences).theme, .system)
         preferences.set("future-theme", forKey: "appearanceTheme")

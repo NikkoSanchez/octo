@@ -74,7 +74,7 @@ public struct NativeDiffView: NSViewRepresentable {
     static func applyTheme(_ theme: AppTheme, to text: ReviewTextView) {
         text.theme = theme
         text.backgroundColor = color(theme.palette?.base, fallback: .textBackgroundColor)
-        text.insertionPointColor = color(theme.palette?.rosewater, fallback: .labelColor)
+        text.insertionPointColor = color(theme.palette?.cursor, fallback: .labelColor)
         let selectionColor = theme.palette.map { color($0.selectionBackground, fallback: .selectedTextBackgroundColor).withAlphaComponent($0.selectionOpacity) } ?? .selectedTextBackgroundColor
         text.selectedTextAttributes = [.backgroundColor: selectionColor, .foregroundColor: color(theme.palette?.text, fallback: .selectedTextColor)]
     }
@@ -100,8 +100,8 @@ public struct NativeDiffView: NSViewRepresentable {
             let full = (document.text as NSString).lineRange(for: segment.contentRange)
             let background: NSColor?
             switch segment.line.kind {
-            case .addition: background = color(theme.palette?.green, fallback: .systemGreen).withAlphaComponent(0.20)
-            case .deletion: background = color(theme.palette?.red, fallback: .systemRed).withAlphaComponent(0.20)
+            case .addition: background = color(theme.palette?.green, fallback: .systemGreen).withAlphaComponent(theme.palette?.diffLineOpacity ?? 0.20)
+            case .deletion: background = color(theme.palette?.red, fallback: .systemRed).withAlphaComponent(theme.palette?.diffLineOpacity ?? 0.20)
             case .header: background = color(theme.palette?.surface, fallback: .quaternaryLabelColor).withAlphaComponent(0.25)
             case .context: background = nil
             }
@@ -110,8 +110,9 @@ public struct NativeDiffView: NSViewRepresentable {
             result.addAttribute(.foregroundColor, value: color(theme.palette?.overlay1, fallback: .secondaryLabelColor), range: gutter)
             if segment.line.kind == .header {
                 let line = segment.line.text
-                let hex = line.hasPrefix("@@") ? theme.palette?.peach : line.hasPrefix("diff ") ? theme.palette?.blue : (line.hasPrefix("---") || line.hasPrefix("+++")) ? theme.palette?.pink : theme.palette?.overlay2
-                result.addAttribute(.foregroundColor, value: color(theme == .dracula ? theme.syntax?.comment : hex, fallback: .secondaryLabelColor), range: segment.contentRange)
+                let syntax = theme.syntax
+                let hex = line.hasPrefix("@@") ? syntax?.hunk : line.hasPrefix("diff ") ? syntax?.diffFile : (line.hasPrefix("---") || line.hasPrefix("+++")) ? syntax?.diffPath : syntax?.comment
+                result.addAttribute(.foregroundColor, value: color(hex, fallback: .secondaryLabelColor), range: segment.contentRange)
             }
         }
         ReviewSyntax.apply(to: result, document: document, theme: theme)
@@ -178,7 +179,7 @@ final class ReviewTextView: NSTextView {
     }
     var theme: AppTheme = .system {
         didSet {
-            attachButton.contentTintColor = NativeDiffView.color(theme.palette?.base, fallback: .white)
+            attachButton.contentTintColor = NativeDiffView.color(theme.palette?.onAccent, fallback: .white)
             attachButton.layer?.backgroundColor = NativeDiffView.color(theme.palette?.accent, fallback: .controlAccentColor).cgColor
             needsDisplay = true
         }
@@ -284,8 +285,8 @@ final class ReviewTextView: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if let hoveredLineRect {
-            NativeDiffView.color(theme == .dracula ? theme.syntax?.comment : theme.palette?.text, fallback: .labelColor)
-                .withAlphaComponent(theme == .dracula ? 0.25 : 0.10).setFill()
+            NativeDiffView.color(theme.palette?.lineHighlight, fallback: .labelColor)
+                .withAlphaComponent(theme.palette?.lineHighlightOpacity ?? 0.10).setFill()
             hoveredLineRect.intersection(dirtyRect).fill()
         }
     }

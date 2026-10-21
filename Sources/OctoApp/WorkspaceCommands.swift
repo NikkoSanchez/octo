@@ -1,7 +1,10 @@
 import AppKit
 import SwiftUI
+import OctoCore
 
 struct AppCommand: Identifiable {
+    /// Badged while ⌘ is held. Every other shortcut is in its control's tooltip: badging all of them crowded the window.
+    static let heldHints: Set<String> = ["newThread", "chats", "sidebar", "terminal", "review"]
     let id: String
     let title: String
     let group: String
@@ -201,7 +204,6 @@ struct PaletteEntry: Identifiable {
     let id: String
     let title: String
     let detail: String
-    var searchText: String = ""
     var shortcut: String = ""
     var enabled = true
     let action: () -> Void
@@ -209,14 +211,34 @@ struct PaletteEntry: Identifiable {
 struct CommandPalette: View {
     let mode: PaletteMode
     let entries: [PaletteEntry]
+    /// Ranks entry IDs for a non-empty query off the main thread, as chat search does.
+    /// Without it, every word must appear in an entry's title or detail.
+    var search: ((String) async -> [String])? = nil
     let dismiss: () -> Void
     let activateEntry: (PaletteEntry) -> Void
     @Environment(\.octoTheme) private var theme
     @State private var query = ""
     @State private var selected = 0
-    private var matches: [PaletteEntry] {
+    /// Found once per query rather than on every read in the body; the field never waits on it.
+    @State private var matches: [PaletteEntry]
+    init(mode: PaletteMode, entries: [PaletteEntry], search: ((String) async -> [String])? = nil,
+         dismiss: @escaping () -> Void, activateEntry: @escaping (PaletteEntry) -> Void) {
+        self.mode = mode; self.entries = entries; self.search = search
+        self.dismiss = dismiss; self.activateEntry = activateEntry
+        _matches = State(initialValue: entries)
+    }
+    private func updateMatches() async {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        return entries.filter { entry in words.allSatisfy { (entry.title + " " + entry.detail + " " + entry.searchText).localizedStandardContains($0) } }
+        var found = entries
+        if let search, !words.isEmpty {
+            let ids = await search(query)
+            guard !Task.isCancelled else { return }
+            let byID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            found = ids.compactMap { byID[$0] }
+        } else if !words.isEmpty {
+            found = entries.filter { entry in words.allSatisfy { (entry.title + " " + entry.detail).localizedStandardContains($0) } }
+        }
+        matches = found; selected = 0
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -254,15 +276,15 @@ struct CommandPalette: View {
                     .onChange(of: selected) { _, value in
                         if matches.indices.contains(value) { proxy.scrollTo(matches[value].id) }
                     }
-                    .onChange(of: query) { _, _ in
-                        if let first = matches.first { proxy.scrollTo(first.id) }
+                    .onChange(of: matches.map(\.id)) { _, ids in
+                        if let first = ids.first { proxy.scrollTo(first) }
                     }
             }
             Divider()
             HStack { Text("↑ ↓ to navigate · Return to open · Esc to close"); Spacer(); Text("\(matches.count) results") }
                 .font(.system(size: 11)).foregroundStyle(theme.secondary).padding(12)
         }.frame(width: 640).background(theme.background)
-            .onChange(of: query) { _, _ in selected = 0 }
+            .task(id: query) { await updateMatches() }
     }
     private func move(_ delta: Int) { guard !matches.isEmpty else { return }; selected = (selected + delta + matches.count) % matches.count }
     private func activate() {
@@ -275,6 +297,8 @@ struct SearchInputField: NSViewRepresentable {
     var focusRequest: Int = 0
     var autofocus = true
     var identifier: String? = nil
+    /// Borderless text with no search icon, for a field drawn inside a glass capsule.
+    var plain = false
     @Binding var text: String
     let move: (Int) -> Void
     let submit: () -> Void
@@ -284,6 +308,12 @@ struct SearchInputField: NSViewRepresentable {
         let field = NSSearchField(); field.placeholderString = placeholder; field.delegate = context.coordinator
         field.focusRingType = .none
         field.identifier = identifier.map { NSUserInterfaceItemIdentifier($0) }
+        if plain {
+            field.isBezeled = false; field.isBordered = false; field.drawsBackground = false
+            field.font = .systemFont(ofSize: 13.5)
+            if let cell = field.cell as? NSSearchFieldCell { cell.searchButtonCell = nil; cell.cancelButtonCell = nil }
+        }
+        context.coordinator.focusRequest = focusRequest
         if autofocus { DispatchQueue.main.async { field.window?.makeFirstResponder(field) } }
         return field
     }
@@ -336,7 +366,7 @@ extension EnvironmentValues {
     }
 }
 /// `leading` sits beside the control, for a button whose neighbor's badge already takes the space above.
-enum ShortcutHintPlacement { case above, inline, leading }
+enum ShortcutHintPlacement { case above, leading }
 private struct ShortcutHint: ViewModifier {
     @Environment(\.shortcutHints) private var hints
     @Environment(\.octoTheme) private var theme
@@ -345,7 +375,7 @@ private struct ShortcutHint: ViewModifier {
     let active: Bool
     let placement: ShortcutHintPlacement
     func body(content: Content) -> some View {
-        content.overlay(alignment: placement == .above ? .topTrailing : placement == .inline ? .trailing : .leading) {
+        content.overlay(alignment: placement == .above ? .topTrailing : .leading) {
             if active, enabled, let shortcut = hints[command] {
                 Text(shortcut.map(String.init).joined(separator: " ")).font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(theme.foreground).padding(.horizontal, 5).padding(.vertical, 3)
@@ -356,7 +386,7 @@ private struct ShortcutHint: ViewModifier {
                     .alignmentGuide(.top) { $0[.bottom] + 6 }
                     // Leading: a zero-width frame at the control's edge lets the badge extend left of it.
                     .frame(width: placement == .leading ? 0 : nil, alignment: .trailing)
-                    .offset(x: placement == .inline ? -12 : placement == .leading ? -4 : 0)
+                    .offset(x: placement == .leading ? -4 : 0)
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
         }

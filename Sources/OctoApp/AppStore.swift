@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ImageIO
 import UniformTypeIdentifiers
 import SwiftUI
@@ -55,13 +56,14 @@ import OctoTerminal
     }
     @Published var composerFocus = 0
     @Published var findingThread = false
-    @Published var threadQuery = ""
-    @Published var findStep = 0
+    /// Not published here: each keystroke in the find field would re-render every view watching the store.
+    let threadFind = ThreadFindModel()
     @Published var findFocus = 0
     @Published var sidebarEdit: SidebarEdit?
     /// Session-local Show more limits; projects not listed show `SidebarThreadLimit.initial`.
     @Published var sidebarThreadLimits: [UUID: Int] = [:]
     @Published var closingTerminal: UUID?
+    @Published var renamingTerminal: UUID?
     @Published var archive = WorkspaceArchive()
     @Published var showingTerminal = false {
         didSet { if oldValue != showingTerminal { NativeWorkspaceFocus.clear() } }
@@ -94,6 +96,8 @@ import OctoTerminal
             let newReady = Set(newValue.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.keys)
             if oldReady != newReady { objectWillChange.send() }
             draftStore.values = newValue
+            // Starting a draft is activity for Recent; later keystrokes and clearing it are not.
+            for id in newReady.subtracting(oldReady) { mutate(id) { $0.lastDraftedAt = Date() } }
         }
     }
     @Published var draftImages: [UUID: [ImageAttachment]] = [:]
@@ -1027,6 +1031,13 @@ struct SidebarEdit: Identifiable {
     let projectID: UUID
     var threadID: UUID?
     let kind: Kind
+}
+
+@MainActor final class ThreadFindModel: ObservableObject {
+    @Published var query = ""
+    /// Next (+1) and previous (−1) match requests, delivered to the transcript without publishing the model.
+    let steps = PassthroughSubject<Int, Never>()
+    func move(_ delta: Int) { steps.send(delta) }
 }
 
 @MainActor final class DraftStore: ObservableObject {

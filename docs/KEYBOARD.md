@@ -2,7 +2,7 @@
 
 Octo uses Command for application actions and leaves Control, Option-only keys, Escape, and Space/Vim leader sequences to the focused terminal or editor. The organization takes inspiration from [Omarchy's launcher and hotkeys](https://learn.omacom.io/books/2/pages/53) and [LazyVim's discoverable key groups](https://www.lazyvim.org/keymaps), while keeping macOS text editing conventions.
 
-Hold ⌘ for 650 ms to show small shortcut badges beside available controls, including Settings, the current project’s New Thread button, terminal/review actions, and Send/Stop. Badges above controls have a 6 pt gap; Settings keeps its badge inline on the right. Quick taps never show badges. Pressing a key while holding Command hides badges and suppresses them until Command is released and held again. Badges also disappear when Command is released, the workspace loses focus, or a sheet opens. They share the command catalog and respect terminal/disabled contexts.
+Hold ⌘ for 650 ms to show small shortcut badges on the main controls only: the current project’s New Thread button (⌘N), chat search (⌘K), the sidebar toggle (⌘B), the terminal button (⌘J) and the review panel button (⌥⌘B). Badges above controls have a 6 pt gap; the terminal button’s sits to its left, clear of the review button’s. Other controls give their shortcut in their tooltip. Quick taps never show badges. Pressing a key while holding Command hides badges and suppresses them until Command is released and held again. Badges also disappear when Command is released, the workspace loses focus, or a sheet opens. They share the command catalog and respect terminal/disabled contexts.
 
 The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/↓, and press Return. It includes project switching, pinning, renaming, removal, provider/model/reasoning choices, draft attachment removal, review scope, and approval review. Destructive actions retain confirmation; approval review shows the request and requires an explicit Allow Once or Decline. Escape dismisses the palette and restores workspace focus.
 
@@ -11,7 +11,7 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | Toggle left sidebar | ⌘B |
 | Search chats across projects (titles and message text) | ⌘K |
 | Switch project (search names and paths) | ⇧⌘K |
-| Find in current thread | ⌘F |
+| Find in current thread (your messages, replies and errors; occurrences highlighted) | ⌘F |
 | Next / previous matching message | ⌘G / ⇧⌘G |
 | New thread / reopen unstarted draft in current project | ⌘N |
 | Add project | ⇧⌘O |
@@ -24,6 +24,9 @@ The command palette (⇧⌘P) is the discovery layer: type an action, use ↑/�
 | Toggle review panel | ⌥⌘B |
 | Toggle project terminal | ⌘J |
 | Send draft (composer) / insert new line | Return / Shift–Return |
+| Continue a Markdown list or quote (composer) | Shift–Return on a `-`, `*`, `+`, `1.`, `1)`, `- [ ]` or `>` line; on an empty item it ends the list or steps out a level |
+| Nest / un-nest a list item (composer) | Tab / Shift–Tab on a list line (or every list line selected) |
+| Move to the next / previous control (composer, outside a list) | Tab / Shift–Tab. Tab rings the composer's enabled controls in turn (+, agent, permissions, stop, send), then the review panel's file list and diff when shown, then returns. Space or Return presses the ringed control, ←/→ also move, Escape returns to the composer, and typing returns and types. Option–Tab types a tab |
 | Send draft (outside terminal) / stop current agent | ⌘Return / ⌘. |
 | Attach code selection to draft | ⇧⌘A |
 | Open selected file in installed LazyVim | ⇧⌘E |

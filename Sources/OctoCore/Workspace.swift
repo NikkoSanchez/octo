@@ -75,16 +75,22 @@ public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
     public var lastCompaction: ContextCompaction?
     public var lastVisitedAt: Date?
     public var lastActivityAt: Date?
+    /// When a draft was last started; orders Recent without changing the row's message time.
+    public var lastDraftedAt: Date?
     public var unreadCompletedAt: Date?
     public var hasUnreadCompletion: Bool { unreadCompletedAt != nil }
-    public var recentAt: Date {
-        max(lastVisitedAt ?? createdAt, lastActivityAt ?? messages.last.map { $0.completedAt ?? $0.createdAt } ?? createdAt)
+    /// The last send or reply, shown as the row's time.
+    public var activityAt: Date {
+        max(createdAt, lastActivityAt ?? .distantPast, messages.last.map { $0.completedAt ?? $0.createdAt } ?? .distantPast)
     }
+    /// Recent's order: the last send, reply or draft started here. Visiting a thread does not move it,
+    /// so clicking through Recent leaves its order alone.
+    public var recentAt: Date { max(activityAt, lastDraftedAt ?? .distantPast) }
     public var isPinned = false
 
     public var agentSettings = AgentSettings()
 
-    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, isTitleManuallySet, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned, conversationUsage, lastCompaction, lastVisitedAt, lastActivityAt, unreadCompletedAt }
+    private enum CodingKeys: String, CodingKey { case agentSettings, id, title, isTitleManuallySet, harness, workingDirectory, remoteSessionID, messages, createdAt, isPinned, conversationUsage, lastCompaction, lastVisitedAt, lastActivityAt, lastDraftedAt, unreadCompletedAt }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -98,6 +104,7 @@ public struct WorkspaceThread: Identifiable, Codable, Equatable, Sendable {
         lastCompaction = try values.decodeIfPresent(ContextCompaction.self, forKey: .lastCompaction)
         lastVisitedAt = try values.decodeIfPresent(Date.self, forKey: .lastVisitedAt)
         lastActivityAt = try values.decodeIfPresent(Date.self, forKey: .lastActivityAt)
+        lastDraftedAt = try values.decodeIfPresent(Date.self, forKey: .lastDraftedAt)
         unreadCompletedAt = try values.decodeIfPresent(Date.self, forKey: .unreadCompletedAt)
         messages = try values.decode([ChatMessage].self, forKey: .messages)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
@@ -265,7 +272,7 @@ public struct WorkspaceArchive: Codable, Sendable {
     }
 }
 
-public struct RecentThread: Identifiable {
+public struct RecentThread: Identifiable, Sendable {
     public var id: UUID { thread.id }
     public let project: WorkspaceProject
     public let thread: WorkspaceThread

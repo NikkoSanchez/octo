@@ -9,6 +9,7 @@ struct GlassPanel: ViewModifier {
     var cornerRadius: CGFloat = 16
     @Environment(\.octoTheme) private var theme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
@@ -17,10 +18,21 @@ struct GlassPanel: ViewModifier {
             .clipShape(shape)
             .background {
                 // The shadow belongs to the card's outline only; on the content it would shadow every glyph.
-                shape.fill(theme.background).shadow(color: .black.opacity(theme.colorScheme == .dark ? 0.35 : 0.08), radius: 14, y: 6)
+                // It fades within the 8 pt gutter: a wider one filled the gutter evenly and read as a
+                // darker backdrop behind the card rather than a shadow.
+                shape.fill(theme.background).shadow(color: .black.opacity(theme.colorScheme == .dark ? 0.3 : 0.07), radius: 5, y: 2)
                 if reduceTransparency { shape.fill(theme.panel) } else { NativeGlass(cornerRadius: cornerRadius, tint: theme.glassTint) }
             }
-            .overlay(shape.strokeBorder(theme.hairline, lineWidth: 0.5).allowsHitTesting(false))
+            .overlay { edge(shape).allowsHitTesting(false) }
+    }
+    /// Messages' two-tone rim: a dark outline against the window, then a light highlight just inside it,
+    /// so the card's edge stays legible where its glass matches the backdrop.
+    private func edge(_ shape: RoundedRectangle) -> some View {
+        let dark = colorScheme == .dark
+        return ZStack {
+            shape.strokeBorder(Color.black.opacity(dark ? 0.55 : 0.13), lineWidth: 0.5)
+            shape.inset(by: 0.5).strokeBorder(Color.white.opacity(dark ? 0.16 : 0.75), lineWidth: 1)
+        }
     }
 }
 
@@ -132,6 +144,28 @@ struct CapsuleToolbarButtonStyle: ButtonStyle {
                 .foregroundStyle(active ? theme.accent : hovering ? theme.foreground : theme.secondary)
                 .frame(width: 32, height: 28)
                 .background(Color.primary.opacity(enabled ? (configuration.isPressed ? 0.12 : hovering ? 0.07 : 0) : 0), in: Capsule())
+                .contentShape(Capsule())
+                .opacity(enabled ? 1 : 0.45)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// A labelled capsule on a field-coloured track, as for Open in: the track darkens on hover and press.
+struct CapsuleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { CapsuleButton(configuration: configuration) }
+    private struct CapsuleButton: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.octoTheme) private var theme
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+        var body: some View {
+            configuration.label.font(.system(size: 11.5, weight: .medium))
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background {
+                    Capsule().fill(theme.field)
+                    Capsule().fill(Color.primary.opacity(enabled ? (configuration.isPressed ? 0.12 : hovering ? 0.07 : 0) : 0))
+                }
                 .contentShape(Capsule())
                 .opacity(enabled ? 1 : 0.45)
                 .onHover { hovering = $0 }

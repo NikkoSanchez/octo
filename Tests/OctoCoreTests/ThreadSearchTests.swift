@@ -26,18 +26,31 @@ final class ThreadSearchTests: XCTestCase {
         XCTAssertEqual(results[1].snippet, "Bracketed paste works in the sidebar terminal.")
     }
 
-    func testEveryWordMustMatchAcrossTitleProjectAndMessages() {
-        let (archive, _, older, newer) = archive()
-        XCTAssertEqual(ThreadSearch.results("panel republished", in: archive.searchableThreads).map(\.threadID), [older.id])
-        XCTAssertEqual(ThreadSearch.results("pfl paste", in: archive.searchableThreads).map(\.threadID), [newer.id], "Project names match")
-        XCTAssertTrue(ThreadSearch.results("sidebar nonexistent", in: archive.searchableThreads).isEmpty)
+    func testTheQueryMatchesAsAPhraseWithinOneField() {
+        let (archive, titled, older, newer) = archive()
+        XCTAssertEqual(ThreadSearch.results("runaway SIDEBAR", in: archive.searchableThreads).map(\.threadID), [titled.id])
+        XCTAssertEqual(ThreadSearch.results("the  sidebar hang", in: archive.searchableThreads).map(\.threadID), [older.id], "Whitespace runs are equivalent")
+        XCTAssertEqual(ThreadSearch.results("pfl-caller", in: archive.searchableThreads).map(\.threadID), [newer.id], "Project names match")
+        XCTAssertTrue(ThreadSearch.results("sidebar runaway", in: archive.searchableThreads).isEmpty, "Words out of order are not the phrase")
+        XCTAssertTrue(ThreadSearch.results("panel republished", in: archive.searchableThreads).isEmpty, "Words split across title and message are not the phrase")
         XCTAssertTrue(ThreadSearch.results("   ", in: archive.searchableThreads).isEmpty)
         XCTAssertTrue(ThreadSearch.results("tool output", in: archive.searchableThreads).isEmpty, "Tool activity is not searched")
     }
 
+    func testCommonWordsScatteredThroughAMessageDoNotMatch() {
+        var thread = WorkspaceThread(title: "Unrelated", workingDirectory: "/tmp")
+        thread.messages = [.init(role: .user, text: "This change is a big one; please test it."),
+                           .init(role: .assistant, text: "Wrapped reply: this is\na test of wrapping.")]
+        let project = WorkspaceProject(name: "octo", rootPath: "/tmp/octo", threads: [thread])
+        let results = ThreadSearch.results("This is a test", in: WorkspaceArchive(projects: [project]).searchableThreads)
+        XCTAssertEqual(results.map(\.threadID), [thread.id], "Only the phrase across a line break matches")
+        XCTAssertEqual(results.first?.snippet, "Wrapped reply: this is a test of wrapping.")
+        XCTAssertTrue(ThreadSearch.results("this is a big", in: WorkspaceArchive(projects: [project]).searchableThreads).isEmpty)
+    }
+
     func testSnippetShowsTheNewestMatchInContext() {
         let (archive, _, older, _) = archive()
-        let result = ThreadSearch.results("Panel observation", in: archive.searchableThreads).first
+        let result = ThreadSearch.results("sidebar observation", in: archive.searchableThreads).first
         XCTAssertEqual(result?.threadID, older.id)
         let snippet = try? XCTUnwrap(result?.snippet)
         XCTAssertEqual(snippet?.hasPrefix("…"), true, "Text before the match is cut")

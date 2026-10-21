@@ -72,7 +72,7 @@ import OctoCore
         window.contentView?.addSubview(view)
         view.enabled = true
         view.resetCursorRects()
-        XCTAssertEqual(view.rects.last, view.visibleRect)
+        XCTAssertEqual(view.rects.last, view.bounds)
         XCTAssertTrue(view.cursors.last === NSCursor.resizeLeftRight)
         XCTAssertTrue(view.hitTest(NSPoint(x: 12, y: 50)) === view)
         view.rects = []; view.cursors = []

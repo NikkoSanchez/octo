@@ -7,6 +7,7 @@ import OctoCore
 struct MarkdownResponseView: View {
     let source: String
     @Environment(\.octoTheme) private var theme
+    @Environment(\.findHighlight) private var findHighlight
     @State private var rendered: RenderedMarkdown?
 
     var body: some View {
@@ -67,7 +68,7 @@ struct MarkdownResponseView: View {
                 }.font(.system(size: 12)).lineSpacing(0).foregroundStyle(theme.secondary).padding(8)
                 Divider()
                 ScrollView(.horizontal) {
-                    Text(verbatim: text).font(.system(size: 13, design: .monospaced))
+                    Text(AttributedString(text).highlighting(findHighlight, theme: theme)).font(.system(size: 13, design: .monospaced))
                         .lineSpacing(3)
                         .fixedSize(horizontal: true, vertical: true).padding(10)
                 }
@@ -111,7 +112,7 @@ struct MarkdownResponseView: View {
             if intent.contains(.stronglyEmphasized) { value[run.range].foregroundColor = theme.foreground }
             if run.link != nil { value[run.range].foregroundColor = theme.blue }
         }
-        return Text(value)
+        return Text(value.highlighting(findHighlight, theme: theme))
     }
 }
 

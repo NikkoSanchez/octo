@@ -10,7 +10,9 @@ struct ChatPane: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.octoTheme) private var theme
     @StateObject private var transcriptScroll = TranscriptScrollController()
+    @StateObject private var composerControls = ComposerControls()
     @State private var matchIndex = 0
+    @State private var findResults = ThreadFindResults()
     @State private var expandedDetails = Set<UUID>()
     @State private var fullAccessThread: UUID?
     @State private var windowIsKey = false
@@ -20,14 +22,12 @@ struct ChatPane: View {
     var body: some View {
         VStack(spacing: 0) {
             if let thread = store.thread {
-                findBar.frame(height: store.findingThread ? 50 : 0).clipped()
-                    .opacity(store.findingThread ? 1 : 0).allowsHitTesting(store.findingThread).accessibilityHidden(!store.findingThread)
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
                             TranscriptTurns(messages: thread.messages, harness: thread.harness,
                                             active: store.running.contains(thread.id), isProjectChat: store.isProjectChat,
-                                            matchIDs: matchIDs, matchIndex: matchIndex, expandedDetails: expandedDetails,
+                                            find: store.findingThread ? findResults : ThreadFindResults(), matchIndex: matchIndex, expandedDetails: expandedDetails,
                                             setExpanded: { id, expanded in
                                                 if expanded { expandedDetails.insert(id) } else { expandedDetails.remove(id) }
                                             }, openFile: openFile)
@@ -40,6 +40,13 @@ struct ChatPane: View {
                             .background(GeometryReader { geometry in
                                 Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
                             })
+                    }
+                    .floatingBar(.top) {
+                        if store.findingThread {
+                            ThreadFindBar(find: store.threadFind, focusRequest: store.findFocus,
+                                          messages: thread.messages, results: $findResults, matchIndex: matchIndex,
+                                          close: { store.findingThread = false; store.focusComposer() })
+                        }
                     }
                     .onChange(of: thread.messages.last?.text) { _, _ in transcriptScroll.contentChanged() }
                     .onPreferenceChange(TranscriptHeightKey.self) { _ in transcriptScroll.contentChanged() }
@@ -55,14 +62,18 @@ struct ChatPane: View {
                         }
                     }
                     .onDisappear { transcriptScroll.disconnect() }
-                    .onChange(of: store.threadQuery) { _, _ in matchIndex = 0; scrollToMatch(proxy) }
-                    .onChange(of: store.findStep) { old, new in
+                    .onChange(of: findResults) { old, new in
+                        // A new query starts at its first match; streamed text keeps the current one.
+                        if old.query != new.query { matchIndex = 0; scrollToMatch(proxy) }
+                        else if matchIndex >= new.ids.count { matchIndex = max(0, new.ids.count - 1) }
+                    }
+                    .onReceive(store.threadFind.steps) { delta in
                         guard !matchIDs.isEmpty else { return }
-                        matchIndex = (matchIndex + (new > old ? 1 : -1) + matchIDs.count) % matchIDs.count
+                        matchIndex = (matchIndex + delta + matchIDs.count) % matchIDs.count
                         scrollToMatch(proxy)
                     }
                     .onChange(of: thread.id) { _, _ in
-                        store.threadQuery = ""; matchIndex = 0
+                        store.threadFind.query = ""; findResults = ThreadFindResults(); matchIndex = 0
                     }
                 }
                 ForEach(store.approvals[thread.id] ?? []) { approval in
@@ -118,26 +129,9 @@ struct ChatPane: View {
                 }
             } message: { Text("This thread's next turns can access files outside the project and the network without approval prompts. This choice is also remembered for new threads until you change permissions. The CLI's managed policies still apply.") }
     }
-    private var matchIDs: [UUID] {
-        guard store.findingThread, !store.threadQuery.isEmpty else { return [] }
-        return store.thread?.messages.filter { $0.text.localizedStandardContains(store.threadQuery) }.map(\.id) ?? []
-    }
+    private var matchIDs: [UUID] { store.findingThread ? findResults.ids : [] }
     private func scrollToMatch(_ proxy: ScrollViewProxy) {
         if matchIDs.indices.contains(matchIndex) { proxy.scrollTo(matchIDs[matchIndex], anchor: .center) }
-    }
-    private var findBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-            SearchInputField(placeholder: "Find in this thread", focusRequest: store.findFocus, autofocus: false, identifier: "OctoThreadFind", text: $store.threadQuery,
-                             move: { store.findStep += $0 }, submit: { store.findStep += 1 },
-                             cancel: { store.findingThread = false; store.focusComposer() }).frame(height: 26)
-            Text(store.threadQuery.isEmpty ? "" : matchIDs.isEmpty ? "No matches" : "\(min(matchIndex + 1, matchIDs.count))/\(matchIDs.count) messages")
-                .font(.system(size: 11)).foregroundStyle(theme.secondary)
-            Button { store.findStep -= 1 } label: { Image(systemName: "chevron.up") }.help("Previous match (⇧⌘G)").disabled(matchIDs.isEmpty)
-            Button { store.findStep += 1 } label: { Image(systemName: "chevron.down") }.help("Next match (⌘G)").disabled(matchIDs.isEmpty)
-            Button { store.findingThread = false; store.focusComposer() } label: { Image(systemName: "xmark") }.help("Close search")
-        }.padding(12).background(theme.panel)
-
     }
     private func agentControls(_ thread: WorkspaceThread) -> some View {
         let descriptors = store.harnessDescriptors
@@ -159,6 +153,9 @@ struct ChatPane: View {
             .equatable()
             // Take the row's free space ahead of the Spacer so the controls can compact themselves.
             .layoutPriority(1)
+    }
+    private func canAddImages(_ thread: WorkspaceThread) -> Bool {
+        store.supportsImages(thread.harness) && !store.importingImages.contains(thread.id) && (store.draftImages[thread.id]?.count ?? 0) < 4
     }
     private func composer(_ thread: WorkspaceThread) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -206,7 +203,8 @@ struct ChatPane: View {
                 .buttonStyle(HoverButtonStyle())
                 .help(store.supportsImages(thread.harness) ? "Add images" : "Images are unavailable with this provider")
                 .accessibilityLabel("Add images")
-                .disabled(!store.supportsImages(thread.harness) || store.importingImages.contains(thread.id) || (store.draftImages[thread.id]?.count ?? 0) >= 4)
+                .disabled(!canAddImages(thread))
+                .composerStop(.attach, enabled: canAddImages(thread))
                 if store.importingImages.contains(thread.id) {
                     ProgressView().controlSize(.small).accessibilityLabel("Loading images")
                 }
@@ -221,13 +219,15 @@ struct ChatPane: View {
                     // Fixed size: the agent controls take the row's free space first and would
                     // otherwise compress a text button to nothing.
                     Button { store.stop(thread.id) } label: { Image(systemName: "stop.fill") }
-                        .buttonStyle(.bordered).fixedSize().hoverFeedback().shortcutHint("stop")
-                        .help("Stop the agent").accessibilityLabel("Stop")
+                        .buttonStyle(.bordered).fixedSize().hoverFeedback()
+                        .help("Stop the agent (⌘.)").accessibilityLabel("Stop")
+                        .composerStop(.stop)
                 }
                 Button { store.send() } label: {
                     Image(systemName: store.running.contains(thread.id) ? "text.badge.plus" : "arrow.up")
                 }.buttonStyle(.borderedProminent).foregroundStyle(theme.onAccent).hoverFeedback()
-                    .disabled(!store.canSend(thread)).shortcutHint("send")
+                    .disabled(!store.canSend(thread))
+                    .composerStop(.send, enabled: store.canSend(thread))
                     .help(store.running.contains(thread.id) ? "Queue message (Return)" : "Send message (Return)")
                     .accessibilityLabel(store.running.contains(thread.id) ? "Queue message" : "Send message")
             }
@@ -246,6 +246,7 @@ struct ChatPane: View {
         }.padding(12).background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
             // 8 pt from the window's bottom edge, level with the sidebar and review cards.
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary)).padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 8)
+            .environment(\.composerControls, composerControls)
     }
     @ViewBuilder private func queuedMessages(_ thread: WorkspaceThread) -> some View {
         let messages = store.queuedMessages[thread.id] ?? []
@@ -448,6 +449,7 @@ private struct DraftEditor: View {
 /// Native plain-text editing keeps standard selection, undo and paste behavior,
 /// while screenshot paste attaches an image instead of inserting rich text.
 struct ComposerTextView: NSViewRepresentable {
+    @Environment(\.composerControls) private var controls
     var focusRequest: Int
     var theme: AppTheme
     @Binding var text: String
@@ -471,7 +473,7 @@ struct ComposerTextView: NSViewRepresentable {
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         editor.minSize = .zero; editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
-        editor.setAccessibilityLabel("Message. Return to send; Shift-Return for a new line. Paste text or a screenshot.")
+        editor.setAccessibilityLabel("Message. Return to send; Shift-Return for a new line, continuing a list. Tab moves to the next control, or nests a list item. Paste text or a screenshot.")
         scroll.documentView = editor
         return scroll
     }
@@ -485,6 +487,7 @@ struct ComposerTextView: NSViewRepresentable {
         }
         editor.onPasteImage = onPasteImage
         editor.onCommandKey = onCommandKey
+        editor.onTab = controls.map { controls in { controls.enter(from: $0, forward: $1) } }
         editor.onSend = { [weak editor, weak coordinator = context.coordinator] in
             if let editor { coordinator?.submit(editor) }
         }
@@ -520,6 +523,8 @@ struct ComposerTextView: NSViewRepresentable {
     }
 }
 final class ScreenshotTextView: NSTextView {
+    /// Tab or Shift-Tab outside a list; true when the composer's controls took focus.
+    var onTab: ((ScreenshotTextView, Bool) -> Bool)?
     var onPasteImage: ((NSPasteboard) -> Bool)?
     var onSend: (() -> Void)?
     var onCommandKey: ((UInt16) -> Bool)?
@@ -543,23 +548,81 @@ final class ScreenshotTextView: NSTextView {
                 return
             }
             if modifiers == .shift {
-                insertNewlineIgnoringFieldEditor(nil)
+                if let edit = MarkdownListEditing.newline(in: string, selection: selectedRange()) { apply(edit) }
+                else { insertNewlineIgnoringFieldEditor(nil) }
                 return
             }
         }
         super.keyDown(with: event)
+    }
+    /// Tab moves to the next control, as in a form, except in a Markdown list where it nests the
+    /// item. An item with nothing above it to nest under stays put rather than losing focus mid-list.
+    /// Option-Tab still types a tab.
+    override func insertTab(_ sender: Any?) {
+        guard !hasMarkedText() else { return super.insertTab(sender) }
+        if MarkdownListEditing.isInList(string, selection: selectedRange()) {
+            if let edit = MarkdownListEditing.indent(in: string, selection: selectedRange()) { apply(edit) }
+        } else if onTab?(self, true) != true { focusNextVisibleView(forward: true) }
+    }
+    override func insertBacktab(_ sender: Any?) {
+        guard !hasMarkedText() else { return super.insertBacktab(sender) }
+        if MarkdownListEditing.isInList(string, selection: selectedRange()) {
+            if let edit = MarkdownListEditing.outdent(in: string, selection: selectedRange()) { apply(edit) }
+        } else if onTab?(self, false) != true { focusNextVisibleView(forward: false) }
+    }
+    /// The window keeps hidden panels mounted (the review card slides offscreen, inactive tabs go
+    /// transparent), and AppKit's key-view loop still visits them. Skip anything not on screen;
+    /// with nothing visible to go to, focus stays here.
+    func focusNextVisibleView(forward: Bool) {
+        guard let window, let content = window.contentView else { return }
+        // SwiftUI's hosting view runs the key-view loop, so step through it and judge each stop.
+        for _ in 0..<32 {
+            if forward { window.selectNextKeyView(window.firstResponder) } else { window.selectPreviousKeyView(window.firstResponder) }
+            guard let responder = window.firstResponder, responder !== self else { return }
+            let view = (responder as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil } ?? responder as? NSView
+            if let view, Self.isOnScreen(view, in: content) { return }
+        }
+        window.makeFirstResponder(self)
+    }
+    static func isOnScreen(_ view: NSView, in content: NSView) -> Bool {
+        guard !view.isHiddenOrHasHiddenAncestor else { return false }
+        var ancestor: NSView? = view
+        while let current = ancestor {
+            if current.alphaValue < 0.01 || (current.layer.map { $0.opacity < 0.01 } ?? false) { return false }
+            ancestor = current.superview
+        }
+        let frame = view.convert(view.bounds, to: content).intersection(content.bounds)
+        return frame.width >= 4 && frame.height >= 4
+    }
+    /// Through the text system, so the edit is undoable and the draft binding hears about it.
+    private func apply(_ edit: MarkdownListEditing.Edit) {
+        guard shouldChangeText(in: edit.range, replacementString: edit.replacement) else { return }
+        textStorage?.replaceCharacters(in: edit.range, with: edit.replacement)
+        didChangeText()
+        setSelectedRange(edit.selection)
+        scrollRangeToVisible(edit.selection)
     }
 }
 
 /// The transcript compares its inputs, so publications that do not touch this
 /// thread (sidebar changes, other threads streaming, model loading) skip rebuilding
 /// and re-measuring every turn. Unchanged message arrays compare by identity.
+/// Plain message text with the find query's occurrences highlighted.
+private struct FindableText: View {
+    let text: String
+    @Environment(\.findHighlight) private var highlight
+    @Environment(\.octoTheme) private var theme
+    var body: some View {
+        if highlight == nil { Text(verbatim: text) } else { Text(AttributedString(text).highlighting(highlight, theme: theme)) }
+    }
+}
+
 private struct TranscriptTurns: View, Equatable {
     let messages: [ChatMessage]
     let harness: HarnessID
     let active: Bool
     let isProjectChat: Bool
-    let matchIDs: [UUID]
+    let find: ThreadFindResults
     let matchIndex: Int
     let expandedDetails: Set<UUID>
     let setExpanded: (UUID, Bool) -> Void
@@ -567,12 +630,14 @@ private struct TranscriptTurns: View, Equatable {
     @Environment(\.octoTheme) private var theme
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages && lhs.harness == rhs.harness && lhs.active == rhs.active
-            && lhs.isProjectChat == rhs.isProjectChat && lhs.matchIDs == rhs.matchIDs
+            && lhs.isProjectChat == rhs.isProjectChat && lhs.find == rhs.find
             && lhs.matchIndex == rhs.matchIndex && lhs.expandedDetails == rhs.expandedDetails
     }
 
     var body: some View {
         let turns = ChatTurn.turns(messages)
+        let matches = Set(find.ids)
+        let current = find.ids.indices.contains(matchIndex) ? find.ids[matchIndex] : nil
         VStack(alignment: .leading, spacing: 20) {
             if messages.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
@@ -583,34 +648,36 @@ private struct TranscriptTurns: View, Equatable {
             if turns.count > 1 {
                 VStack(alignment: .leading, spacing: 20) {
                     ForEach(turns.dropLast()) { turn in
-                        turnView(turn, harness: harness, active: false)
+                        turnView(turn, harness: harness, active: false, matches: matches, current: current)
                     }
                 }
             }
             // Eager history keeps measured Markdown heights and native scroll
             // geometry stable while scrolling or resizing the chat column.
             ForEach(turns.suffix(1)) { turn in
-                turnView(turn, harness: harness, active: active)
+                turnView(turn, harness: harness, active: active, matches: matches, current: current)
             }
         }
     }
-    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID) -> some View {
+    /// Matching messages get their occurrences highlighted; only those messages see a changed
+    /// environment, so the rest of the transcript is not re-rendered while searching.
+    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID, matches: Set<UUID>, current: UUID?) -> some View {
         messageView(message, harness: harness).id(message.id).padding(6)
-            .background(matchIDs.contains(message.id) ? theme.searchHighlight(active: matchIDs.firstIndex(of: message.id) == matchIndex) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .environment(\.findHighlight, matches.contains(message.id) ? FindHighlight(query: find.query, current: message.id == current) : nil)
+            .background(message.id == current ? theme.searchHighlight(active: true) : .clear, in: RoundedRectangle(cornerRadius: 6))
     }
-    private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool) -> some View {
+    private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool, matches: Set<UUID>, current: UUID?) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            if let user = turn.user { transcriptMessage(user, harness: harness) }
+            if let user = turn.user { transcriptMessage(user, harness: harness, matches: matches, current: current) }
             if active || turn.user?.work != nil || !turn.details.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     if turn.details.isEmpty {
                         workLabel(turn, active: active)
                     } else {
-                        DisclosureGroup(isExpanded: Binding(get: {
-                            expandedDetails.contains(turn.id) || turn.details.contains { matchIDs.contains($0.id) }
-                        }, set: { setExpanded(turn.id, $0) })) {
+                        // Find searches only what is shown, so it never expands activity.
+                        DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(turn.id) }, set: { setExpanded(turn.id, $0) })) {
                             VStack(alignment: .leading, spacing: 10) {
-                                ForEach(turn.details) { transcriptMessage($0, harness: harness) }
+                                ForEach(turn.details) { transcriptMessage($0, harness: harness, matches: matches, current: current) }
                             }.padding(.top, 10)
                         } label: { workLabel(turn, active: active) }
                         .disclosureGroupStyle(WorkDisclosureStyle())
@@ -618,7 +685,7 @@ private struct TranscriptTurns: View, Equatable {
                     Divider().overlay(theme.border.opacity(0.25))
                 }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
             }
-            ForEach(turn.responses) { transcriptMessage($0, harness: harness) }
+            ForEach(turn.responses) { transcriptMessage($0, harness: harness, matches: matches, current: current) }
         }
     }
     @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
@@ -653,7 +720,7 @@ private struct TranscriptTurns: View, Equatable {
                                     return .handled
                                 })
                         } else {
-                            Text(verbatim: message.text)
+                            FindableText(text: message.text)
                                 .font(message.role == .activity ? .system(size: 13, design: .monospaced) : message.role == .reasoning ? .system(size: 13) : .system(size: 14))
                                 .lineSpacing(message.role == .user ? 6 : 0)
                                 .foregroundStyle(message.role == .error ? theme.red : message.role == .activity || message.role == .reasoning ? theme.secondary : theme.prose)
@@ -766,7 +833,7 @@ private struct AgentControls: View, Equatable {
     var body: some View {
         let compact = natural > available
         // Never fixed-size: the frame must report the offered width, not the row's own.
-        HStack(spacing: 4) { agentMenu; permissionsMenu(compact: compact) }
+        HStack(spacing: 4) { agentMenu.composerStop(.agent); permissionsMenu(compact: compact).composerStop(.permissions) }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 GeometryReader { proxy in Color.clear.onChange(of: proxy.size.width, initial: true) { _, width in available = width } }

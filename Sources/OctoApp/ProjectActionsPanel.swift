@@ -3,9 +3,12 @@ import SwiftUI
 import OctoCore
 import OctoGit
 
-/// Where "Open in" can send a checkout. LazyVim runs in Octo's terminal with the user's own
-/// Neovim configuration; every other target is an installed app opened through Launch Services.
+/// Where "Open in" can send a checkout or a reviewed file. LazyVim runs in Octo's terminal with the
+/// user's own Neovim configuration; every other target is an installed app opened through Launch Services.
+/// The project actions menu chooses it; the review panel's file button follows the same choice.
 struct OpenTarget: Identifiable, Equatable {
+    static let storageKey = "OctoOpenTarget"
+
     enum Kind: Equatable { case lazyVim, finder, app(bundleID: String) }
     let id: String
     let title: String
@@ -35,6 +38,19 @@ struct OpenTarget: Identifiable, Equatable {
     /// LazyVim and Finder are always listed; apps only when Launch Services knows them.
     @MainActor static func available() -> [OpenTarget] {
         all.filter { $0.kind == .lazyVim || $0.kind == .finder || $0.applicationURL != nil }
+    }
+
+    static func preferred(_ id: String) -> OpenTarget { all.first { $0.id == id } ?? all[0] }
+
+    /// Editors that open `scheme://file/<path>:<line>` at that line, in the window already showing its folder.
+    var fileScheme: String? { ["cursor", "vscode", "vscode-insiders", "zed", "windsurf"].contains(id) ? id : nil }
+    /// Terminals receive the checkout directory rather than a file: opening a script in one runs it.
+    var isTerminal: Bool { ["terminal", "ghostty", "iterm", "warp"].contains(id) }
+
+    static func fileURL(scheme: String, path: String, line: Int) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme; components.host = "file"; components.path = "\(path):\(max(1, line))"
+        return components.url
     }
 
     @MainActor private static var icons: [String: NSImage] = [:]
@@ -72,7 +88,7 @@ struct ProjectActionsPanel: View, Equatable {
     let review: ReviewModel
     let openChanges: () -> Void
 
-    @AppStorage("OctoOpenTarget") private var preferredTarget = "lazyvim"
+    @AppStorage(OpenTarget.storageKey) private var preferredTarget = "lazyvim"
     /// Filled on appear: an initial value here would query Launch Services on every parent render.
     @State private var targets: [OpenTarget] = []
     @State private var choosingBranch = false
@@ -163,22 +179,49 @@ struct ProjectActionsPanel: View, Equatable {
     }
 
     private func open(_ target: OpenTarget) {
+        if !store.open(target, checkout: checkout, projectID: projectID) { targets = OpenTarget.available() }
+    }
+}
+
+extension AppStore {
+    /// Returns false when the target app is no longer installed.
+    @discardableResult func open(_ target: OpenTarget, checkout: String, projectID: UUID) -> Bool {
         let url = URL(fileURLWithPath: checkout, isDirectory: true)
         switch target.kind {
-        case .lazyVim:
-            store.openCheckoutInEditor(projectID: projectID, directory: checkout)
-        case .finder:
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
-        case .app:
-            guard let application = target.applicationURL else {
-                store.error = "\(target.title) is no longer installed."; targets = OpenTarget.available(); return
-            }
-            let store = store, title = target.title
-            NSWorkspace.shared.open([url], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                guard let error else { return }
-                Task { @MainActor in store.error = "Could not open in \(title): \(error.localizedDescription)" }
-            }
+        case .lazyVim: openCheckoutInEditor(projectID: projectID, directory: checkout); return true
+        case .finder: NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path); return true
+        case .app: return launch(target, urls: [url])
         }
+    }
+
+    /// Opens a reviewed file at the selection's first new line where the target supports lines;
+    /// terminals get the checkout. Returns false when the target app is no longer installed.
+    @discardableResult func open(_ target: OpenTarget, snapshot: ReviewSnapshot, selection: CodeAttachment?) -> Bool {
+        let line = selection?.newLines?.lowerBound ?? 1
+        let file = URL(fileURLWithPath: snapshot.workingDirectory, isDirectory: true).appendingPathComponent(snapshot.path).standardizedFileURL
+        switch target.kind {
+        case .lazyVim: openInEditor(snapshot, selection: selection); return true
+        case .finder: NSWorkspace.shared.selectFile(file.path, inFileViewerRootedAtPath: ""); return true
+        case .app:
+            if target.isTerminal { return open(target, checkout: snapshot.workingDirectory, projectID: snapshot.projectID) }
+            guard let application = target.applicationURL else { return launch(target, urls: []) }
+            // Fall back to the plain file when this installation does not register the line scheme.
+            if let scheme = target.fileScheme, let url = OpenTarget.fileURL(scheme: scheme, path: file.path, line: line),
+               NSWorkspace.shared.urlsForApplications(toOpen: url).contains(where: { $0.standardizedFileURL == application.standardizedFileURL }) {
+                return launch(target, urls: [url])
+            }
+            return launch(target, urls: [file])
+        }
+    }
+
+    private func launch(_ target: OpenTarget, urls: [URL]) -> Bool {
+        guard let application = target.applicationURL else { error = "\(target.title) is no longer installed."; return false }
+        let title = target.title
+        NSWorkspace.shared.open(urls, withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard let error else { return }
+            Task { @MainActor in self.error = "Could not open in \(title): \(error.localizedDescription)" }
+        }
+        return true
     }
 }
 

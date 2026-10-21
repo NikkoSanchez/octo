@@ -11,6 +11,8 @@ import OctoCore
     private var editorSession: EditorSession?
     private var editorMonitor: Task<Void, Never>?
     @Published public var label: String
+    /// Set by the user; overrides the automatic label until cleared.
+    @Published public private(set) var customName: String?
     @Published public var exited = false
     public let state: GhosttySession
     init(projectID: UUID, directory: String, label: String, command: String? = nil, editorSession: EditorSession? = nil) {
@@ -31,6 +33,12 @@ import OctoCore
         }
     }
     deinit { editorMonitor?.cancel() }
+    public var title: String { customName ?? label }
+    /// A blank name restores the automatic label.
+    public func rename(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        customName = trimmed.isEmpty ? nil : trimmed
+    }
     func close() { editorMonitor?.cancel(); editorSession = nil; state.close() }
 
     func refreshEditorSession() {

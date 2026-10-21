@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Observation
 import OctoCore
 import OctoGit
 import OctoAgents
@@ -27,6 +28,8 @@ struct WorkspaceView: View {
     @State private var showingShortcutHints = false
     @State private var showingProjectActions = false
     @State private var sidebarSearchRequest = 0
+    /// Chosen in the project actions' Open in menu; the review panel opens files there too.
+    @AppStorage(OpenTarget.storageKey) private var openTarget = "lazyvim"
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @Environment(\.octoTheme) private var theme
@@ -105,11 +108,11 @@ struct WorkspaceView: View {
                 else { store.focusComposer() }
             }
         }
-        .environment(\.shortcutHints, showingShortcutHints ? Dictionary(uniqueKeysWithValues: commands.filter { $0.isAvailable(inTerminal: store.showingTerminal) && $0.key != nil }.map { ($0.id, $0.shortcut) }) : [:])
+        .environment(\.shortcutHints, showingShortcutHints ? Dictionary(uniqueKeysWithValues: commands.filter { AppCommand.heldHints.contains($0.id) && $0.isAvailable(inTerminal: store.showingTerminal) && $0.key != nil }.map { ($0.id, $0.shortcut) }) : [:])
         .focusedSceneValue(\.workspaceCommands, WorkspaceCommandContext(commands: commands, terminalVisible: store.showingTerminal))
         .background(WorkspaceKeyRouter(commands: commands, terminalVisible: store.showingTerminal, hintsChanged: { showingShortcutHints = $0 }).frame(width: 0, height: 0))
         .sheet(item: $palette, onDismiss: finishPalette) { mode in
-            CommandPalette(mode: mode, entries: paletteEntries(mode), dismiss: { palette = nil }, activateEntry: { entry in
+            CommandPalette(mode: mode, entries: paletteEntries(mode), search: mode == .chats ? searchChats : nil, dismiss: { palette = nil }, activateEntry: { entry in
                 paletteAction = entry.action
                 palette = nil
             })
@@ -258,10 +261,11 @@ struct WorkspaceView: View {
         HStack(spacing: 0) {
             if store.showingTerminal {
                 Button { store.focusComposer() } label: { Image(systemName: "bubble.left") }
-                    .buttonStyle(CapsuleToolbarButtonStyle()).shortcutHint("terminal").help("Back to thread").accessibilityLabel("Back to thread")
+                    .buttonStyle(CapsuleToolbarButtonStyle()).shortcutHint("terminal").help("Back to thread (⌘J)").accessibilityLabel("Back to thread")
             } else if let project = store.project, store.isProjectChat {
                 Button { store.openTerminal(project) } label: { Image(systemName: "terminal") }
-                    .buttonStyle(CapsuleToolbarButtonStyle()).shortcutHint("terminal").help("Terminal").accessibilityLabel("Terminal")
+                    // The review button's wider ⌥⌘B badge takes the space above both.
+                    .buttonStyle(CapsuleToolbarButtonStyle()).shortcutHint("terminal", placement: .leading).help("Terminal (⌘J)").accessibilityLabel("Terminal")
             }
             if projectActionsAvailable && !projectActionsFloat(layout) {
                 Button { showingProjectActions.toggle() } label: { GitBranchIcon(size: 15) }
@@ -272,7 +276,7 @@ struct WorkspaceView: View {
             if store.isProjectChat && !store.showingTerminal {
                 Button { store.showingReview.toggle() } label: { Image(systemName: "sidebar.right") }
                     .buttonStyle(CapsuleToolbarButtonStyle(active: store.showingReview)).shortcutHint("review")
-                    .help(store.showingReview ? "Hide review panel" : "Show review panel")
+                    .help(store.showingReview ? "Hide review panel (⌥⌘B)" : "Show review panel (⌥⌘B)")
                     .accessibilityLabel(store.showingReview ? "Hide review panel" : "Show review panel")
             }
         }
@@ -280,7 +284,7 @@ struct WorkspaceView: View {
     }
     @ViewBuilder private var threadWorkspace: some View {
         if let project = store.project {
-            ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.isProjectChat && store.showingReview, singleColumnWhenNarrow: true, showsIdleDivider: false) {
+            ResizableColumns(minLeading: 300, minTrailing: 430, initialFraction: 0.42, trailingVisible: store.isProjectChat && store.showingReview, singleColumnWhenNarrow: true, showsIdleDivider: false, clipsPanes: false) {
                 VStack(spacing: 0) {
                     if !titlebarSpansDetail { titlebar(showSidebarToggle: !layout.sidebarVisible) }
                     ChatPane(store: store, isVisible: !store.showingTerminal && !singleReview && !layout.overlayVisible && palette == nil && store.error == nil, openFile: openMarkdownFile)
@@ -378,7 +382,7 @@ struct WorkspaceView: View {
         HStack(spacing: 8) {
             if tabs.isBrowsingFiles {
                 Button { store.updatePanelTabs(project.id) { $0.showsFileTree.toggle() } } label: { Image(systemName: "sidebar.left") }
-                    .buttonStyle(CapsuleToolbarButtonStyle(active: tabs.showsFileTree)).shortcutHint("browseFiles")
+                    .buttonStyle(CapsuleToolbarButtonStyle(active: tabs.showsFileTree))
                     .help(tabs.showsFileTree ? "Hide file tree" : "Show file tree").accessibilityLabel(tabs.showsFileTree ? "Hide file tree" : "Show file tree")
             }
             if !review.browsingFiles {
@@ -392,7 +396,7 @@ struct WorkspaceView: View {
                     .buttonStyle(CapsuleToolbarButtonStyle()).help("New file").accessibilityLabel("New file")
             }
             Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(CapsuleToolbarButtonStyle()).shortcutHint("refresh").help("Refresh changes").accessibilityLabel("Refresh changes")
+                .buttonStyle(CapsuleToolbarButtonStyle()).help("Refresh changes (⇧⌘R)").accessibilityLabel("Refresh changes")
         }
         .onChange(of: review.scope) { _, _ in
             if !review.browsingFiles, let file = review.files.first(where: { $0.path == review.selectedPath }) { Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
@@ -419,10 +423,10 @@ struct WorkspaceView: View {
                             HStack(spacing: 8) {
                                 Text(snapshot.path).font(.system(size: 12.5, weight: .semibold)).lineLimit(1).truncationMode(.head).help(snapshot.path)
                                 Spacer(minLength: 8)
-                                Button { store.openInEditor(snapshot, selection: review.selection) } label: {
-                                    Text("Open in LazyVim").font(.system(size: 11.5, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 4)
-                                        .background(theme.field, in: Capsule()).contentShape(Capsule())
-                                }.buttonStyle(.plain).shortcutHint("editor")
+                                let target = OpenTarget.preferred(openTarget)
+                                Button { store.open(target, snapshot: snapshot, selection: review.selection) } label: {
+                                    Text("Open in \(target.title)")
+                                }.buttonStyle(CapsuleButtonStyle()).help(target.isTerminal ? "Open this checkout in \(target.title) (⇧⌘E)" : "Open \(snapshot.path) in \(target.title) (⇧⌘E)")
                             }.padding(.leading, 16).padding(.trailing, 12).padding(.top, 9).padding(.bottom, 6)
                             if review.browsingFiles, let editor = review.editor {
                                 InlineFilePane(session: editor, windowID: editorWindowID, theme: store.theme, focusRequest: reviewFocus,
@@ -437,9 +441,11 @@ struct WorkspaceView: View {
                                 SideBySideDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus,
                                     onSelection: { if !review.loadingSnapshot && review.diffLayout == .sideBySide { review.selection = $0 } },
                                     onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                                    .keyboardFocusRing()
                             }
                             else {
                                 NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, onSelection: { if !review.loadingSnapshot && (review.browsingFiles || review.diffLayout == .stacked) { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                                    .keyboardFocusRing()
                             }
                             Rectangle().fill(theme.hairline).frame(height: 0.5)
                             HStack {
@@ -447,7 +453,7 @@ struct WorkspaceView: View {
                                 Spacer()
                                 Button("Ask Agent") { if let selection = review.selection { attachToDraft(selection) } }
                                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).foregroundStyle(theme.onAccent)
-                                    .disabled(review.selection == nil).controlSize(.small).shortcutHint("attach")
+                                    .disabled(review.selection == nil).controlSize(.small).help("Attach the selected code to the draft (⇧⌘A)")
                             }.padding(.leading, 14).padding(.trailing, 12).padding(.top, 10).padding(.bottom, 12)
                         } else if review.browsingFiles, let path = tabs.selectedFile, !review.loadingSnapshot, !review.loading {
                             ContentUnavailableView {
@@ -469,6 +475,8 @@ private struct TerminalPane: View {
     var visible: Bool
     @Environment(\.octoTheme) private var theme
     private var closing: TerminalTab? { terminal.tabs.first { $0.id == store.closingTerminal } }
+    private var renaming: TerminalTab? { terminal.tabs.first { $0.id == store.renamingTerminal } }
+    @State private var name = ""
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
@@ -478,12 +486,17 @@ private struct TerminalPane: View {
                     ForEach(terminal.tabs.filter { $0.projectID == project.id }) { tab in
                         HStack(spacing: 6) {
                             Button { terminal.select(tab) } label: { TerminalTabTitle(tab: tab).lineLimit(1).padding(.horizontal, 8).frame(minHeight: 30).contentShape(Rectangle()) }.buttonStyle(HoverButtonStyle(padded: false))
-                            Button { store.closingTerminal = tab.id } label: { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 24, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("closeTerminal", active: terminal.selectedTabs[project.id] == tab.id).help("Close tab")
+                                .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) }).help("Double-click to rename")
+                            Button { store.closingTerminal = tab.id } label: { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 24, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).help("Close tab (⌘W)")
                         }.font(.system(size: 13)).padding(8).background(terminal.selectedTabs[project.id] == tab.id ? theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                        .contextMenu {
+                            Button("Rename Tab…") { beginRename(tab) }
+                            Button("Close Tab…") { store.closingTerminal = tab.id }
+                        }
                     }
                         }
                     }
-                    Button { terminal.newTab(projectID: project.id, directory: project.rootPath) } label: { Image(systemName: "plus").frame(width: 28, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newTerminal").help("New terminal tab")
+                    Button { terminal.newTab(projectID: project.id, directory: project.rootPath) } label: { Image(systemName: "plus").frame(width: 28, height: 30) }.buttonStyle(HoverButtonStyle(padded: false)).help("New terminal tab (⌘T)")
                 }
                 Spacer(); Text("Ghostty").font(.system(size: 12)).foregroundStyle(theme.secondary)
             }.padding(8)
@@ -494,12 +507,29 @@ private struct TerminalPane: View {
             Button("Close Tab", role: .destructive) { if let closing { terminal.close(closing) }; store.closingTerminal = nil }
             Button("Cancel", role: .cancel) { store.closingTerminal = nil }
         } message: { Text("The process in this terminal will be stopped. Save any editor changes first.") }
+        .onChange(of: store.renamingTerminal) { _, id in
+            if let id, let tab = terminal.tabs.first(where: { $0.id == id }) { name = tab.title }
+        }
+        .alert("Rename terminal tab", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { endRename() } })) {
+            TextField("Name", text: $name)
+            Button("Save") { renaming?.rename(name); endRename() }
+            Button("Cancel", role: .cancel) { endRename() }
+        } message: { Text("Leave the name empty to use the automatic one.") }
+    }
+    private func beginRename(_ tab: TerminalTab) {
+        terminal.select(tab); name = tab.title; store.renamingTerminal = tab.id
+    }
+    /// The alert took focus from the shell; give it back.
+    private func endRename() {
+        let tab = renaming
+        store.renamingTerminal = nil
+        if let tab, terminal.selectedTabs[tab.projectID] == tab.id { tab.state.requestFocus() }
     }
 }
 
 private struct TerminalTabTitle: View {
     @ObservedObject var tab: TerminalTab
-    var body: some View { Text(tab.label) }
+    var body: some View { Text(tab.title) }
 }
 
 struct ProjectSidebar: View {
@@ -639,6 +669,66 @@ private struct SidebarEntry: Identifiable {
     var id: UUID { thread.id }
 }
 
+/// The sidebar's search text and results. Only the field reads `query`, so typing does not
+/// rebuild the sidebar; results are found off the main thread and replace the previous ones
+/// when they arrive.
+@MainActor @Observable final class SidebarSearch {
+    var query = "" { didSet { if query != oldValue { refresh() } } }
+    private(set) var results: [ThreadSearch.Result] = []
+    /// The query `results` answer. It trails `query` while a search runs.
+    private(set) var searchedQuery = ""
+    /// Whether results replace the list. Kept apart from `searchedQuery` so the sidebar
+    /// re-renders only when this or `results` actually change.
+    private(set) var hasQuery = false
+    @ObservationIgnored var threads: () -> [RecentThread] = { [] }
+    @ObservationIgnored private var generation = 0
+    func refresh() {
+        generation += 1
+        let query = query, generation = generation
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+            publish([], for: query); return
+        }
+        let threads = threads()
+        Task {
+            let found = await Task.detached(priority: .userInitiated) { ThreadSearch.results(query, in: threads) }.value
+            // A newer keystroke has started its own search.
+            guard generation == self.generation else { return }
+            publish(found, for: query)
+        }
+    }
+    private func publish(_ found: [ThreadSearch.Result], for query: String) {
+        if results != found { results = found }
+        searchedQuery = query
+        let hasQuery = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        if self.hasQuery != hasQuery { self.hasQuery = hasQuery }
+    }
+}
+
+/// Reads the search text in its own body, keeping keystrokes out of the sidebar's.
+private struct SidebarSearchInput: View {
+    @Bindable var search: SidebarSearch
+    let active: Bool
+    var focus: FocusState<Bool>.Binding
+    let activate: () -> Void
+    let cancel: () -> Void
+    let submit: () -> Void
+    let move: (Int) -> Void
+    var body: some View {
+        SidebarSearchField(text: $search.query, active: active, focus: focus, activate: activate,
+                           cancel: cancel, submit: submit, move: move)
+    }
+}
+
+/// Reads the searched text in its own body, so the sidebar need not re-render for it.
+private struct SidebarSearchEmptyMessage: View {
+    let search: SidebarSearch
+    @Environment(\.octoTheme) private var theme
+    var body: some View {
+        Text("No chat titles, projects or messages contain “\(search.searchedQuery)”.")
+            .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 20).padding(.top, 4)
+    }
+}
+
 private struct ProjectSidebarContent: View, Equatable {
     let store: AppStore
     let switchProject: () -> Void
@@ -656,8 +746,7 @@ private struct ProjectSidebarContent: View, Equatable {
     @State private var name = ""
     @State private var showingUsage = false
     @State private var searching = false
-    @State private var query = ""
-    @State private var results: [ThreadSearch.Result] = []
+    @State private var search = SidebarSearch()
     @State private var highlighted: UUID?
     @FocusState private var searchFocused: Bool
 
@@ -665,10 +754,13 @@ private struct ProjectSidebarContent: View, Equatable {
         floatingList
             .frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
             .onChange(of: searchRequest) { _, _ in beginSearch() }
-            .onChange(of: query) { _, _ in updateResults() }
+            .onChange(of: search.results) { _, results in
+                if !results.contains(where: { $0.id == highlighted }) { highlighted = results.first?.id }
+            }
             // New replies, renames and deletions while searching.
-            .onChange(of: presentation) { _, _ in if searching && !query.isEmpty { updateResults() } }
-            .onChange(of: searchFocused) { _, focused in if !focused && query.isEmpty { searching = false } }
+            .onChange(of: presentation) { _, _ in if searching { search.refresh() } }
+            .onChange(of: searchFocused) { _, focused in if !focused && search.query.isEmpty { searching = false } }
+            .onAppear { search.threads = { [weak store] in store?.archive.searchableThreads ?? [] } }
         .onChange(of: store.sidebarEdit?.id) { _, _ in
             guard let edit = store.sidebarEdit else { return }
             let target = SidebarTarget(projectID: edit.projectID, threadID: edit.threadID)
@@ -706,7 +798,7 @@ private struct ProjectSidebarContent: View, Equatable {
     /// As in Messages, the list scrolls beneath the search field and the footer controls.
     /// While searching, results cover the list, which stays mounted to keep its scroll position.
     private var floatingList: some View {
-        let showingResults = searching && !query.isEmpty
+        let showingResults = searching && search.hasQuery
         return ZStack {
             list.opacity(showingResults ? 0 : 1).allowsHitTesting(!showingResults).accessibilityHidden(showingResults)
             if showingResults { searchResults }
@@ -720,20 +812,17 @@ private struct ProjectSidebarContent: View, Equatable {
     }
     /// Escape clears the text first, then leaves search.
     private func cancelSearch() {
-        if !query.isEmpty { query = ""; return }
+        if !search.query.isEmpty { search.query = ""; return }
         searching = false; searchFocused = false; highlighted = nil
     }
-    private func updateResults() {
-        results = ThreadSearch.results(query, in: store.archive.searchableThreads)
-        if !results.contains(where: { $0.id == highlighted }) { highlighted = results.first?.id }
-    }
     private func moveHighlight(_ offset: Int) {
+        let results = search.results
         guard !results.isEmpty else { return }
         let index = results.firstIndex { $0.id == highlighted } ?? (offset > 0 ? -1 : results.count)
         highlighted = results[min(results.count - 1, max(0, index + offset))].id
     }
     private func openHighlighted() {
-        guard let id = highlighted ?? results.first?.id, let entry = searchEntry(id) else { return }
+        guard let id = highlighted ?? search.results.first?.id, let entry = searchEntry(id) else { return }
         didNavigate(); store.selectThread(entry.thread, project: entry.project)
     }
     private func searchEntry(_ id: UUID) -> SidebarEntry? {
@@ -744,6 +833,7 @@ private struct ProjectSidebarContent: View, Equatable {
     }
     /// Conversation rows as in Recent, with the matching message in place of the latest reply.
     private var searchResults: some View {
+        let results = search.results
         let entries = results.compactMap { searchEntry($0.id) }
         let snippets = Dictionary(results.compactMap { result in result.snippet.map { (result.id, $0) } }, uniquingKeysWith: { first, _ in first })
         return ScrollViewReader { proxy in
@@ -754,8 +844,7 @@ private struct ProjectSidebarContent: View, Equatable {
                         .padding(.leading, 20).padding(.top, 8).padding(.bottom, 4)
                         .accessibilityAddTraits(.isHeader)
                     if entries.isEmpty {
-                        Text("No chat titles, projects or messages contain “\(query)”.")
-                            .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 20).padding(.top, 4)
+                        SidebarSearchEmptyMessage(search: search)
                     }
                     rows(entries, showsProjectName: true, previews: snippets.merging(presentation.previews) { snippet, _ in snippet }, highlighted: highlighted)
                 }.padding(.horizontal, 8).padding(.bottom, 8)
@@ -775,7 +864,7 @@ private struct ProjectSidebarContent: View, Equatable {
                         .shortcutHint("sidebar").help("Hide sidebar (⌘B)").accessibilityLabel("Hide sidebar")
                 }.padding(.trailing, 12).padding(.top, 4).frame(height: 32, alignment: .top)
             }
-            SidebarSearchField(text: $query, active: searching, focus: $searchFocused, activate: beginSearch,
+            SidebarSearchInput(search: search, active: searching, focus: $searchFocused, activate: beginSearch,
                                cancel: cancelSearch, submit: openHighlighted, move: moveHighlight)
                 .padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 6)
         }
@@ -791,15 +880,15 @@ private struct ProjectSidebarContent: View, Equatable {
                 if !pinned.isEmpty { pinnedStrip(pinned) }
                 if let chats = store.archive.chats {
                     VStack(alignment: .leading, spacing: 0) {
-                        HStack(spacing: 2) {
+                        HoverRevealRow {
                             sectionHeader("Chats", collapsed: chats.isCollapsed,
                                           unread: chats.threads.filter(\.hasUnreadCompletion).count,
                                           toggle: { store.toggleProjectCollapse(chats.id) })
                             Button { didNavigate(); store.newChat() } label: {
-                                Image(systemName: "plus").frame(width: 26, height: 28)
+                                HoverRevealLabel { Image(systemName: "plus").frame(width: 26, height: 28) }
                             }.buttonStyle(HoverButtonStyle(padded: false))
                                 .shortcutHint("newThread", active: store.project?.isChatCollection == true)
-                                .help("New chat").accessibilityLabel("New chat")
+                                .help("New chat (⌘N)").accessibilityLabel("New chat")
                         }
                         VStack(alignment: .leading, spacing: 0) {
                             let window = threadWindow(chats)
@@ -814,14 +903,14 @@ private struct ProjectSidebarContent: View, Equatable {
                         }.padding(.top, 2).modifier(SidebarDisclosure(expanded: !chats.isCollapsed))
                     }
                 }
-                HStack(spacing: 2) {
+                HoverRevealRow {
                     sectionHeader("Projects", collapsed: store.archive.projectsSectionCollapsed == true,
                                   unread: unreadCount, toggle: store.toggleProjectsSection)
                     Button(action: switchProject) { Image(systemName: "magnifyingglass").frame(width: 26, height: 28) }
-                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("projects", placement: .leading).help("Switch Project (⇧⌘K)")
+                        .buttonStyle(HoverButtonStyle(padded: false)).help("Switch Project (⇧⌘K)")
                         .accessibilityLabel("Switch Project")
-                    Button { store.chooseProject() } label: { Image(systemName: "plus").frame(width: 26, height: 28) }
-                        .buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("addProject").help("Add Project")
+                    Button { store.chooseProject() } label: { HoverRevealLabel { Image(systemName: "plus").frame(width: 26, height: 28) } }
+                        .buttonStyle(HoverButtonStyle(padded: false)).help("Add Project (⇧⌘O)")
                         .accessibilityLabel("Add Project")
                 }
                 if store.archive.projectsSectionCollapsed != true {
@@ -851,7 +940,7 @@ private struct ProjectSidebarContent: View, Equatable {
             SettingsLink {
                 Label("Settings", systemImage: "gearshape").padding(.horizontal, 12).frame(minHeight: 30).contentShape(Capsule())
             }.buttonStyle(.plain).glassControl()
-                .shortcutHint("settings", placement: .inline).help("Settings (⌘,)")
+                .help("Settings (⌘,)")
             Spacer(minLength: 0)
             Button { showingUsage.toggle() } label: {
                 Image(systemName: "chart.bar.xaxis").frame(width: 30, height: 30).contentShape(Circle())
@@ -974,7 +1063,7 @@ private struct ProjectSidebarContent: View, Equatable {
     private var projectRows: some View {
         ForEach(store.archive.orderedProjects) { project in
             VStack(spacing: 0) {
-                HStack(spacing: 2) {
+                HoverRevealRow {
                     Button { store.toggleProjectCollapse(project.id) } label: {
                         HStack(spacing: 8) {
                             Image(systemName: project.isCollapsed ? "chevron.right" : "chevron.down")
@@ -1000,8 +1089,8 @@ private struct ProjectSidebarContent: View, Equatable {
                         .accessibilityLabel("\(project.isCollapsed ? "Expand" : "Collapse") \(project.name)")
                         .accessibilityValue(project.isCollapsed ? "Collapsed" : "Expanded")
                     Button { didNavigate(); store.newThread(projectID: project.id) } label: {
-                        Image(systemName: "plus").frame(width: 26, height: 32)
-                    }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newThread", active: store.project?.id == project.id).help("New thread in \(project.name)")
+                        HoverRevealLabel { Image(systemName: "plus").frame(width: 26, height: 32) }
+                    }.buttonStyle(HoverButtonStyle(padded: false)).shortcutHint("newThread", active: store.project?.id == project.id).help("New thread in \(project.name) (⌘N)")
                         .accessibilityLabel("New thread in \(project.name)")
                 }.contextMenu { projectMenu(project) }
                 VStack(spacing: 0) {
@@ -1278,6 +1367,39 @@ private struct SidebarRowButtonStyle: ButtonStyle {
     }
 }
 
+/// A header or project row whose add button appears only while the row is hovered. The hover
+/// state lives here, so moving the pointer re-renders this row's label, not the sidebar.
+private struct HoverRevealRow<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var hovering = false
+    var body: some View {
+        HStack(spacing: 2) { content }
+            .onHover { hovering = $0 }
+            .environment(\.rowHovered, hovering)
+    }
+}
+
+/// Shown while its row is hovered, its button has keyboard focus, or shortcut hints are up.
+/// It stays clickable: the pointer is over the row whenever it is.
+private struct HoverRevealLabel<Content: View>: View {
+    @ViewBuilder let content: Content
+    @Environment(\.rowHovered) private var hovered
+    @Environment(\.isFocused) private var focused
+    @Environment(\.shortcutHints) private var hints
+    var body: some View {
+        content.opacity(hovered || focused || !hints.isEmpty ? 1 : 0)
+            .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+}
+
+private struct RowHoveredKey: EnvironmentKey { static let defaultValue = false }
+private extension EnvironmentValues {
+    var rowHovered: Bool {
+        get { self[RowHoveredKey.self] }
+        set { self[RowHoveredKey.self] = newValue }
+    }
+}
+
 /// Reads the button's own focus, so keyboard users still see the pin without a
 /// per-row FocusState binding.
 private struct SidebarPinLabel: View {
@@ -1296,10 +1418,7 @@ private struct SidebarPinLabel: View {
 }
 
 enum ThreadHoverDetails {
-    static func activityDate(_ thread: WorkspaceThread) -> Date {
-        max(thread.createdAt, thread.lastActivityAt ?? .distantPast,
-            thread.messages.last.map { $0.completedAt ?? $0.createdAt } ?? .distantPast)
-    }
+    static func activityDate(_ thread: WorkspaceThread) -> Date { thread.activityAt }
     /// Messages' list timestamp: the time today, "Yesterday", the weekday within a week, else the date.
     static func timestamp(_ date: Date, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
         let day = calendar.startOfDay(for: date), today = calendar.startOfDay(for: now)
@@ -1606,13 +1725,19 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
     var showsIdleDivider = true
     /// Stacks the leading pane above the trailing one at this height, capped at 45% of the total so
     /// the trailing pane keeps the larger share. Both stay mounted while switching between modes.
+    /// Dragging the divider between them overrides the height, up to this natural one.
     var stackedLeadingHeight: CGFloat?
     /// Paints the trailing pane so it covers the leading one when a narrow layout overlaps them.
     var opaqueTrailing = true
+    /// Off, shadows cross the divider instead of ending in a hard line at a pane's edge: the
+    /// trailing card's, and the leading titlebar's glass capsule's. The panes' content must clip itself.
+    var clipsPanes = true
     @ViewBuilder var leading: () -> Leading
     @ViewBuilder var trailing: () -> Trailing
     @State private var fraction: CGFloat?
     @State private var dragStart: CGFloat?
+    @State private var stackedHeight: CGFloat?
+    @State private var stackDragStart: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
@@ -1621,13 +1746,16 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
             let lower = min(minLeading, upper)
             let width = min(upper, max(lower, available * (fraction ?? initialFraction)))
             let single = singleColumnWhenNarrow && available < minLeading + minTrailing
-            let stackHeight = trailingVisible ? stackedLeadingHeight.map { max(0, min($0, geometry.size.height * 0.45)) } : nil
+            let stackLimits = stackedLeadingHeight.map { StackedSplit.limits(natural: $0, total: geometry.size.height) }
+            let stackHeight = trailingVisible ? stackLimits.map { limits in
+                stackedHeight.map { min(limits.upper, max(limits.lower, $0)) } ?? limits.initial
+            } : nil
             let stacked = stackHeight != nil
             let split = trailingVisible && leadingVisible && !single && !stacked
             let showsLeading = stacked || leadingVisible && (!trailingVisible || !single)
             ZStack(alignment: .topLeading) {
                 leading().frame(height: stackHeight ?? geometry.size.height)
-                    .modifier(PanelFrame(width: split ? width : geometry.size.width))
+                    .modifier(PanelFrame(width: split ? width : geometry.size.width, clips: clipsPanes))
                     .opacity(showsLeading ? 1 : 0).allowsHitTesting(showsLeading).accessibilityHidden(!showsLeading)
                 ResizeHandle(enabled: split, color: showsIdleDivider ? NSColor(theme.border) : .clear, activeColor: NSColor(theme.activeBorder), onDrag: { translation in
                     if dragStart == nil { dragStart = width }
@@ -1644,8 +1772,21 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
                     }
                 trailing().frame(height: geometry.size.height - (stackHeight ?? 0)).background(opaqueTrailing ? theme.background : .clear)
                     .modifier(PanelFrame(width: single || stacked || !leadingVisible ? geometry.size.width : max(0, available - width),
-                                         x: trailingVisible ? (split ? width + 7 : 0) : geometry.size.width, y: stackHeight ?? 0))
+                                         x: trailingVisible ? (split ? width + 7 : 0) : geometry.size.width, y: stackHeight ?? 0,
+                                         clips: clipsPanes))
                     .allowsHitTesting(trailingVisible).accessibilityHidden(!trailingVisible)
+                if let stackHeight, let stackLimits {
+                    ResizeHandle(enabled: true, vertical: true, color: .clear, activeColor: NSColor(theme.activeBorder), onDrag: { translation in
+                        if stackDragStart == nil { stackDragStart = stackHeight }
+                        stackedHeight = min(stackLimits.upper, max(stackLimits.lower, (stackDragStart ?? stackHeight) + translation))
+                    }, onEnd: { stackDragStart = nil })
+                        .frame(width: geometry.size.width, height: 7).offset(y: stackHeight - 3.5)
+                        .accessibilityLabel("Resize panels")
+                        .accessibilityValue("\(Int(stackHeight)) points")
+                        .accessibilityAdjustableAction { direction in
+                            stackedHeight = min(stackLimits.upper, max(stackLimits.lower, stackHeight + (direction == .increment ? 20 : -20)))
+                        }
+                }
             }
             // Offsets don't contribute to ZStack's measured width. The clip
             // must cover both columns, not just the wider individual child.
@@ -1655,13 +1796,110 @@ struct ResizableColumns<Leading: View, Trailing: View>: View {
     }
 }
 
+enum StackedSplit {
+    /// The stacked leading pane opens at its natural height up to 45% of the total. Dragged, it can
+    /// shrink to one 44 pt row or grow to its natural height while leaving the trailing pane 160 pt.
+    static func limits(natural: CGFloat, total: CGFloat) -> (initial: CGFloat, lower: CGFloat, upper: CGFloat) {
+        let initial = max(0, min(natural, total * 0.45))
+        let upper = max(initial, min(natural, total - 160))
+        return (initial, min(44, initial), upper)
+    }
+}
+
+extension View {
+    /// An accent outline while keyboard focus is inside this pane, so Tab always shows where it went.
+    /// Like a macOS focus ring it is for keyboard focus: clicking into the pane does not show it.
+    func keyboardFocusRing(cornerRadius: CGFloat = 10) -> some View { modifier(KeyboardFocusRing(cornerRadius: cornerRadius)) }
+}
+
+private struct KeyboardFocusRing: ViewModifier {
+    let cornerRadius: CGFloat
+    @State private var focused = false
+    @Environment(\.octoTheme) private var theme
+    func body(content: Content) -> some View {
+        content
+            .background(FocusWithinProbe { if focused != $0 { focused = $0 } })
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(theme.accent.opacity(focused ? 0.7 : 0), lineWidth: 2).padding(3)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+    }
+}
+
+/// Reports whether the window's first responder sits inside this view's frame and arrived there from
+/// the keyboard. SwiftUI's focus state does not follow AppKit responders such as the diff's text
+/// view, so this watches AppKit.
+struct FocusWithinProbe: NSViewRepresentable {
+    let changed: (Bool) -> Void
+    func makeNSView(context: Context) -> FocusWithinView { FocusWithinView() }
+    func updateNSView(_ view: FocusWithinView, context: Context) { view.changed = changed }
+}
+
+final class FocusWithinView: NSView {
+    var changed: (Bool) -> Void = { _ in }
+    /// Whether the event moving focus right now is a key press; replaceable in tests.
+    static var focusFromKeyboard: () -> Bool = { NSApp.currentEvent?.type == .keyDown }
+    private var responder: NSKeyValueObservation?
+    private var inside = false
+    private var viaKeyboard = false
+    private var observers: [NSObjectProtocol] = []
+    private var focused = false
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        responder = nil; observers.forEach(NotificationCenter.default.removeObserver); observers = []
+        guard let window else { report(false); return }
+        responder = window.observe(\.firstResponder) { [weak self] _, _ in
+            // Read the event now: by the next turn of the run loop it is gone.
+            let keyboard = FocusWithinView.focusFromKeyboard()
+            MainActor.assumeIsolated { self?.update(responderChanged: keyboard) }
+        }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.update() }
+            })
+        }
+        update()
+    }
+    override func layout() { super.layout(); update() }
+    /// `responderChanged` is whether a key press moved the first responder; nil when it did not move.
+    func update(responderChanged keyboard: Bool? = nil) {
+        let now = window.map { Self.contains(self, $0.firstResponder) } ?? false
+        if !now { viaKeyboard = false } else if !inside, let keyboard { viaKeyboard = keyboard }
+        inside = now
+        report(now && viaKeyboard && window?.isKeyWindow == true)
+    }
+    private func report(_ value: Bool) {
+        guard value != focused else { return }
+        focused = value; changed(value)
+    }
+    /// A field editor stands for its text field, and a scrolled document for its scroll view, whose
+    /// frame is the part on screen.
+    static func contains(_ container: NSView, _ responder: NSResponder?) -> Bool {
+        guard var view = responder as? NSView, view.window === container.window else { return false }
+        if let editor = view as? NSTextView, editor.isFieldEditor, let field = editor.delegate as? NSView { view = field }
+        let shown = view.enclosingScrollView ?? view
+        let frame = shown.convert(shown.bounds, to: nil), bounds = container.convert(container.bounds, to: nil)
+        return frame.width > 0 && bounds.insetBy(dx: -1, dy: -1).contains(NSPoint(x: frame.midX, y: frame.midY))
+    }
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+}
+
 /// Apply the destination geometry immediately while keeping native descendants mounted.
 struct PanelFrame: ViewModifier {
     var width: CGFloat
     var x: CGFloat = 0
     var y: CGFloat = 0
+    var clips = true
     func body(content: Content) -> some View {
-        content.frame(width: width).clipped().offset(x: x, y: y)
+        content.frame(width: width).clipped(clips).offset(x: x, y: y)
+    }
+}
+
+private extension View {
+    @ViewBuilder func clipped(_ clips: Bool) -> some View {
+        if clips { clipped() } else { self }
     }
 }
 
@@ -1757,8 +1995,8 @@ extension WorkspaceView {
                 if layout.detailWidth < 737 { store.showingReview = false }
                 store.showingTerminal = false; store.findingThread = true; store.findFocus += 1; NativeWorkspaceFocus.focus("OctoThreadFind")
             },
-            .init(id: "findNext", title: "Next Matching Message", group: "Conversation", key: "g", enabled: store.findingThread, terminalAllowed: false) { store.findStep += 1 },
-            .init(id: "findPrevious", title: "Previous Matching Message", group: "Conversation", key: "g", modifiers: [.command, .shift], enabled: store.findingThread, terminalAllowed: false) { store.findStep -= 1 },
+            .init(id: "findNext", title: "Next Matching Message", group: "Conversation", key: "g", enabled: store.findingThread, terminalAllowed: false) { store.threadFind.move(1) },
+            .init(id: "findPrevious", title: "Previous Matching Message", group: "Conversation", key: "g", modifiers: [.command, .shift], enabled: store.findingThread, terminalAllowed: false) { store.threadFind.move(-1) },
             .init(id: "send", title: idle ? "Send Message" : "Queue Message", group: "Conversation", key: "\r", enabled: thread.map { store.canSend($0) } ?? false, terminalAllowed: false) { store.send() },
             .init(id: "stop", title: "Stop Agent", group: "Conversation", key: ".", enabled: !idle && hasThread, terminalAllowed: false) { if let thread { store.stop(thread.id) } },
             .init(id: "refresh", title: "Refresh Changes and Files", group: "Review", key: "r", modifiers: [.command, .shift], enabled: hasProject) { Task { await refresh() } },
@@ -1777,8 +2015,8 @@ extension WorkspaceView {
             .init(id: "attach", title: "Attach Selected Code to Draft", group: "Review", key: "a", modifiers: [.command, .shift], enabled: hasProject && review.selection != nil && !review.loadingSnapshot && store.showingReview, terminalAllowed: false) {
                 if let selection = review.selection { store.attach(selection); store.focusComposer() }
             },
-            .init(id: "editor", title: "Open Selected File in LazyVim", group: "Review", key: "e", modifiers: [.command, .shift], enabled: hasProject && review.snapshot?.notice == nil && review.snapshot != nil && !review.loadingSnapshot) {
-                if let snapshot = review.snapshot { store.openInEditor(snapshot, selection: review.selection) }
+            .init(id: "editor", title: "Open Selected File in \(OpenTarget.preferred(openTarget).title)", group: "Review", key: "e", modifiers: [.command, .shift], enabled: hasProject && review.snapshot?.notice == nil && review.snapshot != nil && !review.loadingSnapshot) {
+                if let snapshot = review.snapshot { store.open(OpenTarget.preferred(openTarget), snapshot: snapshot, selection: review.selection) }
             },
             .init(id: "scope", title: "Toggle Working / Staged Changes", group: "Review", enabled: hasProject && !review.browsingFiles) { review.scope = review.scope == .working ? .staged : .working },
             .init(id: "newTerminal", title: "New Terminal Tab", group: "Terminal", key: "t", enabled: hasProject) {
@@ -1786,6 +2024,9 @@ extension WorkspaceView {
             },
             .init(id: "closeTerminal", title: "Close Terminal Tab…", group: "Terminal", key: "w", enabled: store.showingTerminal && project.flatMap { store.terminal.selectedTabs[$0.id] } != nil, terminalRequired: true) {
                 if let project { store.closingTerminal = store.terminal.selectedTabs[project.id] }
+            },
+            .init(id: "renameTerminal", title: "Rename Terminal Tab…", group: "Terminal", enabled: store.showingTerminal && project.flatMap { store.terminal.selectedTabs[$0.id] } != nil, terminalRequired: true) {
+                if let project { store.renamingTerminal = store.terminal.selectedTabs[project.id] }
             },
             .init(id: "previousTab", title: "Previous Terminal Tab", group: "Terminal", key: "[", modifiers: [.command, .shift], enabled: store.showingTerminal, terminalRequired: true) { if let project { store.terminal.cycle(projectID: project.id, offset: -1) } },
             .init(id: "nextTab", title: "Next Terminal Tab", group: "Terminal", key: "]", modifiers: [.command, .shift], enabled: store.showingTerminal, terminalRequired: true) { if let project { store.terminal.cycle(projectID: project.id, offset: 1) } },
@@ -1850,6 +2091,13 @@ extension WorkspaceView {
         }
         return result
     }
+    /// The sidebar's chat search, run off the main thread so typing in the palette never waits on it.
+    private func searchChats(_ query: String) async -> [String] {
+        let threads = store.archive.searchableThreads
+        return await Task.detached(priority: .userInitiated) {
+            ThreadSearch.results(query, in: threads).map(\.threadID.uuidString)
+        }.value
+    }
     private func paletteEntries(_ mode: PaletteMode) -> [PaletteEntry] {
         switch mode {
         case .projects:
@@ -1863,8 +2111,7 @@ extension WorkspaceView {
         case .chats:
             return store.archive.searchableThreads.map { entry in
                 let project = entry.project, thread = entry.thread
-                return PaletteEntry(id: thread.id.uuidString, title: thread.title, detail: project.name,
-                             searchText: thread.messages.map(\.text).joined(separator: "\n")) { store.selectThread(thread, project: project) }
+                return PaletteEntry(id: thread.id.uuidString, title: thread.title, detail: project.name) { store.selectThread(thread, project: project) }
             }
         case .files:
             guard let project = store.project, store.isProjectChat else { return [] }
@@ -1974,7 +2221,7 @@ private struct PanelTabChip<Label: View>: View {
                 .buttonStyle(.plain).foregroundStyle(theme.secondary)
                 .opacity(selected || hovering ? 1 : 0).allowsHitTesting(selected || hovering)
                 .padding(.trailing, 4)
-                .shortcutHint("closePanelTab", active: selected).help("Close tab").accessibilityLabel("Close tab")
+                .help("Close tab (⌘W)").accessibilityLabel("Close tab")
         }
         .foregroundStyle(selected ? theme.foreground : theme.secondary)
         .background {
@@ -2036,8 +2283,10 @@ private struct ReviewFileLists: View, Equatable {
     let selectChange: (ChangedFile) -> Void
     @Environment(\.octoTheme) private var theme
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.review === rhs.review && lhs.projectID == rhs.projectID }
-    var body: some View {
-        ZStack {
+    @ViewBuilder var body: some View {
+        // Only the showing list is mounted: a transparent one stayed in the Tab order, so Tab from
+        // the composer stopped on a list nobody could see. Folder expansion lives in the model.
+        if review.browsingFiles {
             ScrollViewReader { proxy in
                 List {
                     FileTreeRows(nodes: review.tree, review: review, action: action, select: openFile)
@@ -2045,7 +2294,8 @@ private struct ReviewFileLists: View, Equatable {
                     .onChange(of: review.revealRequest) { _, _ in
                         if let path = review.selectedPath { proxy.scrollTo(path, anchor: .center) }
                     }
-            }.opacity(review.browsingFiles ? 1 : 0).allowsHitTesting(review.browsingFiles).accessibilityHidden(!review.browsingFiles)
+            }.keyboardFocusRing()
+        } else {
             List(review.files, selection: Binding(get: { review.selectedPath }, set: { path in
                 if let file = review.files.first(where: { $0.path == path }) { selectChange(file) }
             })) { file in
@@ -2054,7 +2304,7 @@ private struct ReviewFileLists: View, Equatable {
                     .contentShape(Rectangle()).hoverFeedback().help(file.path).tag(file.path)
                     .contextMenu { if file.worktreeStatus != "D" && file.indexStatus != "D" { Button("Open File") { openFile(file.path, true) } } }
             }.listStyle(.plain).scrollContentBackground(.hidden)
-                .opacity(review.browsingFiles ? 0 : 1).allowsHitTesting(!review.browsingFiles).accessibilityHidden(review.browsingFiles)
+                .keyboardFocusRing()
         }
     }
 }
@@ -2103,12 +2353,15 @@ private struct FileTreeRows: View {
 /// A non-hit-testing background cannot reliably override SwiftUI's cursor owner.
 struct ResizeHandle: NSViewRepresentable {
     let enabled: Bool
+    /// Drags up and down along a horizontal divider; the translation is positive downwards.
+    var vertical = false
     let color: NSColor
     let activeColor: NSColor
     let onDrag: (CGFloat) -> Void
     let onEnd: () -> Void
     func makeNSView(context: Context) -> ResizeCursorView { ResizeCursorView() }
     func updateNSView(_ view: ResizeCursorView, context: Context) {
+        view.vertical = vertical
         view.enabled = enabled
         view.color = color
         view.activeColor = activeColor
@@ -2119,6 +2372,10 @@ struct ResizeHandle: NSViewRepresentable {
 }
 
 class ResizeCursorView: NSView {
+    var vertical = false
+    private var cursor: NSCursor { vertical ? .resizeUpDown : .resizeLeftRight }
+    /// Window coordinates grow upwards, so a vertical drag measures down from the origin.
+    private func position(_ event: NSEvent) -> CGFloat { vertical ? -event.locationInWindow.y : event.locationInWindow.x }
     var color: NSColor = .separatorColor
     var activeColor: NSColor = .controlAccentColor
     var onDrag: (CGFloat) -> Void = { _ in }
@@ -2137,23 +2394,27 @@ class ResizeCursorView: NSView {
     }
     override var acceptsFirstResponder: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { enabled ? super.hitTest(point) : nil }
+    /// Under SwiftUI the visible rect spans the whole container rather than this thin strip, so
+    /// hover and the cursor are limited to the divider's bounds: with `inVisibleRect` the divider lit
+    /// on entering the panel and never again until the pointer left it.
+    var activeRect: NSRect { visibleRect.intersection(bounds) }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if enabled && cursorTracking == nil {
-            let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .cursorUpdate], owner: self)
+        if let area = cursorTracking, !enabled || area.rect != activeRect { removeTrackingArea(area); cursorTracking = nil }
+        if enabled && cursorTracking == nil && !activeRect.isEmpty {
+            let area = NSTrackingArea(rect: activeRect, options: [.activeInKeyWindow, .mouseEnteredAndExited, .cursorUpdate], owner: self)
             addTrackingArea(area); cursorTracking = area
-        } else if !enabled, let area = cursorTracking {
-            removeTrackingArea(area); cursorTracking = nil
         }
     }
     override func resetCursorRects() {
         super.resetCursorRects()
-        if enabled && !visibleRect.isEmpty { addCursorRect(visibleRect, cursor: .resizeLeftRight) }
+        if enabled && !activeRect.isEmpty { addCursorRect(activeRect, cursor: cursor) }
     }
-    override func cursorUpdate(with event: NSEvent) { if enabled { NSCursor.resizeLeftRight.set() } }
+    override func setFrameSize(_ size: NSSize) { super.setFrameSize(size); updateTrackingAreas() }
+    override func cursorUpdate(with event: NSEvent) { if enabled { cursor.set() } }
     override func mouseEntered(with event: NSEvent) {
         guard enabled else { return }
-        hovered = true; needsDisplay = true; NSCursor.resizeLeftRight.set()
+        hovered = true; needsDisplay = true; cursor.set()
     }
     override func mouseExited(with event: NSEvent) {
         hovered = false; needsDisplay = true
@@ -2161,12 +2422,12 @@ class ResizeCursorView: NSView {
     }
     override func mouseDown(with event: NSEvent) {
         guard enabled else { return }
-        dragOrigin = event.locationInWindow.x
-        NSCursor.resizeLeftRight.set(); onDrag(0); needsDisplay = true
+        dragOrigin = position(event)
+        cursor.set(); onDrag(0); needsDisplay = true
     }
     override func mouseDragged(with event: NSEvent) {
         guard enabled, let origin = dragOrigin else { return }
-        NSCursor.resizeLeftRight.set(); onDrag(event.locationInWindow.x - origin)
+        cursor.set(); onDrag(position(event) - origin)
     }
     override func mouseUp(with event: NSEvent) { finishDrag() }
     private func finishDrag() {
@@ -2178,8 +2439,10 @@ class ResizeCursorView: NSView {
         if newWindow == nil { finishDrag() }
         super.viewWillMove(toWindow: newWindow)
     }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateTrackingAreas() }
     override func draw(_ dirtyRect: NSRect) {
         (hovered || dragOrigin != nil ? activeColor : color).setFill()
-        NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height).fill()
+        (vertical ? NSRect(x: bounds.minX, y: bounds.midY - 0.5, width: bounds.width, height: 1)
+                  : NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)).fill()
     }
 }

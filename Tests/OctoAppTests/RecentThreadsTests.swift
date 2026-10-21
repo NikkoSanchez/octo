@@ -62,16 +62,38 @@ import OctoCore
         threads[0].isPinned = true
         threads[1].lastVisitedAt = Date(timeIntervalSince1970: 30)
         threads[2].lastActivityAt = Date(timeIntervalSince1970: 40)
+        threads[3].lastDraftedAt = Date(timeIntervalSince1970: 35)
         threads.append(WorkspaceThread(workingDirectory: "/tmp"))
         let archive = WorkspaceArchive(projects: [
             .init(name: "A", rootPath: "/tmp", threads: Array(threads.prefix(5))),
             .init(name: "B", rootPath: "/tmp", threads: Array(threads.dropFirst(5)))
         ])
         XCTAssertEqual(archive.recentThreads.count, 8)
-        XCTAssertEqual(archive.recentThreads.prefix(3).map(\.thread.title), ["Thread 2", "Thread 1", "Thread 9"])
+        // Activity and a started draft order Recent; a visit alone (Thread 1) does not.
+        XCTAssertEqual(archive.recentThreads.prefix(3).map(\.thread.title), ["Thread 2", "Thread 3", "Thread 9"])
+        XCTAssertEqual(threads[3].activityAt, Date(timeIntervalSince1970: 4), "A draft leaves the row's message time alone")
         XCTAssertFalse(archive.recentThreads.contains { $0.id == threads[0].id })
         XCTAssertFalse(archive.recentThreads.contains { $0.id == threads.last!.id })
         XCTAssertEqual(archive.recentThreads[2].project.name, "B")
+    }
+
+    func testSelectingLeavesRecentOrderAndStartingADraftMovesItsThreadUp() {
+        let (store, _, root) = fixture()
+        defer { store.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let older = store.archive.projects[0].threads[0]
+        let before = store.archive.recentThreads.map(\.id)
+        XCTAssertEqual(before.last, older.id)
+        store.selectThread(store.archive.projects[1].threads[0], project: store.archive.projects[1])
+        store.selectThread(older, project: store.archive.projects[0])
+        XCTAssertEqual(store.archive.recentThreads.map(\.id), before, "Clicking a thread does not reorder Recent")
+        store.drafts[older.id] = "  "
+        XCTAssertEqual(store.archive.recentThreads.map(\.id), before, "Whitespace is not a draft")
+        store.drafts[older.id] = "Follow up"
+        XCTAssertEqual(store.archive.recentThreads.first?.id, older.id)
+        let drafted = store.thread?.lastDraftedAt
+        XCTAssertNotNil(drafted)
+        store.drafts[older.id] = "Follow up, more"
+        XCTAssertEqual(store.thread?.lastDraftedAt, drafted, "Only starting a draft counts")
     }
 
     func testUnreadCompletionPersistsUntilReadAndDuplicateFinishDoesNotRestoreIt() throws {
@@ -121,10 +143,11 @@ import OctoCore
         thread.lastVisitedAt = Date(timeIntervalSince1970: 10)
         thread.lastActivityAt = Date(timeIntervalSince1970: 20)
         thread.unreadCompletedAt = Date(timeIntervalSince1970: 20)
+        thread.lastDraftedAt = Date(timeIntervalSince1970: 15)
         let data = try JSONEncoder().encode(thread)
         XCTAssertEqual(try JSONDecoder().decode(WorkspaceThread.self, from: data), thread)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        for key in ["lastVisitedAt", "lastActivityAt", "unreadCompletedAt"] { legacy.removeValue(forKey: key) }
+        for key in ["lastVisitedAt", "lastActivityAt", "lastDraftedAt", "unreadCompletedAt"] { legacy.removeValue(forKey: key) }
         let decoded = try JSONDecoder().decode(WorkspaceThread.self, from: JSONSerialization.data(withJSONObject: legacy))
         XCTAssertFalse(decoded.hasUnreadCompletion)
         XCTAssertNil(decoded.lastVisitedAt)

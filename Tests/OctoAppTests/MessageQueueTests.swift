@@ -26,7 +26,7 @@ import OctoAgents
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let harness = QueueHarness()
         let store = AppStore(storage: WorkspaceStore(fileURL: root.appendingPathComponent("workspace.json")),
-                             harnessFactory: { _, _ in harness }, titleGenerator: { _, _, _ in nil })
+                             harnessFactory: { _, _ in harness }, titleGenerator: { _, _, _ in nil }, executables: fixtureExecutables)
         return (store, harness, root)
     }
     private func settle() async { for _ in 0..<20 { await Task.yield() } }

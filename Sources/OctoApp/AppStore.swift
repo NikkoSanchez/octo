@@ -19,9 +19,11 @@ import OctoTerminal
     /// sign-in changes.
     private var resolvedExecutables: (descriptors: [HarnessDescriptor], codex: URL?)?
     private var activationObserver: NSObjectProtocol?
+    typealias ExecutableResolver = @MainActor () -> (descriptors: [HarnessDescriptor], codex: URL?)
+    private let resolveExecutables: ExecutableResolver
     private var executables: (descriptors: [HarnessDescriptor], codex: URL?) {
         if let resolvedExecutables { return resolvedExecutables }
-        let value = (HarnessRegistry.descriptors, CodexExecutable.resolve())
+        let value = resolveExecutables()
         resolvedExecutables = value
         return value
     }
@@ -138,8 +140,10 @@ import OctoTerminal
     var isProjectChat: Bool { project.map { !$0.isChatCollection } ?? false }
     init(storage: WorkspaceStore = .standard, preferences: UserDefaults = .standard,
          harnessFactory: @escaping HarnessFactory = { HarnessRegistry.make($0, codexExecutable: $1) },
-         titleGenerator: @escaping TitleGenerator = { try await HarnessRegistry.generateTitle($0, text: $1, codexExecutable: $2) }) {
+         titleGenerator: @escaping TitleGenerator = { try await HarnessRegistry.generateTitle($0, text: $1, codexExecutable: $2) },
+         executables: @escaping ExecutableResolver = { (HarnessRegistry.descriptors, CodexExecutable.resolve()) }) {
         self.harnessFactory = harnessFactory
+        resolveExecutables = executables
         self.titleGenerator = titleGenerator
         self.storage = storage; self.preferences = preferences
         writer = WorkspaceArchiveWriter(storage: storage)

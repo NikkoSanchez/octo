@@ -53,7 +53,12 @@ struct ChatPane: View {
                     .overlay(alignment: .bottom) {
                         if !transcriptScroll.isFollowing && !store.findingThread {
                             Button { transcriptScroll.resumeFollowing() } label: {
-                                Label("Scroll to end", systemImage: "arrow.down")
+                                // Scrolled away from the live row, the pill still says work is happening.
+                                Label {
+                                    Text(store.running.contains(thread.id) ? "Working · Scroll to end" : "Scroll to end")
+                                } icon: {
+                                    if store.running.contains(thread.id) { WorkingIndicator() } else { Image(systemName: "arrow.down") }
+                                }
                                     .padding(.horizontal, 12).padding(.vertical, 8)
                                     .background(.regularMaterial, in: Capsule())
                             }
@@ -358,7 +363,7 @@ private struct ChatWindowActivity: NSViewRepresentable {
 
 /// Only this small subtree observes each keystroke; the transcript, sidebar and
 /// terminal surfaces do not need to rebuild for ordinary draft edits.
-private struct DraftEditor: View {
+struct DraftEditor: View {
     @ObservedObject var drafts: DraftStore
     let threadID: UUID
     let focusRequest: Int
@@ -374,6 +379,7 @@ private struct DraftEditor: View {
     let onSend: () -> Void
     @State private var selectedCommand = 0
     @State private var dismissedText: String?
+    @State private var editorHeight = ComposerTextView.minHeight
     private var text: String { drafts.values[threadID] ?? "" }
     private var matching: [AgentCommand] { SlashCommandQuery.matches(commands, text: text) }
     private var showingCommands: Bool { SlashCommandQuery.prefix(in: text) != nil && dismissedText != text }
@@ -440,8 +446,9 @@ private struct DraftEditor: View {
             }
             ComposerTextView(focusRequest: focusRequest, theme: theme,
                              text: Binding(get: { drafts.values[threadID] ?? "" }, set: onChange),
-                             onPasteImage: onPasteImage, onSend: onSend, onCommandKey: commandKey)
-        }.frame(height: 110)
+                             onPasteImage: onPasteImage, onSend: onSend, onCommandKey: commandKey,
+                             onHeightChange: { editorHeight = $0 })
+        }.frame(height: min(max(editorHeight, ComposerTextView.minHeight), ComposerTextView.maxHeight))
         }.onChange(of: text) { _, _ in selectedCommand = 0; dismissedText = nil }
     }
 }
@@ -456,6 +463,11 @@ struct ComposerTextView: NSViewRepresentable {
     var onPasteImage: (NSPasteboard) -> Bool
     var onSend: () -> Void
     var onCommandKey: (UInt16) -> Bool = { _ in false }
+    /// The text's height at the current width. The composer starts at two lines,
+    /// grows with its content up to `maxHeight`, then scrolls.
+    var onHeightChange: (CGFloat) -> Void = { _ in }
+    static let minHeight: CGFloat = 44
+    static let maxHeight: CGFloat = 220
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -471,8 +483,12 @@ struct ComposerTextView: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        editor.minSize = .zero; editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        // Fill the shortest composer so a click anywhere in it places the caret.
+        editor.minSize = NSSize(width: 0, height: Self.minHeight)
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
+        editor.postsFrameChangedNotifications = true
+        context.coordinator.observeHeight(of: editor)
         editor.setAccessibilityLabel("Message. Return to send; Shift-Return for a new line, continuing a list. Tab moves to the next control, or nests a list item. Paste text or a screenshot.")
         scroll.documentView = editor
         return scroll
@@ -484,6 +500,7 @@ struct ComposerTextView: NSViewRepresentable {
             editor.string = text
             editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             editor.scrollRangeToVisible(editor.selectedRange())
+            context.coordinator.reportHeight(of: editor)
         }
         editor.onPasteImage = onPasteImage
         editor.onCommandKey = onCommandKey
@@ -507,7 +524,36 @@ struct ComposerTextView: NSViewRepresentable {
         var focusRequest = 0
         var theme: AppTheme?
         var parent: ComposerTextView
+        private var reportedHeight: CGFloat = 0
+        private var frameObserver: NSObjectProtocol?
         init(_ parent: ComposerTextView) { self.parent = parent }
+        deinit { if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) } }
+        /// Width changes rewrap the text, so they are measured as well as edits.
+        func observeHeight(of editor: NSTextView) {
+            frameObserver = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: editor, queue: .main) { [weak self, weak editor] _ in
+                MainActor.assumeIsolated { if let self, let editor { self.reportHeight(of: editor) } }
+            }
+        }
+        /// Measures the laid-out text rather than the view: inside a scroll view AppKit keeps the
+        /// text view at least as tall as what is visible, so its frame never shrinks with the text.
+        /// Reported after the current update, never during it.
+        func reportHeight(of editor: NSTextView) {
+            let used: CGFloat
+            if let layout = editor.textLayoutManager {
+                layout.ensureLayout(for: layout.documentRange)
+                used = layout.usageBoundsForTextContainer.height
+            } else if let layout = editor.layoutManager, let container = editor.textContainer {
+                layout.ensureLayout(for: container)
+                used = layout.usedRect(for: container).height
+            } else { return }
+            let height = ceil(used + editor.textContainerInset.height * 2)
+            guard abs(height - reportedHeight) >= 0.5 else { return }
+            reportedHeight = height
+            DispatchQueue.main.async { [weak editor] in
+                self.parent.onHeightChange(height)
+                if let editor { editor.scrollRangeToVisible(editor.selectedRange()) }
+            }
+        }
         func submit(_ editor: NSTextView) {
             parent.onSend()
             // Clear accepted input before the next native key event, without
@@ -516,9 +562,12 @@ struct ComposerTextView: NSViewRepresentable {
             editor.string = parent.text
             editor.setSelectedRange(NSRange(location: (parent.text as NSString).length, length: 0))
             editor.scrollRangeToVisible(editor.selectedRange())
+            reportHeight(of: editor)
         }
         func textDidChange(_ notification: Notification) {
-            if let editor = notification.object as? NSTextView { parent.text = editor.string }
+            guard let editor = notification.object as? NSTextView else { return }
+            parent.text = editor.string
+            reportHeight(of: editor)
         }
     }
 }
@@ -661,40 +710,56 @@ private struct TranscriptTurns: View, Equatable {
     }
     /// Matching messages get their occurrences highlighted; only those messages see a changed
     /// environment, so the rest of the transcript is not re-rendered while searching.
-    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID, matches: Set<UUID>, current: UUID?) -> some View {
-        messageView(message, harness: harness).id(message.id).padding(6)
+    private func transcriptMessage(_ message: ChatMessage, harness: HarnessID, matches: Set<UUID>, current: UUID?, footer: Bool = true) -> some View {
+        messageView(message, harness: harness, footer: footer).id(message.id).padding(6)
             .environment(\.findHighlight, matches.contains(message.id) ? FindHighlight(query: find.query, current: message.id == current) : nil)
             .background(message.id == current ? theme.searchHighlight(active: true) : .clear, in: RoundedRectangle(cornerRadius: 6))
     }
     private func turnView(_ turn: ChatTurn, harness: HarnessID, active: Bool, matches: Set<UUID>, current: UUID?) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
+        let finalReply = turn.messages.last { $0.role == .assistant }?.id
+        return VStack(alignment: .leading, spacing: 18) {
             if let user = turn.user { transcriptMessage(user, harness: harness, matches: matches, current: current) }
-            if active || turn.user?.work != nil || !turn.details.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    if turn.details.isEmpty {
-                        workLabel(turn, active: active)
-                    } else {
-                        // Find searches only what is shown, so it never expands activity.
-                        DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(turn.id) }, set: { setExpanded(turn.id, $0) })) {
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(turn.details) { transcriptMessage($0, harness: harness, matches: matches, current: current) }
-                            }.padding(.top, 10)
-                        } label: { workLabel(turn, active: active) }
-                        .disclosureGroupStyle(WorkDisclosureStyle())
+            ForEach(turn.body) { group in
+                if group.isDetails {
+                    // Find searches only what is shown, so it never expands activity.
+                    DisclosureGroup(isExpanded: Binding(get: { expandedDetails.contains(group.id) }, set: { setExpanded(group.id, $0) })) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(group.messages) { transcriptMessage($0, harness: harness, matches: matches, current: current) }
+                        }.padding(.top, 10)
+                    } label: { Text(group.summary) }
+                    .disclosureGroupStyle(WorkDisclosureStyle())
+                    .font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
+                } else {
+                    // Updates between work are narration, as in the provider apps: only the turn's
+                    // final reply reserves room for copy and time, so the work rows sit close to them.
+                    ForEach(group.messages) { message in
+                        transcriptMessage(message, harness: harness, matches: matches, current: current,
+                                          footer: message.role != .assistant || message.id == finalReply)
                     }
+                }
+            }
+            // The running turn ends with its live status, so it stays in view while output streams in;
+            // a finished turn keeps the same place for how long it took.
+            if active || turn.user?.work != nil {
+                VStack(alignment: .leading, spacing: 10) {
+                    workLabel(turn, active: active)
                     Divider().overlay(theme.border.opacity(0.25))
                 }.font(.system(size: 13)).foregroundStyle(theme.secondary).padding(.horizontal, 6)
             }
-            ForEach(turn.responses) { transcriptMessage($0, harness: harness, matches: matches, current: current) }
         }
     }
     @ViewBuilder private func workLabel(_ turn: ChatTurn, active: Bool) -> some View {
         if active {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                ShimmerText(text: "Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
+            HStack(spacing: 8) {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    ShimmerText(text: "Working for \(TurnWork.duration(context.date.timeIntervalSince(turn.user?.work?.startedAt ?? context.date)))")
+                }.fixedSize()
+                if let status = turn.liveStatus {
+                    Text("· \(status)").lineLimit(1).truncationMode(.tail)
+                }
             }
-        } else {
-            Text(turn.user?.work?.label ?? "Reasoning & activity · \(turn.details.count)")
+        } else if let label = turn.user?.work?.label {
+            Text(label)
         }
     }
     private func timestamp(_ message: ChatMessage) -> some View {
@@ -703,7 +768,7 @@ private struct TranscriptTurns: View, Equatable {
             .font(.system(size: 11)).foregroundStyle(theme.secondary)
             .help(date.formatted(date: .complete, time: .standard))
     }
-    private func messageView(_ message: ChatMessage, harness: HarnessID) -> some View {
+    private func messageView(_ message: ChatMessage, harness: HarnessID, footer: Bool) -> some View {
         MessageHover { hovering in
             HStack(alignment: .top, spacing: 0) {
                 if message.role == .user { Spacer(minLength: 48) }
@@ -738,7 +803,7 @@ private struct TranscriptTurns: View, Equatable {
                     }
                     .padding(message.role == .user ? 14 : 0)
                     .background(message.role == .user ? theme.surface : .clear, in: RoundedRectangle(cornerRadius: 16))
-                    if message.role == .user || message.role == .assistant || message.role == .error {
+                    if footer && (message.role == .user || message.role == .assistant || message.role == .error) {
                         HStack(spacing: 10) {
                             if message.isSteering == true { Text("Steering message").font(.system(size: 11)) }
                             Group {

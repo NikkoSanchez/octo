@@ -38,7 +38,7 @@ import OctoAgents
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let storage = WorkspaceStore(fileURL: root.appendingPathComponent("workspace.json"))
-        let store = AppStore(storage: storage)
+        let store = AppStore(storage: storage, executables: fixtureExecutables)
         defer { store.shutdown() }
         let thread = WorkspaceThread(harness: .claude, workingDirectory: root.path)
         let project = WorkspaceProject(name: "Fixture", rootPath: root.path, threads: [thread])

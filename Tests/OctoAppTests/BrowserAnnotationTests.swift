@@ -113,7 +113,7 @@ import OctoAgents
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let harness = RecordingHarness()
         let store = AppStore(storage: WorkspaceStore(fileURL: root.appendingPathComponent("workspace.json")),
-                             harnessFactory: { _, _ in harness }, titleGenerator: { _, _, _ in nil })
+                             harnessFactory: { _, _ in harness }, titleGenerator: { _, _, _ in nil }, executables: fixtureExecutables)
         defer { store.shutdown(); try? FileManager.default.removeItem(at: root) }
         let id = try XCTUnwrap(store.thread?.id), projectID = try XCTUnwrap(store.project?.id)
         store.attachBrowserAnnotation(annotation(), screenshot: png(), projectID: UUID())

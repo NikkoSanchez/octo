@@ -195,6 +195,25 @@ public struct ChatTurn: Identifiable {
     public var user: ChatMessage? { messages.first?.role == .user ? messages.first : nil }
     public var details: [ChatMessage] { messages.filter { $0.role == .reasoning || $0.role == .activity } }
     public var responses: [ChatMessage] { messages.filter { $0.role == .assistant || $0.role == .error || $0.isSteering == true } }
+    /// Everything after the user message in arrival order, so work stays between the
+    /// replies it happened between instead of gathering above them.
+    public var body: [ChatMessageGroup] { ChatMessageGroup.groups(Array(messages.dropFirst(user == nil ? 0 : 1))) }
+    /// What the agent is doing right now, for the live row under a running turn. Nil while
+    /// it writes a reply, which already shows itself.
+    public var liveStatus: String? {
+        guard let last = messages.last else { return "Thinking" }
+        switch last.role {
+        case .reasoning: return "Thinking"
+        case .activity:
+            if let tool = last.toolActivity {
+                return tool.state == .running ? ToolKind(tool.tool).progress(tool.tool) : "Thinking"
+            }
+            let line = last.text.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return line.isEmpty ? "Thinking" : String(line.prefix(120))
+        case .user: return "Thinking"
+        case .assistant, .error: return nil
+        }
+    }
     public static func turns(_ messages: [ChatMessage]) -> [ChatTurn] {
         var turns: [ChatTurn] = []
         for message in messages {
@@ -219,6 +238,62 @@ public struct ChatMessageGroup: Identifiable {
             } else { groups.append(ChatMessageGroup(messages: [message])) }
         }
         return groups
+    }
+    /// What a collapsed run of work did, e.g. "Thought, ran 3 commands and read 2 files".
+    public var summary: String {
+        var counts: [ToolKind: Int] = [:], order: [ToolKind] = [], thought = false, steps = 0
+        for message in messages {
+            if message.role == .reasoning { thought = true; continue }
+            guard let tool = message.toolActivity else {
+                if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { steps += 1 }
+                continue
+            }
+            let kind = ToolKind(tool.tool)
+            if counts[kind] == nil { order.append(kind) }
+            counts[kind, default: 0] += 1
+        }
+        var parts = order.map { $0.summary(counts[$0]!) }
+        if steps > 0 { parts.append(steps == 1 ? "1 step" : "\(steps) steps") }
+        if thought { parts.insert("thought", at: 0) }
+        guard !parts.isEmpty else { return "Activity" }
+        let text = parts.count == 1 ? parts[0] : parts.dropLast().joined(separator: ", ") + " and " + parts.last!
+        return text.prefix(1).uppercased() + text.dropFirst()
+    }
+}
+
+/// Provider tool names grouped the way people describe the work.
+enum ToolKind: Hashable {
+    case command, read, edit, search, fetch, other
+    init(_ tool: String) {
+        switch tool.lowercased() {
+        case "bash", "shell", "exec_command", "commandexecution", "local_shell", "bashoutput": self = .command
+        case "read", "view", "notebookread", "read_file": self = .read
+        case "edit", "multiedit", "write", "notebookedit", "apply_patch", "str_replace_based_edit_tool": self = .edit
+        case "grep", "glob", "ls", "search", "toolsearch", "find": self = .search
+        case "webfetch", "websearch", "web_search", "fetch": self = .fetch
+        default: self = .other
+        }
+    }
+    func summary(_ count: Int) -> String {
+        let plural = count == 1 ? "" : "s"
+        switch self {
+        case .command: return "ran \(count) command\(plural)"
+        case .read: return "read \(count) file\(plural)"
+        case .edit: return "edited \(count) file\(plural)"
+        case .search: return count == 1 ? "searched once" : "searched \(count) times"
+        case .fetch: return "browsed \(count) page\(plural)"
+        case .other: return "used \(count) tool\(plural)"
+        }
+    }
+    func progress(_ tool: String) -> String {
+        switch self {
+        case .command: return "Running a command"
+        case .read: return "Reading a file"
+        case .edit: return "Editing a file"
+        case .search: return "Searching"
+        case .fetch: return "Browsing"
+        case .other: return "Using \(tool)"
+        }
     }
 }
 

@@ -184,4 +184,56 @@ import OctoCore
         XCTAssertEqual(KeyRoutingView.command(for: event, in: commands, terminalVisible: false)?.id, "closePanelTab")
         XCTAssertNil(KeyRoutingView.command(for: event, in: [commands[0]], terminalVisible: false), "Unclaimed keys keep their native behavior")
     }
+
+    func testComposerStartsShortGrowsWithTextAndScrollsPastItsCap() async throws {
+        let drafts = DraftStore(), id = UUID()
+        let editor = DraftEditor(drafts: drafts, threadID: id, focusRequest: 0, theme: .system, commands: [], providerTitle: "Claude",
+                                 commandsLoading: false, commandError: nil, refreshCommands: {}, placeholder: "Ask anything…",
+                                 onChange: { drafts.values[id] = $0 }, onPasteImage: { _ in false }, onSend: {})
+        let host = NSHostingView(rootView: editor.frame(width: 400).fixedSize(horizontal: false, vertical: true))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        func scroll() throws -> NSScrollView { try XCTUnwrap(views(host).first { $0 is ScreenshotTextView }?.enclosingScrollView) }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try scroll().frame.height, ComposerTextView.minHeight, accuracy: 1, "An empty composer is two lines tall")
+
+        drafts.values[id] = "one\ntwo\nthree\nfour\nfive"
+        try await Task.sleep(for: .milliseconds(300))
+        let fiveLines = try scroll().frame.height
+        XCTAssertGreaterThan(fiveLines, ComposerTextView.minHeight + 20)
+        XCTAssertLessThan(fiveLines, ComposerTextView.maxHeight)
+        XCTAssertEqual(try scroll().documentView?.frame.height ?? 0, fiveLines, accuracy: 1, "Below the cap all text is shown without scrolling")
+
+        drafts.values[id] = (1...40).map { "Line \($0)" }.joined(separator: "\n")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try scroll().frame.height, ComposerTextView.maxHeight, accuracy: 1)
+        XCTAssertGreaterThan(try scroll().documentView?.frame.height ?? 0, ComposerTextView.maxHeight + 100, "Past the cap the text scrolls")
+
+        drafts.values[id] = ""
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try scroll().frame.height, ComposerTextView.minHeight, accuracy: 1, "Sending or clearing shrinks it again")
+    }
+
+    func testWorkspaceComposerShrinksWhenALongDraftIsCleared() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = AppStore(storage: WorkspaceStore(fileURL: root.appendingPathComponent("workspace.json")), executables: fixtureExecutables)
+        defer { store.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let id = try XCTUnwrap(store.thread?.id)
+        let host = NSHostingView(rootView: WorkspaceView(store: store))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        func scroll() throws -> NSScrollView { try XCTUnwrap(views(host).first { $0 is ScreenshotTextView }?.enclosingScrollView) }
+        try await Task.sleep(for: .milliseconds(500))
+        store.drafts[id] = (1...30).map { "Line \($0)" }.joined(separator: "\n")
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(try scroll().frame.height, ComposerTextView.maxHeight, accuracy: 1)
+        store.drafts[id] = ""
+        try await Task.sleep(for: .milliseconds(400))
+        // AppKit keeps a text view as tall as its visible area, so measuring the view never shrank it.
+        XCTAssertEqual(try scroll().frame.height, ComposerTextView.minHeight, accuracy: 1)
+    }
 }

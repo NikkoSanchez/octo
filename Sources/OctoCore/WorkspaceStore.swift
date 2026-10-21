@@ -6,7 +6,12 @@ public struct WorkspaceStore: Sendable {
     public init(fileURL: URL) { self.fileURL = fileURL.standardizedFileURL }
     public static var standard: WorkspaceStore {
         WorkspaceStore(fileURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Octo/workspace.json"))
+            .appendingPathComponent(dataFolder(bundleIdentifier: Bundle.main.bundleIdentifier)).appendingPathComponent("workspace.json"))
+    }
+    /// Development builds of Octo (the Debug configuration, `dev.octo.app.dev`) keep their own
+    /// chats, so a build under test never reads or rewrites the installed app's history.
+    public static func dataFolder(bundleIdentifier: String?) -> String {
+        bundleIdentifier == "dev.octo.app.dev" ? "Octo Dev" : "Octo"
     }
     private func prepareDirectory() throws {
         let parent = fileURL.deletingLastPathComponent()

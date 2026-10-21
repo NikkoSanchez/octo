@@ -14,17 +14,21 @@ Clone your private repository using your authenticated GitHub CLI, then run:
 gh repo clone NikkoSanchez/octo
 cd octo
 make setup
-open build/Octo.app
+make install
 ```
 
-`make setup` checks prerequisites, installs this checkout's privacy Git hooks (without replacing existing custom hooks), uses your authenticated `gh` account to set a local noreply commit identity when one is not already configured, scans source files, and builds the native app. It downloads the pinned build dependencies; it does not install agent CLIs, copy credentials, import conversations, or alter Neovim configuration. `make doctor` checks prerequisites without building. `make test` runs the Swift tests. `make run` rebuilds and launches the app.
+`make setup` checks prerequisites, installs this checkout's privacy Git hooks (without replacing existing custom hooks), uses your authenticated `gh` account to set a local noreply commit identity when one is not already configured, scans source files, and builds the native app. It downloads the pinned build dependencies; it does not install agent CLIs, copy credentials, import conversations, or alter Neovim configuration. `make doctor` checks prerequisites without building. `make test` runs the Swift tests.
+
+**Using Octo:** `make install` builds Octo and puts it in `~/Applications`; keep that copy in your Dock. Run it again to update. If Octo is open, nothing is interrupted: the new version replaces it once you quit Octo.
+
+**Changing Octo's code:** `make run` builds and opens **Octo Dev** (`build/Octo Dev.app`), a separate copy with its own name, bundle ID (`dev.octo.app.dev`) and chats (`~/Library/Application Support/Octo Dev`). It quits a running Octo Dev first, so you always see the new build, and never touches your installed Octo or its chats. Only people working on the code need it.
 
 Install and authenticate the provider you want on this Mac, then add your local projects in Octo. For Codex, the desktop app's bundled CLI is discovered automatically, or select an installed CLI in Settings → Agents. Claude and Neovim are optional; the terminal works without Neovim. LazyVim uses your own existing Neovim configuration.
 
-The app bundle is `build/Octo.app`. Packaging uses the Xcode app target so dependency resources are embedded correctly; the SwiftPM executable is also available for development. To import a repository at launch:
+`make release` builds `build/Octo.app` without installing it. Packaging uses the Xcode app target so dependency resources are embedded correctly; the SwiftPM executable is also available for development. To import a repository at launch:
 
 ```sh
-open build/Octo.app --args --project /absolute/path/to/repository
+open ~/Applications/Octo.app --args --project /absolute/path/to/repository
 ```
 
 The first build downloads pinned official Ghostty source and a checksum-verified Zig compiler, then builds our local framework. Octo owns the Swift/AppKit host in `Sources/OctoGhostty`; it no longer depends on libghostty-spm or MSDisplayLink. `Vendor/Ghostty.lock.json` and the generated build manifest record its provenance. See [Ghostty setup, migration-cache notes and validation limits](docs/GHOSTTY.md). The bundle is signed ad hoc for local development; distribution signing and notarization are not configured.

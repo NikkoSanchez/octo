@@ -16,7 +16,7 @@ xcodebuild -downloadComponent MetalToolchain
 ./Scripts/verify-ghostty.sh
 swift test
 ./Scripts/build-app.sh
-codesign --verify --deep --strict build/Octo.app
+codesign --verify --deep --strict "build/Octo Dev.app"
 python3 -m unittest discover -s Tests/GhosttyBuild
 python3 Scripts/ghostty/smoke.py
 # For engine/lifecycle checks while using the desktop (skips keyboard focus):

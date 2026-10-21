@@ -26,6 +26,11 @@ final class SecurityTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: parent.path), ["workspace.json"])
         XCTAssertEqual(try mode(root), originalParentMode, "Do not chmod unrelated custom parents")
     }
+    func testDevelopmentBuildsKeepTheirOwnChats() {
+        XCTAssertEqual(WorkspaceStore.dataFolder(bundleIdentifier: "dev.octo.app"), "Octo")
+        XCTAssertEqual(WorkspaceStore.dataFolder(bundleIdentifier: "dev.octo.app.dev"), "Octo Dev")
+        XCTAssertEqual(WorkspaceStore.dataFolder(bundleIdentifier: nil), "Octo", "A command-line build uses the installed app's chats")
+    }
     func testArchiveRejectsRepositoryAndLinksWithoutChangingTargets() throws {
         let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: false)

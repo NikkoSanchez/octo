@@ -2,10 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-debug}" in
-  debug) configuration=Debug ;;
-  release) configuration=Release ;;
-  *) echo 'Usage: Scripts/build-app.sh [debug|release]' >&2; exit 1 ;;
+  # Debug is the development copy, "Octo Dev" with its own chats; Release is the app you use.
+  debug) configuration=Debug; name="Octo Dev" ;;
+  release) configuration=Release; name=Octo ;;
+  *) echo 'Usage: Scripts/build-app.sh [debug|release] [output.app]' >&2; exit 1 ;;
 esac
+# The output defaults to build/<name>.app; install passes its staging location instead.
+output="${2:-$PWD/build/$name.app}"
 ./Scripts/build-ghostty.sh
 # Xcode places package resource bundles under Contents/Resources and generates
 # the matching accessor; copying a swift-build executable alone does not.
@@ -19,9 +22,8 @@ staging="$(mktemp -d "$PWD/build/.octo-bundle.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 ditto ".build/xcode/Build/Products/$configuration/Octo.app" "$staging/Octo.app"
 codesign --force --deep --sign - "$staging/Octo.app"
-if [[ -d build/Octo.app ]]; then
-  rm -rf build/Octo.previous.app
-  mv build/Octo.app build/Octo.previous.app
-fi
-mv "$staging/Octo.app" build/Octo.app
-echo "$PWD/build/Octo.app"
+# Replace the old build rather than keeping it beside the new one: a renamed copy keeps the same
+# bundle ID, and Dock items follow it there instead of opening the new build.
+if [[ -d "$output" ]]; then mv "$output" "$staging/old.app"; fi
+mv "$staging/Octo.app" "$output"
+echo "$output"

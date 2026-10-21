@@ -63,5 +63,5 @@ if [[ -z "$(git config --local --get user.email || true)" ]]; then
 fi
 python3 Scripts/check-private-data.py --worktree
 ./Scripts/build-app.sh
-printf '\nReady. Launch with: open build/Octo.app\n'
+printf '\nReady. Install Octo with: make install (to work on its code, open Octo Dev with: make run)\n'
 printf 'This Mac starts with its own local workspace. Add your project and authenticate your provider locally.\n'

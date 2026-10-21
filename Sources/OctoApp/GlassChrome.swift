@@ -151,6 +151,28 @@ struct CapsuleToolbarButtonStyle: ButtonStyle {
     }
 }
 
+/// A round or capsule control floating on glass, as in the sidebar footer: the glass lightens
+/// and the glyph brightens on hover, and darkens on press.
+struct GlassControlButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { GlassControlButton(configuration: configuration) }
+    private struct GlassControlButton: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.octoTheme) private var theme
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(enabled && hovering ? theme.foreground : theme.secondary)
+                // The wash sits between the glass and the label so it does not dim the glyph.
+                .background(Color.primary.opacity(enabled ? (configuration.isPressed ? 0.12 : hovering ? 0.08 : 0) : 0), in: Capsule())
+                .glassControl()
+                .contentShape(Capsule())
+                .opacity(enabled ? 1 : 0.45)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
 /// A labelled capsule on a field-coloured track, as for Open in: the track darkens on hover and press.
 struct CapsuleButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { CapsuleButton(configuration: configuration) }

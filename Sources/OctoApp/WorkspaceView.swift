@@ -491,6 +491,10 @@ private struct TerminalPane: View {
                         }.font(.system(size: 13)).padding(8).background(terminal.selectedTabs[project.id] == tab.id ? theme.selection : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                         .contextMenu {
                             Button("Rename Tab…") { beginRename(tab) }
+                            Divider()
+                            Button("Split Right") { terminal.select(tab); tab.split(.right) }
+                            Button("Split Down") { terminal.select(tab); tab.split(.down) }
+                            Divider()
                             Button("Close Tab…") { store.closingTerminal = tab.id }
                         }
                     }
@@ -501,12 +505,15 @@ private struct TerminalPane: View {
                 Spacer(); Text("Ghostty").font(.system(size: 12)).foregroundStyle(theme.secondary)
             }.padding(8)
             Divider()
-            TerminalSurfaces(workspace: terminal, projectID: store.project?.id, visible: visible)
+            TerminalSurfaces(workspace: terminal, projectID: store.project?.id, visible: visible) { handle in
+                ResizeHandle(enabled: true, vertical: handle.vertical, color: handle.color ?? NSColor(theme.border),
+                             activeColor: NSColor(theme.activeBorder), onDrag: handle.onDrag, onEnd: handle.onEnd)
+            }
         }
         .alert("Close terminal tab?", isPresented: Binding(get: { closing != nil }, set: { if !$0 { store.closingTerminal = nil } })) {
             Button("Close Tab", role: .destructive) { if let closing { terminal.close(closing) }; store.closingTerminal = nil }
             Button("Cancel", role: .cancel) { store.closingTerminal = nil }
-        } message: { Text("The process in this terminal will be stopped. Save any editor changes first.") }
+        } message: { Text(closing?.isSplit == true ? "The processes in all of this tab's panes will be stopped. Save any editor changes first." : "The process in this terminal will be stopped. Save any editor changes first.") }
         .onChange(of: store.renamingTerminal) { _, id in
             if let id, let tab = terminal.tabs.first(where: { $0.id == id }) { name = tab.title }
         }
@@ -529,7 +536,15 @@ private struct TerminalPane: View {
 
 private struct TerminalTabTitle: View {
     @ObservedObject var tab: TerminalTab
-    var body: some View { Text(tab.title) }
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(tab.title)
+            if tab.layout.zoomed != nil {
+                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 10, weight: .semibold))
+                    .help("A pane is zoomed (⇧⌘↩ restores the split)").accessibilityLabel("Pane zoomed")
+            }
+        }
+    }
 }
 
 struct ProjectSidebar: View {
@@ -939,12 +954,12 @@ private struct ProjectSidebarContent: View, Equatable {
         HStack(spacing: 8) {
             SettingsLink {
                 Label("Settings", systemImage: "gearshape").padding(.horizontal, 12).frame(minHeight: 30).contentShape(Capsule())
-            }.buttonStyle(.plain).glassControl()
+            }.buttonStyle(GlassControlButtonStyle())
                 .help("Settings (⌘,)")
             Spacer(minLength: 0)
             Button { showingUsage.toggle() } label: {
                 Image(systemName: "chart.bar.xaxis").frame(width: 30, height: 30).contentShape(Circle())
-            }.buttonStyle(.plain).glassControl()
+            }.buttonStyle(GlassControlButtonStyle())
                 .help("Account usage limits").accessibilityLabel("Account usage limits")
                 .popover(isPresented: $showingUsage, arrowEdge: .top) {
                     AccountUsagePopover(store: store) { showingUsage = false }
@@ -1960,6 +1975,7 @@ extension WorkspaceView {
     }
     private var commands: [AppCommand] {
         let project = store.project, thread = store.thread
+        let terminalTab = project.flatMap { project in store.terminal.tabs.first { $0.id == store.terminal.selectedTabs[project.id] } }
         let hasProject = store.isProjectChat, hasThread = thread != nil
         let idle = thread.map { !store.running.contains($0.id) } ?? false
         var result: [AppCommand] = [
@@ -2022,9 +2038,18 @@ extension WorkspaceView {
             .init(id: "newTerminal", title: "New Terminal Tab", group: "Terminal", key: "t", enabled: hasProject) {
                 if let project { store.terminal.newTab(projectID: project.id, directory: project.rootPath); store.showingTerminal = true }
             },
-            .init(id: "closeTerminal", title: "Close Terminal Tab…", group: "Terminal", key: "w", enabled: store.showingTerminal && project.flatMap { store.terminal.selectedTabs[$0.id] } != nil, terminalRequired: true) {
-                if let project { store.closingTerminal = store.terminal.selectedTabs[project.id] }
+            // ⌘W closes the focused pane, as in Ghostty; a tab's last pane closes the tab.
+            .init(id: "closeTerminal", title: terminalTab?.isSplit == true ? "Close Terminal Pane" : "Close Terminal Tab…", group: "Terminal", key: "w", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true) {
+                guard let tab = terminalTab else { return }
+                if tab.isSplit { tab.closeFocusedPane() } else { store.closingTerminal = tab.id }
             },
+            // Ghostty's own bindings (or the user's) handle these keys inside the terminal.
+            .init(id: "splitRight", title: "Split Terminal Right", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⌘D") { terminalTab?.split(.right) },
+            .init(id: "splitDown", title: "Split Terminal Down", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⇧⌘D") { terminalTab?.split(.down) },
+            .init(id: "previousPane", title: "Previous Terminal Pane", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⌘[") { terminalTab?.focus(.previous) },
+            .init(id: "nextPane", title: "Next Terminal Pane", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⌘]") { terminalTab?.focus(.next) },
+            .init(id: "zoomPane", title: "Zoom Terminal Pane", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⇧⌘↩") { terminalTab?.toggleZoom() },
+            .init(id: "equalizePanes", title: "Equalize Terminal Panes", group: "Terminal", enabled: store.showingTerminal && terminalTab != nil, terminalRequired: true, hint: "⌃⌘=") { terminalTab?.equalize() },
             .init(id: "renameTerminal", title: "Rename Terminal Tab…", group: "Terminal", enabled: store.showingTerminal && project.flatMap { store.terminal.selectedTabs[$0.id] } != nil, terminalRequired: true) {
                 if let project { store.renamingTerminal = store.terminal.selectedTabs[project.id] }
             },

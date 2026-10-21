@@ -1,6 +1,17 @@
 import AppKit
 import SwiftUI
 import GhosttyKit
+import OctoCore
+
+/// Ghostty's split bindings, which the host lays out. Directory and font size are what Ghostty's
+/// `split-inherit-working-directory` and `window-inherit-font-size` pass on, when enabled.
+public enum GhosttySplitAction: Equatable {
+    case new(SplitDirection, directory: String?, fontSize: Float?)
+    case focus(SplitFocusTarget)
+    case resize(SplitDirection, points: Double)
+    case equalize
+    case toggleZoom
+}
 
 @MainActor public final class GhosttySession: ObservableObject {
     public let id = UUID()
@@ -9,6 +20,11 @@ import GhosttyKit
     @Published public private(set) var processExited = false
     public private(set) var isClosed = false
     public var onClose: ((Bool) -> Void)?
+    /// Without a handler, split bindings report that they are unavailable.
+    public var onSplitAction: ((GhosttySplitAction) -> Void)?
+    /// The surface became first responder, by click or by focus moving to it.
+    public var onFocus: (() -> Void)?
+    @Published public private(set) var splitAppearance = GhosttySplitAppearance.standard
     public var isSurfaceVisible = false {
         didSet { if oldValue != isSurfaceVisible { view?.synchronizeVisibility() } }
     }
@@ -48,7 +64,7 @@ import GhosttyKit
             config.scale_factor = Double(view.window?.backingScaleFactor ?? 1)
             config.font_size = options.fontSize
             config.wait_after_command = options.waitAfterCommand
-            config.context = GHOSTTY_SURFACE_CONTEXT_TAB
+            config.context = options.isSplit ? GHOSTTY_SURFACE_CONTEXT_SPLIT : GHOSTTY_SURFACE_CONTEXT_TAB
             var strings: [UnsafeMutablePointer<CChar>] = []
             defer { strings.forEach { free($0) } }
             func cString(_ text: String) throws -> UnsafePointer<CChar> {
@@ -114,6 +130,8 @@ import GhosttyKit
             let configuration = try GhosttyConfiguration(path: runtime.basePath, colors: colors)
             ghostty_surface_update_config(surface, configuration.handle)
             setDarkAppearance(appearanceIsDark)
+            let appearance = configuration.splitAppearance
+            if splitAppearance != appearance { splitAppearance = appearance }
             report(configuration.diagnostics.isEmpty ? nil : configuration.diagnostics.joined(separator: "\n"))
             return configuration.diagnostics.isEmpty
         } catch { report(error.localizedDescription); return false }
@@ -131,7 +149,7 @@ import GhosttyKit
             guard isSurfaceVisible, let window = view?.window, window.attachedSheet == nil else { return }
             let alert = NSAlert()
             alert.messageText = "Close this terminal?"
-            alert.informativeText = "Closing ends the shell and programs running in this tab."
+            alert.informativeText = "Closing ends the shell and the programs running in it."
             alert.addButton(withTitle: "Cancel")
             alert.addButton(withTitle: "Close Terminal")
             alert.beginSheetModal(for: window) { [weak self] response in
@@ -141,6 +159,20 @@ import GhosttyKit
         } else {
             markExited()
         }
+    }
+    func split(_ action: GhosttySplitAction) {
+        if let onSplitAction { onSplitAction(action) }
+        else { report("Splits aren't available in this terminal.") }
+    }
+    /// Runs a Ghostty binding action such as `new_split:right`, so host menus take the same path as keys.
+    @discardableResult public func perform(_ action: String) -> Bool {
+        guard !isClosed, let surface else { return false }
+        return action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+    }
+    /// Asks Ghostty to close this surface. It confirms first only when a program is still running.
+    public func requestHostClose() {
+        guard !isClosed else { return }
+        if let surface { ghostty_surface_request_close(surface) } else { markExited(); close() }
     }
     func markExited() {
         guard !processExited else { return }

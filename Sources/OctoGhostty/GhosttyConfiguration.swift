@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import GhosttyKit
 
 /// Octo's launch contract. A command is already quoted by the terminal launch boundary.
@@ -8,11 +8,13 @@ public struct GhosttyLaunchOptions {
     public var command: String?
     public var fontSize: Float
     public var waitAfterCommand: Bool
+    /// A pane split from another surface rather than a tab's first.
+    public var isSplit: Bool
 
     public init(directory: String, environment: [String: String] = [:], command: String? = nil,
-                fontSize: Float = 13, waitAfterCommand: Bool = true) {
+                fontSize: Float = 13, waitAfterCommand: Bool = true, isSplit: Bool = false) {
         self.directory = directory; self.environment = environment; self.command = command
-        self.fontSize = fontSize; self.waitAfterCommand = waitAfterCommand
+        self.fontSize = fontSize; self.waitAfterCommand = waitAfterCommand; self.isSplit = isSplit
     }
 }
 
@@ -49,6 +51,14 @@ public struct GhosttyColors: Equatable {
     }
 }
 
+public struct GhosttySplitAppearance: Equatable {
+    public var unfocusedOpacity: Double
+    public var unfocusedFill: NSColor?
+    /// nil uses the host's separator colour.
+    public var divider: NSColor?
+    public static let standard = GhosttySplitAppearance(unfocusedOpacity: 0.7, unfocusedFill: nil, divider: nil)
+}
+
 enum GhosttyFailure: Error, LocalizedError {
     case message(String)
     var errorDescription: String? { switch self { case let .message(text): return text } }
@@ -73,6 +83,25 @@ enum GhosttyFailure: Error, LocalizedError {
         } catch { ghostty_config_free(config); throw error }
     }
     deinit { ghostty_config_free(handle) }
+
+    /// Ghostty's own split styling: unfocused panes are covered by `fill` at `1 - unfocusedOpacity`.
+    var splitAppearance: GhosttySplitAppearance {
+        var opacity = 0.7
+        _ = get("unfocused-split-opacity", into: &opacity)
+        func color(_ key: String) -> NSColor? {
+            var value = ghostty_config_color_s()
+            guard get(key, into: &value) else { return nil }
+            return NSColor(srgbRed: CGFloat(value.r) / 255, green: CGFloat(value.g) / 255, blue: CGFloat(value.b) / 255, alpha: 1)
+        }
+        return GhosttySplitAppearance(unfocusedOpacity: min(1, max(0.15, opacity)),
+            unfocusedFill: color("unfocused-split-fill") ?? color("background"), divider: color("split-divider-color"))
+    }
+    /// Unset optional values report false and leave `value` alone.
+    private func get<T>(_ key: String, into value: inout T) -> Bool {
+        withUnsafeMutablePointer(to: &value) { pointer in
+            key.withCString { ghostty_config_get(handle, pointer, $0, UInt(key.utf8.count)) }
+        }
+    }
 
     private static func loadOverlay(_ contents: String, into config: ghostty_config_t) throws {
         var template = Array((NSTemporaryDirectory() + "octo-ghostty-config.XXXXXX").utf8CString)

@@ -1,5 +1,6 @@
 import AppKit
 import GhosttyKit
+import OctoCore
 
 /// Process-lifetime runtime. The renderer/PTY threads belong to Ghostty; Octo owns
 /// only the native host and drains the application mailbox on the main actor.
@@ -161,6 +162,25 @@ private enum GhosttyCallbacks {
              GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_CONFIG_CHANGE,
              GHOSTTY_ACTION_MOUSE_OVER_LINK:
             return true
+        case GHOSTTY_ACTION_NEW_SPLIT:
+            // Read now: the inherited directory is the shell's current one. Ghostty allocates
+            // this copy and exposes no way to free it; its own macOS app leaks it the same way.
+            let inherited = ghostty_surface_inherited_config(surface, GHOSTTY_SURFACE_CONTEXT_SPLIT)
+            let directory = inherited.working_directory.map { String(cString: $0) }
+            let fontSize = inherited.font_size > 0 ? inherited.font_size : nil
+            let split = GhosttySplitAction.new(SplitDirection(action.action.new_split), directory: directory, fontSize: fontSize)
+            context.enqueue { $0.split(split) }; return true
+        case GHOSTTY_ACTION_GOTO_SPLIT:
+            let target = SplitFocusTarget(action.action.goto_split)
+            context.enqueue { $0.split(.focus(target)) }; return true
+        case GHOSTTY_ACTION_RESIZE_SPLIT:
+            let resize = action.action.resize_split
+            let direction = SplitDirection(resize.direction), points = Double(resize.amount)
+            context.enqueue { $0.split(.resize(direction, points: points)) }; return true
+        case GHOSTTY_ACTION_EQUALIZE_SPLITS:
+            context.enqueue { $0.split(.equalize) }; return true
+        case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
+            context.enqueue { $0.split(.toggleZoom) }; return true
         case GHOSTTY_ACTION_MOUSE_SHAPE:
             let shape = action.action.mouse_shape
             context.enqueue { $0.view?.setCursorShape(shape) }; return true
@@ -168,8 +188,39 @@ private enum GhosttyCallbacks {
             let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
             context.enqueue { session in if session.isSurfaceVisible { NSCursor.setHiddenUntilMouseMoves(hidden) } }; return true
         default:
-            context.enqueue { $0.report("This Ghostty feature isn't available in Octo. Use Octo's workspace controls for tabs and windows.") }
+            context.enqueue { $0.report("This Ghostty feature isn't available in Octo. Use Octo's workspace controls for tabs and windows; splits work as in Ghostty.") }
             return false
+        }
+    }
+}
+
+private extension SplitDirection {
+    init(_ value: ghostty_action_split_direction_e) {
+        switch value {
+        case GHOSTTY_SPLIT_DIRECTION_LEFT: self = .left
+        case GHOSTTY_SPLIT_DIRECTION_UP: self = .up
+        case GHOSTTY_SPLIT_DIRECTION_DOWN: self = .down
+        default: self = .right
+        }
+    }
+    init(_ value: ghostty_action_resize_split_direction_e) {
+        switch value {
+        case GHOSTTY_RESIZE_SPLIT_LEFT: self = .left
+        case GHOSTTY_RESIZE_SPLIT_UP: self = .up
+        case GHOSTTY_RESIZE_SPLIT_DOWN: self = .down
+        default: self = .right
+        }
+    }
+}
+private extension SplitFocusTarget {
+    init(_ value: ghostty_action_goto_split_e) {
+        switch value {
+        case GHOSTTY_GOTO_SPLIT_PREVIOUS: self = .previous
+        case GHOSTTY_GOTO_SPLIT_LEFT: self = .left
+        case GHOSTTY_GOTO_SPLIT_RIGHT: self = .right
+        case GHOSTTY_GOTO_SPLIT_UP: self = .up
+        case GHOSTTY_GOTO_SPLIT_DOWN: self = .down
+        default: self = .next
         }
     }
 }

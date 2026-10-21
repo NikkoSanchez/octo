@@ -21,7 +21,7 @@ let package = Package(
         .target(name: "OctoReview", dependencies: ["OctoCore"]),
         // Scripts/build-ghostty.sh creates this from Vendor/Ghostty.lock.json.
         .binaryTarget(name: "GhosttyKit", path: ".build/ghostty/GhosttyKit.xcframework"),
-        .target(name: "OctoGhostty", dependencies: ["GhosttyKit"], resources: [.copy("Resources/Runtime")],
+        .target(name: "OctoGhostty", dependencies: ["OctoCore", "GhosttyKit"], resources: [.copy("Resources/Runtime")],
                 linkerSettings: [.linkedLibrary("c++"), .linkedFramework("Carbon")]),
         .target(name: "OctoTerminal", dependencies: ["OctoCore", "OctoGhostty"]),
         .executableTarget(name: "OctoApp", dependencies: ["OctoCore", "OctoGit", "OctoAgents", "OctoReview", "OctoTerminal"]),

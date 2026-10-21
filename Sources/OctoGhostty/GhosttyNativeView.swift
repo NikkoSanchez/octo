@@ -98,6 +98,7 @@ import GhosttyKit
     override func becomeFirstResponder() -> Bool {
         guard canReceiveInput, super.becomeFirstResponder() else { return false }
         if let surface { ghostty_surface_set_focus(surface, window?.isKeyWindow == true) }
+        session?.onFocus?()
         return true
     }
     override func resignFirstResponder() -> Bool {
@@ -276,11 +277,19 @@ import GhosttyKit
     @objc func copy(_ sender: Any?) { binding("copy_to_clipboard") }
     @objc func paste(_ sender: Any?) { binding("paste_from_clipboard") }
     override func selectAll(_ sender: Any?) { binding("select_all") }
+    @objc func splitRight(_ sender: Any?) { binding("new_split:right") }
+    @objc func splitDown(_ sender: Any?) { binding("new_split:down") }
     override func menu(for event: NSEvent) -> NSMenu? {
         guard canReceiveInput else { return nil }
         let menu = NSMenu()
         for (title, action) in [("Copy", #selector(copy(_:))), ("Paste", #selector(paste(_:))), ("Select All", #selector(selectAll(_:)))] {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: ""); item.target = self
+        }
+        if session?.onSplitAction != nil {
+            menu.addItem(.separator())
+            for (title, action) in [("Split Right", #selector(splitRight(_:))), ("Split Down", #selector(splitDown(_:)))] {
+                let item = menu.addItem(withTitle: title, action: action, keyEquivalent: ""); item.target = self
+            }
         }
         return menu
     }

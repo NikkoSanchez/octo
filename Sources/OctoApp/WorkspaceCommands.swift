@@ -13,9 +13,11 @@ struct AppCommand: Identifiable {
     var enabled = true
     var terminalAllowed = true
     var terminalRequired = false
+    /// Shown for a key another component owns, such as a Ghostty binding; Octo does not route it.
+    var hint: String? = nil
     let action: () -> Void
     var shortcut: String {
-        guard let key else { return "" }
+        guard let key else { return hint ?? "" }
         return (modifiers.contains(.control) ? "⌃" : "") + (modifiers.contains(.option) ? "⌥" : "") + (modifiers.contains(.shift) ? "⇧" : "") + (modifiers.contains(.command) ? "⌘" : "") + (key == "\r" ? "↩" : key.uppercased())
     }
     func isAvailable(inTerminal: Bool) -> Bool { enabled && (!inTerminal || terminalAllowed) && (inTerminal || !terminalRequired) }

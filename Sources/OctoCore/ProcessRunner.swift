@@ -36,7 +36,9 @@ private final class ProcessCapture: @unchecked Sendable {
     var output = Data(), error = Data()
 }
 public enum ProcessRunner {
+    /// `environment` adds to or replaces the inherited variables.
     public static func run(_ executable: URL, arguments: [String], directory: URL, input: Data? = nil,
+                           environment: [String: String] = [:],
                            timeout: TimeInterval = 30, outputLimit: Int = 8_000_000) async throws -> ProcessResult {
         guard (input?.count ?? 0) <= 36 * 1_024 * 1_024 else { throw ProcessFailure.oversized }
         let cancellation = ProcessCancellation(), capture = ProcessCapture()
@@ -45,7 +47,7 @@ public enum ProcessRunner {
             return try await withCheckedThrowingContinuation { continuation in
                 do {
                     let child = try ManagedSubprocess.launch(executable: executable, arguments: arguments, directory: directory,
-                        environment: ProcessInfo.processInfo.environment.merging(["PATH": Executables.searchPath, "GIT_TERMINAL_PROMPT": "0"]) { _, new in new },
+                        environment: ProcessInfo.processInfo.environment.merging(["PATH": Executables.searchPath, "GIT_TERMINAL_PROMPT": "0"].merging(environment) { _, new in new }) { _, new in new },
                         timeout: timeout, outputLimit: max(0, outputLimit),
                         onOutput: { capture.output.append($0) }, onError: { capture.error.append($0) },
                         onExit: { status, failure in

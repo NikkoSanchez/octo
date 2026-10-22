@@ -7,9 +7,23 @@ public struct ChangedFile: Identifiable, Equatable, Sendable {
     public var path: String
     public var indexStatus: Character
     public var worktreeStatus: Character
+    /// A rename or copy's source path, which unstaging restores alongside `path`.
+    public var originalPath: String?
+    public init(path: String, indexStatus: Character, worktreeStatus: Character, originalPath: String? = nil) {
+        self.path = path; self.indexStatus = indexStatus; self.worktreeStatus = worktreeStatus; self.originalPath = originalPath
+    }
     public var isUntracked: Bool { indexStatus == "?" }
     public var hasStaged: Bool { indexStatus != " " && indexStatus != "?" }
     public var hasWorking: Bool { worktreeStatus != " " }
+    /// Hunks can be staged or unstaged only for an ordinary modification in that scope; additions,
+    /// deletions, renames and untracked files move as whole files.
+    public func supportsHunkStaging(_ scope: DiffScope) -> Bool {
+        switch scope {
+        case .working: return indexStatus != "?" && worktreeStatus == "M"
+        case .staged: return indexStatus == "M"
+        case .file: return false
+        }
+    }
 }
 
 public struct DiffStat: Equatable, Sendable {
@@ -37,14 +51,21 @@ public actor GitService {
     /// `core.fsmonitor` names a command run on each index refresh. Listing files does not need it,
     /// so a repository's config cannot run one there; status keeps it for large repositories.
     nonisolated static let listingConfiguration = ["-c", "core.fsmonitor=false"]
-    private func git(_ arguments: [String], root: String) async throws -> ProcessResult {
+    func git(_ arguments: [String], root: String, input: Data? = nil, timeout: TimeInterval = 30) async throws -> ProcessResult {
         guard let executable = Executables.find("git") else { throw ProcessFailure.missing("git") }
-        return try await ProcessRunner.run(executable, arguments: Self.invocation(arguments), directory: URL(fileURLWithPath: root))
+        return try await ProcessRunner.run(executable, arguments: Self.invocation(arguments), directory: URL(fileURLWithPath: root), input: input, timeout: timeout)
     }
-    private func text(_ arguments: [String], root: String) async throws -> String {
-        let result = try await git(arguments, root: root)
-        guard result.status == 0 else { throw ProcessFailure.exited(String(decoding: result.error, as: UTF8.self)) }
+    func text(_ arguments: [String], root: String, input: Data? = nil, timeout: TimeInterval = 30) async throws -> String {
+        let result = try await git(arguments, root: root, input: input, timeout: timeout)
+        guard result.status == 0 else { throw ProcessFailure.exited(Self.message(result)) }
         return String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .newlines)
+    }
+    /// Git reports some refusals, such as "nothing to commit", on standard output.
+    nonisolated static func message(_ result: ProcessResult) -> String {
+        let error = String(decoding: result.error, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !error.isEmpty { return error }
+        let output = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? "Git exited with status \(result.status)." : output
     }
     public func repositoryRoot(_ path: String) async throws -> String { try await text(["rev-parse", "--show-toplevel"], root: path) }
     public func branch(root: String) async -> String { (try? await text(["branch", "--show-current"], root: root)).flatMap { $0.isEmpty ? nil : $0 } ?? "Detached HEAD" }
@@ -64,6 +85,10 @@ public actor GitService {
     /// Lines added and removed in tracked files relative to HEAD (staged and unstaged).
     public func diffStat(root: String) async throws -> DiffStat {
         Self.parseNumstat(try await text(["diff", "--no-ext-diff", "--no-textconv", "--numstat", "HEAD"], root: root))
+    }
+    /// Lines changed in one scope: the index against HEAD, or the working tree against the index.
+    public func diffStat(root: String, scope: DiffScope) async throws -> DiffStat {
+        Self.parseNumstat(try await text(["diff", "--no-ext-diff", "--no-textconv", "--numstat"] + (scope == .staged ? ["--cached"] : []), root: root))
     }
     public nonisolated static func parseNumstat(_ output: String) -> DiffStat {
         var stat = DiffStat()
@@ -92,8 +117,12 @@ public actor GitService {
         while i < records.count {
             let chars = Array(records[i]); i += 1
             guard chars.count >= 4 else { continue }
-            result.append(ChangedFile(path: String(chars.dropFirst(3)), indexStatus: chars[0], worktreeStatus: chars[1]))
-            if chars[0] == "R" || chars[0] == "C" || chars[1] == "R" || chars[1] == "C" { i += 1 }
+            var file = ChangedFile(path: String(chars.dropFirst(3)), indexStatus: chars[0], worktreeStatus: chars[1])
+            if chars[0] == "R" || chars[0] == "C" || chars[1] == "R" || chars[1] == "C" {
+                if i < records.count { file.originalPath = String(records[i]) }
+                i += 1
+            }
+            result.append(file)
         }
         return result.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
@@ -132,7 +161,7 @@ public actor GitService {
             if scope == .staged { args.append("--cached") }
             args += ["--", file.path]
             let result = try await git(args, root: root)
-            guard result.status == 0 else { throw ProcessFailure.exited(String(decoding: result.error, as: UTF8.self)) }
+            guard result.status == 0 else { throw ProcessFailure.exited(Self.message(result)) }
             if result.output.count > 2_000_000 { notice = "Diff exceeds the 2 MB preview limit. Open the file in LazyVim." }
             else {
                 let patch = String(decoding: result.output, as: UTF8.self)

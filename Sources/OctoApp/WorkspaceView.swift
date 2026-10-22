@@ -10,6 +10,8 @@ import OctoTerminal
 struct WorkspaceView: View {
     @ObservedObject var store: AppStore
     @StateObject private var review: ReviewModel
+    /// Held without observing: only the Git views redraw for its changes.
+    @State private var git = GitWorkflow()
     @State private var editorWindowID = UUID()
     init(store: AppStore) {
         self.store = store
@@ -139,6 +141,8 @@ struct WorkspaceView: View {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .task(id: reviewKey) { await refresh() }
+        // A branch switch or commit in the terminal changes Git without activating the app.
+        .onAppear { git.onExternalChange = { Task { await refresh() } } }
         .onChange(of: phase) { _, phase in if phase == .active { Task { await refresh() } } }
         .onChange(of: store.running) { old, new in if new.count < old.count { Task { await refresh() } } }
     }
@@ -195,7 +199,12 @@ struct WorkspaceView: View {
     private func refresh() async {
         guard let project = store.project, store.isProjectChat else { return }
         review.adopt(project.panelTabs)
-        await review.refresh(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
+        let root = store.thread?.workingDirectory ?? project.rootPath
+        await review.refresh(projectID: project.id, root: root)
+        await git.load(.init(projectID: project.id, root: root))
+    }
+    private func gitTarget(_ project: WorkspaceProject) -> GitWorkflow.Target {
+        .init(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath)
     }
     private func openMarkdownFile(_ url: URL) {
         guard let project = store.project else { return }
@@ -378,42 +387,74 @@ struct WorkspaceView: View {
                 .disabled(tabs.tabs.count < 2)
         }
     }
-    private func reviewControls(tabs: PanelTabs, project: WorkspaceProject) -> some View {
-        HStack(spacing: 8) {
-            if tabs.isBrowsingFiles {
-                Button { store.updatePanelTabs(project.id) { $0.showsFileTree.toggle() } } label: { Image(systemName: "sidebar.left") }
-                    .buttonStyle(CapsuleToolbarButtonStyle(active: tabs.showsFileTree))
-                    .help(tabs.showsFileTree ? "Hide file tree" : "Show file tree").accessibilityLabel(tabs.showsFileTree ? "Hide file tree" : "Show file tree")
-            }
-            if !review.browsingFiles {
-                CapsulePicker(label: "Diff scope", selection: $review.scope, options: [(.working, "Working"), (.staged, "Staged")]).help("Diff scope")
-                CapsulePicker(label: "Diff layout", selection: $review.diffLayout, options: [(.stacked, "Stacked"), (.sideBySide, "Side by Side")]).help("Diff layout")
-            }
-            Spacer(minLength: 0)
-            ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
-            if review.browsingFiles {
+    @ViewBuilder private func reviewControls(tabs: PanelTabs, project: WorkspaceProject) -> some View {
+        if review.browsingFiles {
+            HStack(spacing: 8) {
+                if tabs.isBrowsingFiles {
+                    Button { store.updatePanelTabs(project.id) { $0.showsFileTree.toggle() } } label: { Image(systemName: "sidebar.left") }
+                        .buttonStyle(CapsuleToolbarButtonStyle(active: tabs.showsFileTree))
+                        .help(tabs.showsFileTree ? "Hide file tree" : "Show file tree").accessibilityLabel(tabs.showsFileTree ? "Hide file tree" : "Show file tree")
+                }
+                Spacer(minLength: 0)
+                ProgressView().controlSize(.small).opacity(review.loading || review.loadingSnapshot ? 1 : 0).accessibilityHidden(!review.loading && !review.loadingSnapshot)
                 Button { requestFileAction(.create, path: "") } label: { Image(systemName: "doc.badge.plus") }
                     .buttonStyle(CapsuleToolbarButtonStyle()).help("New file").accessibilityLabel("New file")
+                Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(CapsuleToolbarButtonStyle()).help("Refresh changes (⇧⌘R)").accessibilityLabel("Refresh changes")
             }
-            Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(CapsuleToolbarButtonStyle()).help("Refresh changes (⇧⌘R)").accessibilityLabel("Refresh changes")
-        }
-        .onChange(of: review.scope) { _, _ in
-            if !review.browsingFiles, let file = review.files.first(where: { $0.path == review.selectedPath }) { Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
+        } else {
+            // Design A: branch, Push and Create PR head the Changes tab; the file groups replace the scope picker.
+            GitHeader(git: git, review: review, target: gitTarget(project), branch: review.branch, files: review.files,
+                      loading: review.loading || review.loadingSnapshot, refresh: { Task { await refresh() } })
+                .onChange(of: review.branch) { _, _ in Task { await git.load(gitTarget(project)) } }
         }
     }
-    /// Changed files sit above the diff as conversation rows (38 pt plus 6 pt of row insets).
-    private var changesListHeight: CGFloat { CGFloat(review.files.count) * 44 + 10 }
+    /// Staged and Unstaged headings, each group's rows (a file can be in both), or one empty-state row.
+    private var changesListHeight: CGFloat {
+        let staged = review.files.filter(\.hasStaged).count, unstaged = review.files.filter(\.hasWorking).count
+        return 2 * 30 + CGFloat(max(1, staged) + max(1, unstaged)) * 44 + 10
+    }
+    /// The selected file's actions in the diff header: discard (unstaged only) and stage or unstage.
+    @ViewBuilder private func fileActions(_ snapshot: ReviewSnapshot, project: WorkspaceProject) -> some View {
+        if !review.browsingFiles, let file = review.files.first(where: { $0.path == snapshot.path }) {
+            let target = gitTarget(project)
+            if snapshot.scope == .working {
+                Button { git.discardRequest = [file] } label: { Image(systemName: "arrow.uturn.backward") }
+                    .buttonStyle(CapsuleToolbarButtonStyle()).help("Discard unstaged changes to \(snapshot.path)…").accessibilityLabel("Discard unstaged changes")
+            }
+            Button(snapshot.scope == .staged ? "Unstage File" : "Stage File") {
+                Task {
+                    if snapshot.scope == .staged { await git.unstage([file], in: target, review: review) }
+                    else { await git.stage([file], in: target, review: review) }
+                }
+            }.buttonStyle(CapsuleButtonStyle()).help(snapshot.scope == .staged ? "Move this file's staged changes back to Unstaged" : "Stage this file for the next commit")
+        }
+    }
+    private func hunkAction(_ snapshot: ReviewSnapshot, project: WorkspaceProject) -> HunkAction? {
+        guard !review.browsingFiles, snapshot.notice == nil,
+              let file = review.files.first(where: { $0.path == snapshot.path }), file.supportsHunkStaging(snapshot.scope) else { return nil }
+        let target = gitTarget(project), git = git, review = review
+        return HunkAction(title: snapshot.scope == .staged ? "Unstage Hunk" : "Stage Hunk") { id in
+            Task { await git.applyHunk(snapshot, hunk: id, in: target, review: review) }
+        }
+    }
     private func reviewContent(_ project: WorkspaceProject, tabs: PanelTabs) -> some View {
         VStack(spacing: 0) {
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
                 // Files keeps its tree beside the editor; Changes stacks its file rows above the diff.
                 ResizableColumns(minLeading: 150, maxLeading: 260, minTrailing: 270, initialFraction: 0.3, leadingVisible: !review.browsingFiles || tabs.showsFileTree,
                                  stackedLeadingHeight: review.browsingFiles ? nil : changesListHeight, opaqueTrailing: false) {
-                    ReviewFileLists(review: review, projectID: project.id, action: requestFileAction,
+                    ReviewFileLists(review: review, git: git, projectID: project.id, action: requestFileAction,
                                     openFile: { path, pinned in showPanel(focus: true) { $0.openFile(path, pinned: pinned) } },
-                                    selectChange: { file in
-                                        Task { await review.select(file, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
+                                    selectChange: { file, scope in
+                                        Task { await review.select(file, scope: scope, projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) }
+                                    },
+                                    stage: { files, scope in
+                                        let target = gitTarget(project)
+                                        Task {
+                                            if scope == .staged { await git.unstage(files, in: target, review: review) }
+                                            else { await git.stage(files, in: target, review: review) }
+                                        }
                                     })
                         .equatable()
                 } trailing: {
@@ -423,11 +464,20 @@ struct WorkspaceView: View {
                             HStack(spacing: 8) {
                                 Text(snapshot.path).font(.system(size: 12.5, weight: .semibold)).lineLimit(1).truncationMode(.head).help(snapshot.path)
                                 Spacer(minLength: 8)
+                                fileActions(snapshot, project: project)
                                 let target = OpenTarget.preferred(openTarget)
                                 Button { store.open(target, snapshot: snapshot, selection: review.selection) } label: {
                                     Text("Open in \(target.title)")
                                 }.buttonStyle(CapsuleButtonStyle()).help(target.isTerminal ? "Open this checkout in \(target.title) (⇧⌘E)" : "Open \(snapshot.path) in \(target.title) (⇧⌘E)")
                             }.padding(.leading, 16).padding(.trailing, 12).padding(.top, 9).padding(.bottom, 6)
+                            if !review.browsingFiles {
+                                HStack(spacing: 8) {
+                                    Text(snapshot.scope == .staged ? "HEAD → Index · Staged" : "Index → Working tree · Unstaged")
+                                        .font(.system(size: 11)).foregroundStyle(theme.secondary).lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    CapsulePicker(label: "Diff layout", selection: $review.diffLayout, options: [(.stacked, "Stacked"), (.sideBySide, "Side by Side")]).help("Diff layout")
+                                }.padding(.leading, 16).padding(.trailing, 12).padding(.bottom, 6)
+                            }
                             if review.browsingFiles, let editor = review.editor {
                                 InlineFilePane(session: editor, windowID: editorWindowID, theme: store.theme, focusRequest: reviewFocus,
                                     revealLine: review.revealLine, revealRequest: review.revealRequest,
@@ -438,13 +488,13 @@ struct WorkspaceView: View {
                                     .id(editor.id)
                             } else if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
                             else if !review.browsingFiles && review.diffLayout == .sideBySide {
-                                SideBySideDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus,
+                                SideBySideDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, hunkAction: hunkAction(snapshot, project: project),
                                     onSelection: { if !review.loadingSnapshot && review.diffLayout == .sideBySide { review.selection = $0 } },
                                     onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
                                     .keyboardFocusRing()
                             }
                             else {
-                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, onSelection: { if !review.loadingSnapshot && (review.browsingFiles || review.diffLayout == .stacked) { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                                NativeDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, revealLine: review.revealLine, revealRequest: review.revealRequest, hunkAction: hunkAction(snapshot, project: project), onSelection: { if !review.loadingSnapshot && (review.browsingFiles || review.diffLayout == .stacked) { review.selection = $0 } }, onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
                                     .keyboardFocusRing()
                             }
                             Rectangle().fill(theme.hairline).frame(height: 0.5)
@@ -465,6 +515,10 @@ struct WorkspaceView: View {
                         .allowsHitTesting(!review.loadingSnapshot)
                         .overlay { if review.loadingSnapshot { theme.background.opacity(0.12).accessibilityLabel("Loading file") } }
                 }
+            if !review.browsingFiles {
+                CommitComposer(git: git, review: review, target: gitTarget(project),
+                               stagedCount: review.files.filter(\.hasStaged).count, unstagedCount: review.files.filter(\.hasWorking).count)
+            }
         }
     }
 }
@@ -2049,7 +2103,9 @@ extension WorkspaceView {
             .init(id: "editor", title: "Open Selected File in \(OpenTarget.preferred(openTarget).title)", group: "Review", key: "e", modifiers: [.command, .shift], enabled: hasProject && review.snapshot?.notice == nil && review.snapshot != nil && !review.loadingSnapshot) {
                 if let snapshot = review.snapshot { store.open(OpenTarget.preferred(openTarget), snapshot: snapshot, selection: review.selection) }
             },
-            .init(id: "scope", title: "Toggle Working / Staged Changes", group: "Review", enabled: hasProject && !review.browsingFiles) { review.scope = review.scope == .working ? .staged : .working },
+            .init(id: "scope", title: "Toggle Working / Staged Changes", group: "Review", enabled: hasProject && !review.browsingFiles) {
+                if let project { Task { await review.toggleScope(projectID: project.id, root: store.thread?.workingDirectory ?? project.rootPath) } }
+            },
             .init(id: "newTerminal", title: "New Terminal Tab", group: "Terminal", key: "t", enabled: hasProject) {
                 if let project { store.terminal.newTab(projectID: project.id, directory: project.rootPath); store.showingTerminal = true }
             },
@@ -2272,10 +2328,13 @@ private struct PanelTabChip<Label: View>: View {
     }
 }
 
-/// A changed file as a conversation-style row: status circle, name over folder, and line counts.
+/// A changed file as a conversation-style row: status circle, name over folder, line counts in
+/// its group's scope, and a visible stage (+) or unstage (−) control.
 private struct ChangedFileRow: View {
     let file: ChangedFile
+    let scope: DiffScope
     let lines: DiffStat.Lines?
+    let toggle: () -> Void
     @Environment(\.octoTheme) private var theme
     @Environment(\.backgroundProminence) private var prominence
     var body: some View {
@@ -2302,12 +2361,24 @@ private struct ChangedFileRow: View {
                 }.font(.system(size: 11).monospacedDigit())
                     .accessibilityLabel("\(lines.additions) lines added, \(lines.deletions) removed")
             }
+            let staged = scope == .staged
+            Button(action: toggle) { Image(systemName: staged ? "minus" : "plus").font(.system(size: 11, weight: .semibold)) }
+                .buttonStyle(CapsuleToolbarButtonStyle()).foregroundStyle(onSelection ? .white : theme.secondary)
+                .help(staged ? "Unstage \(name)" : "Stage \(name)").accessibilityLabel(staged ? "Unstage \(name)" : "Stage \(name)")
         }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
     }
     private var status: (letter: String, label: String, color: Color) {
+        if scope == .staged {
+            switch file.indexStatus {
+            case "A": return ("A", "Staged · Added", theme.green)
+            case "D": return ("D", "Staged · Deleted", theme.red)
+            case "R": return ("R", "Staged · Renamed from \(file.originalPath ?? "another path")", theme.blue)
+            case "C": return ("C", "Staged · Copied", theme.blue)
+            default: return ("M", "Staged · Modified", theme.blue)
+            }
+        }
         if file.isUntracked { return ("U", "Untracked", theme.green) }
-        if file.indexStatus == "D" || file.worktreeStatus == "D" { return ("D", "Deleted", theme.red) }
-        if file.hasStaged { return ("S", "Staged", theme.blue) }
+        if file.worktreeStatus == "D" { return ("D", "Deleted", theme.red) }
         return ("M", "Modified", theme.yellow)
     }
 }
@@ -2317,12 +2388,17 @@ private struct ChangedFileRow: View {
 /// publication, even with the panel hidden. They now update only from ReviewModel.
 private struct ReviewFileLists: View, Equatable {
     @ObservedObject var review: ReviewModel
+    let git: GitWorkflow
     let projectID: UUID
     let action: (FileAction.Kind, String) -> Void
     let openFile: (_ path: String, _ pinned: Bool) -> Void
-    let selectChange: (ChangedFile) -> Void
+    let selectChange: (ChangedFile, DiffScope) -> Void
+    /// Stages files listed under Unstaged, or unstages files listed under Staged.
+    let stage: ([ChangedFile], DiffScope) -> Void
     @Environment(\.octoTheme) private var theme
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.review === rhs.review && lhs.projectID == rhs.projectID }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.review === rhs.review && lhs.git === rhs.git && lhs.projectID == rhs.projectID }
+    /// Rows are tagged by scope and path, since a partly staged file has a row in each group.
+    private static func tag(_ scope: DiffScope, _ path: String) -> String { scope.rawValue + "\u{0}" + path }
     @ViewBuilder var body: some View {
         // Only the showing list is mounted: a transparent one stayed in the Tab order, so Tab from
         // the composer stopped on a list nobody could see. Folder expansion lives in the model.
@@ -2336,15 +2412,49 @@ private struct ReviewFileLists: View, Equatable {
                     }
             }.keyboardFocusRing()
         } else {
-            List(review.files, selection: Binding(get: { review.selectedPath }, set: { path in
-                if let file = review.files.first(where: { $0.path == path }) { selectChange(file) }
-            })) { file in
-                ChangedFileRow(file: file, lines: review.diffStat?.files[file.path])
-                    .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 8))
-                    .contentShape(Rectangle()).hoverFeedback().help(file.path).tag(file.path)
-                    .contextMenu { if file.worktreeStatus != "D" && file.indexStatus != "D" { Button("Open File") { openFile(file.path, true) } } }
+            let staged = review.files.filter(\.hasStaged), unstaged = review.files.filter(\.hasWorking)
+            List(selection: Binding(get: { review.selectedPath.map { Self.tag(review.scope, $0) } }, set: { tag in
+                guard let tag, let separator = tag.firstIndex(of: "\u{0}"), let scope = DiffScope(rawValue: String(tag[..<separator])) else { return }
+                let path = String(tag[tag.index(after: separator)...])
+                if let file = review.files.first(where: { $0.path == path }) { selectChange(file, scope) }
+            })) {
+                Section {
+                    rows(staged, scope: .staged, empty: "Stage a file or hunk to include it in the next commit.")
+                } header: {
+                    ChangesGroupHeader(title: "Staged", count: staged.count, actionTitle: "Unstage All") { stage(staged, .staged) }
+                }
+                Section {
+                    rows(unstaged, scope: .working, empty: "No unstaged changes.")
+                } header: {
+                    ChangesGroupHeader(title: "Unstaged", count: unstaged.count, actionTitle: "Stage All") { stage(unstaged, .working) }
+                }
             }.listStyle(.plain).scrollContentBackground(.hidden)
                 .keyboardFocusRing()
+        }
+    }
+    @ViewBuilder private func rows(_ files: [ChangedFile], scope: DiffScope, empty: String) -> some View {
+        if files.isEmpty {
+            Text(empty).font(.system(size: 11.5)).foregroundStyle(theme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 8))
+        }
+        // IDs include the scope: a partly staged file's two rows must not share an identity.
+        ForEach(files.map { (id: Self.tag(scope, $0.path), file: $0) }, id: \.id) { row in
+            let file = row.file
+            ChangedFileRow(file: file, scope: scope, lines: (scope == .staged ? review.stagedStat : review.workingStat)?.files[file.path],
+                           toggle: { stage([file], scope) })
+                .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 8))
+                .contentShape(Rectangle()).hoverFeedback().help(file.path).tag(Self.tag(scope, file.path))
+                .contextMenu {
+                    Button(scope == .staged ? "Unstage" : "Stage") { stage([file], scope) }
+                    if scope == .working {
+                        Button("Discard Changes…", role: .destructive) { git.discardRequest = [file] }
+                    }
+                    if file.worktreeStatus != "D" && file.indexStatus != "D" {
+                        Divider()
+                        Button("Open File") { openFile(file.path, true) }
+                    }
+                }
         }
     }
 }

@@ -2,6 +2,17 @@ import AppKit
 import SwiftUI
 import OctoCore
 
+/// An index action shown on every `@@` hunk header row, such as Stage Hunk. `perform` receives the
+/// header's `DiffLine.id` in the snapshot the view is showing.
+public struct HunkAction {
+    public var title: String
+    public var enabled: Bool
+    public var perform: (Int) -> Void
+    public init(title: String, enabled: Bool = true, perform: @escaping (Int) -> Void) {
+        self.title = title; self.enabled = enabled; self.perform = perform
+    }
+}
+
 /// One native text system owns selection and scrolling. SwiftUI never renders a row per line.
 public struct NativeDiffView: NSViewRepresentable {
     public var theme: AppTheme
@@ -11,9 +22,10 @@ public struct NativeDiffView: NSViewRepresentable {
     public var snapshot: ReviewSnapshot
     public var onSelection: (CodeAttachment?) -> Void
     public var onAskAgent: (CodeAttachment) -> Void
-    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, revealLine: Int? = nil, revealRequest: Int = 0, onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
+    public var hunkAction: HunkAction?
+    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, revealLine: Int? = nil, revealRequest: Int = 0, hunkAction: HunkAction? = nil, onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
         self.theme = theme; self.focusRequest = focusRequest; self.snapshot = snapshot; self.onSelection = onSelection; self.onAskAgent = onAskAgent
-        self.revealLine = revealLine; self.revealRequest = revealRequest
+        self.revealLine = revealLine; self.revealRequest = revealRequest; self.hunkAction = hunkAction
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
     public func makeNSView(context: Context) -> NSScrollView {
@@ -46,6 +58,7 @@ public struct NativeDiffView: NSViewRepresentable {
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator; coordinator.parent = self
         guard let text = coordinator.textView else { return }
+        text.hunkAction = hunkAction
         coordinator.updatingView = true
         defer { coordinator.updatingView = false; coordinator.scheduleSelection() }
         if coordinator.focusRequest != focusRequest {
@@ -70,6 +83,8 @@ public struct NativeDiffView: NSViewRepresentable {
         text.textStorage?.setAttributedString(Self.render(document, theme: theme))
         if changedSnapshot { text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollToBeginningOfDocument(nil) }
         else { text.setSelectedRange(selection) }
+        // Header rows have frames once TextKit lays out the new text.
+        DispatchQueue.main.async { [weak text] in text?.layoutHunkButtons() }
     }
     static func applyTheme(_ theme: AppTheme, to text: ReviewTextView) {
         text.theme = theme
@@ -213,8 +228,9 @@ final class ReviewTextView: NSTextView {
 
     func observeScrolling() {
         guard let clip = enclosingScrollView?.contentView else { return }
-        clip.postsBoundsChangedNotifications = true
+        clip.postsBoundsChangedNotifications = true; clip.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged), name: NSView.boundsDidChangeNotification, object: clip)
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportResized), name: NSView.frameDidChangeNotification, object: clip)
     }
     deinit { NotificationCenter.default.removeObserver(self) }
 
@@ -251,7 +267,72 @@ final class ReviewTextView: NSTextView {
         hoverPoint = convert(event.locationInWindow, from: nil)
         updateHover()
     }
-    @objc private func viewportChanged() { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true }
+    @objc private func viewportChanged() { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true; layoutHunkButtons() }
+    @objc private func viewportResized() { layoutHunkButtons() }
+
+    // MARK: Hunk actions
+
+    var hunkAction: HunkAction? {
+        didSet {
+            guard oldValue?.title != hunkAction?.title || oldValue?.enabled != hunkAction?.enabled else { return }
+            layoutHunkButtons()
+        }
+    }
+    private var hunkButtons: [NSButton] = []
+    /// Places a button at the trailing edge of each visible `@@` row, so it stays in view while
+    /// long lines scroll horizontally. Only rows in the viewport are resolved.
+    func layoutHunkButtons() {
+        var used = 0
+        defer { for button in hunkButtons[used...] { button.isHidden = true } }
+        guard let action = hunkAction, let document = reviewDocument, sourceDocument == nil,
+              let layout = textLayoutManager, let content = layout.textContentManager else { return }
+        let visible = visibleRect, origin = textContainerOrigin
+        guard !visible.isEmpty else { return }
+        // The laid-out rows at the viewport's edges bound the search; past the laid-out text, the document's ends do.
+        func offset(atY y: CGFloat) -> Int? {
+            layout.textLayoutFragment(for: CGPoint(x: 0, y: y - origin.y))
+                .map { content.offset(from: content.documentRange.location, to: $0.rangeInElement.location) }
+        }
+        let top = offset(atY: visible.minY) ?? 0, bottom = offset(atY: visible.maxY) ?? Int.max
+        for segment in document.segments where segment.line.kind == .header && segment.line.text.hasPrefix("@@") {
+            if NSMaxRange(segment.displayRange) <= top { continue }
+            if segment.displayRange.location > bottom { break }
+            guard let location = content.location(content.documentRange.location, offsetBy: segment.displayRange.location),
+                  let fragment = layout.textLayoutFragment(for: location) else { continue }
+            let row = fragment.layoutFragmentFrame.offsetBy(dx: origin.x, dy: origin.y)
+            guard row.maxY > visible.minY, row.minY < visible.maxY else { continue }
+            if used == hunkButtons.count { hunkButtons.append(makeHunkButton()) }
+            let button = hunkButtons[used]; used += 1
+            button.title = action.title; button.isEnabled = action.enabled; button.tag = segment.line.id
+            // Drawn on the theme's code background, which can differ from the window's appearance.
+            button.appearance = theme.isDark.map { NSAppearance(named: $0 ? .darkAqua : .aqua) } ?? nil
+            button.toolTip = "\(action.title): \(segment.line.text)"
+            button.setAccessibilityLabel("\(action.title) \(segment.line.text)")
+            button.sizeToFit()
+            let size = button.frame.size
+            button.frame = NSRect(x: max(visible.minX, visible.maxX - size.width - 12), y: row.minY + (row.height - size.height) / 2,
+                                  width: size.width, height: size.height)
+            button.isHidden = false
+        }
+    }
+    private func makeHunkButton() -> NSButton {
+        let button = NSButton(title: "", target: self, action: #selector(performHunkButton(_:)))
+        button.bezelStyle = .inline; button.controlSize = .small
+        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        addSubview(button)
+        return button
+    }
+    @objc private func performHunkButton(_ sender: Any?) {
+        guard let tag = (sender as? NSButton)?.tag ?? (sender as? NSMenuItem)?.tag else { return }
+        hunkAction?.perform(tag)
+    }
+    /// The `@@` header of the hunk containing a point, for the contextual menu.
+    private func hunkID(at point: NSPoint) -> Int? {
+        guard let document = reviewDocument else { return nil }
+        let offset = characterIndexForInsertion(at: CGPoint(x: textContainerOrigin.x + 6, y: point.y))
+        guard let index = document.segments.lastIndex(where: { $0.displayRange.location <= offset }) else { return nil }
+        return document.segments[...index].last(where: { $0.line.kind == .header && $0.line.text.hasPrefix("@@") })?.line.id
+    }
 
     func updateHover() {
         guard let point = hoverPoint,
@@ -296,6 +377,11 @@ final class ReviewTextView: NSTextView {
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
+        if let action = hunkAction, action.enabled, sourceDocument == nil, let id = hunkID(at: convert(event.locationInWindow, from: nil)) {
+            let item = NSMenuItem(title: action.title, action: #selector(performHunkButton(_:)), keyEquivalent: "")
+            item.target = self; item.tag = id
+            menu.insertItem(.separator(), at: 0); menu.insertItem(item, at: 0)
+        }
         if selectedRange().length > 0 {
             let item = NSMenuItem(title: "Ask Agent About Selection", action: #selector(ask), keyEquivalent: "")
             item.target = self; menu.insertItem(.separator(), at: 0); menu.insertItem(item, at: 0)

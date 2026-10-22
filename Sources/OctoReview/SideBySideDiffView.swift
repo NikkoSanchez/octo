@@ -9,10 +9,12 @@ public struct SideBySideDiffView: NSViewRepresentable {
     public var focusRequest: Int
     public var onSelection: (CodeAttachment?) -> Void
     public var onAskAgent: (CodeAttachment) -> Void
+    /// Shown on the After pane's hunk headers.
+    public var hunkAction: HunkAction?
 
-    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0,
+    public init(snapshot: ReviewSnapshot, theme: AppTheme = .system, focusRequest: Int = 0, hunkAction: HunkAction? = nil,
                 onSelection: @escaping (CodeAttachment?) -> Void, onAskAgent: @escaping (CodeAttachment) -> Void) {
-        self.snapshot = snapshot; self.theme = theme; self.focusRequest = focusRequest
+        self.snapshot = snapshot; self.theme = theme; self.focusRequest = focusRequest; self.hunkAction = hunkAction
         self.onSelection = onSelection; self.onAskAgent = onAskAgent
     }
     public func makeNSView(context: Context) -> SideBySideReviewView {
@@ -22,6 +24,7 @@ public struct SideBySideDiffView: NSViewRepresentable {
     }
     public func updateNSView(_ view: SideBySideReviewView, context: Context) {
         view.onSelection = onSelection; view.onAskAgent = onAskAgent
+        view.texts[1].hunkAction = hunkAction
         view.update(snapshot: snapshot, theme: theme, focusRequest: focusRequest)
     }
     public static func dismantleNSView(_ view: SideBySideReviewView, coordinator: ()) {
@@ -121,6 +124,7 @@ public final class SideBySideReviewView: NSView, NSTextViewDelegate {
             }
             syncingScroll = false; updating = false
             synchronize(from: activePane); scheduleSelection(); needsDisplay = true
+            DispatchQueue.main.async { [weak self] in self?.texts[1].layoutHunkButtons() }
         }
         if self.focusRequest != focusRequest {
             self.focusRequest = focusRequest
@@ -175,7 +179,7 @@ public final class SideBySideReviewView: NSView, NSTextViewDelegate {
     }
     func invalidate() {
         selectionGeneration += 1; onSelection = nil; onAskAgent = nil
-        for text in texts { text.delegate = nil; text.onFocus = nil; text.askAgent = nil; text.attachRange = nil }
+        for text in texts { text.delegate = nil; text.onFocus = nil; text.askAgent = nil; text.attachRange = nil; text.hunkAction = nil }
         NotificationCenter.default.removeObserver(self)
     }
 }

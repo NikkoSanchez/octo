@@ -20,6 +20,9 @@ import OctoGit
     @Published private(set) var branches: [String] = []
     /// Tracked-file line counts against HEAD; nil before the first read or in an unborn repository.
     @Published private(set) var diffStat: DiffStat?
+    /// Per-scope line counts for the Staged and Unstaged groups.
+    @Published private(set) var stagedStat: DiffStat?
+    @Published private(set) var workingStat: DiffStat?
     @Published var error: String?
     @Published var loading = false
     @Published var expandedFolders = Set<String>()
@@ -57,15 +60,18 @@ import OctoGit
         let nextContext = projectID.uuidString + root
         if context != nextContext {
             // `filePath` belongs to the panel's selected file tab, which applies to every checkout.
-            context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; branches = []; diffStat = nil; expandedFolders = []; revealLine = nil
+            context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; branches = []; diffStat = nil; stagedStat = nil; workingStat = nil; expandedFolders = []; revealLine = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
             guard generation == token else { return }
             let paths = try await git.filePaths(root: root)
             let stat = try? await git.diffStat(root: root)
+            let staged = try? await git.diffStat(root: root, scope: .staged), working = try? await git.diffStat(root: root, scope: .working)
             guard generation == token else { return }
             if diffStat != stat { diffStat = stat }
+            if stagedStat != staged { stagedStat = staged }
+            if workingStat != working { workingStat = working }
             tree = FileNode.build(Array(Set(paths + editors.dirtyPaths(root: root))))
             files = result; self.branch = branch; error = nil
             if !refreshSelection { loading = false; return }
@@ -74,7 +80,11 @@ import OctoGit
                 else { snapshot = nil; editor = nil; selection = nil; selectedPath = nil }
                 if generation == token { loading = false }; return
             }
-            if !result.contains(where: { $0.path == selectedPath }) { selectedPath = result.first?.path }
+            // Keep the selection's group when it can; otherwise start at the top of the Staged and Unstaged lists.
+            if !result.contains(where: { $0.path == selectedPath }) {
+                selectedPath = (result.first { scope == .staged ? $0.hasStaged : $0.hasWorking }
+                    ?? result.first(where: \.hasStaged) ?? result.first)?.path
+            }
             if let file = result.first(where: { $0.path == selectedPath }) { await select(file, projectID: projectID, root: root) }
             else { snapshot = nil; selection = nil }
         } catch { if generation == token { self.error = error.localizedDescription; files = []; snapshot = nil } }
@@ -149,6 +159,18 @@ import OctoGit
         await selectPath(link.path, projectID: projectID, root: root)
         guard selectedPath == link.path, snapshot?.path == link.path, snapshot?.workingDirectory == root else { return }
         revealLine = link.line; revealRequest += 1
+    }
+    /// Selects a row in the Staged or Unstaged group; a file with both kinds of change has a row in each.
+    func select(_ file: ChangedFile, scope: DiffScope, projectID: UUID, root: String) async {
+        self.scope = scope
+        await select(file, projectID: projectID, root: root)
+    }
+    /// Shows the selected file's other scope, when it has changes there.
+    func toggleScope(projectID: UUID, root: String) async {
+        guard !browsingFiles, let file = files.first(where: { $0.path == selectedPath }) else { return }
+        let other: DiffScope = scope == .working ? .staged : .working
+        guard other == .staged ? file.hasStaged : file.hasWorking else { return }
+        await select(file, scope: other, projectID: projectID, root: root)
     }
     func select(_ file: ChangedFile, projectID: UUID, root: String) async {
         guard !browsingFiles else { return }

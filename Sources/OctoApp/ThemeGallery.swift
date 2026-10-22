@@ -127,6 +127,7 @@ private extension ThemeCard {
         .padding(.horizontal, 3).padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? c(palette.listSelection) : .clear, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(c(palette.activeBorder), lineWidth: 0.75).opacity(selected ? 1 : 0))
     }
 }
 

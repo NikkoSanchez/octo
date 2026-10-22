@@ -57,19 +57,24 @@ extension AppTheme {
 /// https://github.com/catppuccin/catppuccin/blob/main/docs/style-guide.md
 /// https://github.com/catppuccin/palette/blob/main/palette.json
 /// https://github.com/catppuccin/vscode/blob/main/packages/catppuccin-vsc/src/theme/uiColors.ts
+/// Selected sidebar rows follow the Zed port instead, whose rows are easier to see:
+/// https://github.com/catppuccin/zed (`ghost_element.selected`)
 private struct Catppuccin {
     let isDark: Bool
     let rosewater, pink, mauve, red, peach, yellow, green, teal, sky, blue, lavender: String
     let text, subtext0, overlay2, overlay1, overlay0, surface2, surface0, base, mantle, crust: String
     /// Official normal and bright ANSI colors (0–15).
     let ansi: [String]
+    /// The Zed port's selected list row, drawn at 40%.
+    let rowSelection: String
 
     var palette: ThemePalette {
         ThemePalette(isDark: isDark, base: base, mantle: mantle, crust: crust, surface: surface0,
             overlay0: overlay0, overlay1: overlay1, overlay2: overlay2, text: text, secondary: subtext0,
             accent: mauve, green: green, red: red, yellow: yellow, blue: blue, teal: teal, orange: peach,
-            // VS Code: button/badge text Crust; list selection Surface0 with Text.
-            activeBorder: lavender, onAccent: crust, listSelection: surface0, listSelectionText: text,
+            // VS Code: button/badge text Crust. Zed: selected rows at 40% over the sidebar, with Text.
+            activeBorder: lavender, onAccent: crust,
+            listSelection: ThemePalette.composite(rowSelection, opacity: 0.4, over: mantle), listSelectionText: text,
             cursor: rosewater, cursorText: isDark ? crust : base,
             // VS Code: editor selection Overlay2 at 30% in Latte, 25% otherwise; terminal selection Surface2.
             selectionBackground: overlay2, selectionOpacity: isDark ? 0.25 : 0.30, terminalSelectionBackground: surface2,
@@ -91,50 +96,59 @@ private struct Catppuccin {
         text: "4c4f69", subtext0: "6c6f85", overlay2: "7c7f93", overlay1: "8c8fa1", overlay0: "9ca0b0",
         surface2: "acb0be", surface0: "ccd0da", base: "eff1f5", mantle: "e6e9ef", crust: "dce0e8",
         ansi: ["5c5f77", "d20f39", "40a02b", "df8e1d", "1e66f5", "ea76cb", "179299", "acb0be",
-               "6c6f85", "de293e", "49af3d", "eea02d", "456eff", "fe85d8", "2d9fa8", "bcc0cc"])
+               "6c6f85", "de293e", "49af3d", "eea02d", "456eff", "fe85d8", "2d9fa8", "bcc0cc"],
+        rowSelection: "8f94a7")
     static let frappe = Catppuccin(isDark: true,
         rosewater: "f2d5cf", pink: "f4b8e4", mauve: "ca9ee6", red: "e78284", peach: "ef9f76", yellow: "e5c890",
         green: "a6d189", teal: "81c8be", sky: "99d1db", blue: "8caaee", lavender: "babbf1",
         text: "c6d0f5", subtext0: "a5adce", overlay2: "949cbb", overlay1: "838ba7", overlay0: "737994",
         surface2: "626880", surface0: "414559", base: "303446", mantle: "292c3c", crust: "232634",
         ansi: ["51576d", "e78284", "a6d189", "e5c890", "8caaee", "f4b8e4", "81c8be", "a5adce",
-               "626880", "e67172", "8ec772", "d9ba73", "7b9ef0", "f2a4db", "5abfb5", "b5bfe2"])
+               "626880", "e67172", "8ec772", "d9ba73", "7b9ef0", "f2a4db", "5abfb5", "b5bfe2"],
+        rowSelection: "7c829a")
     static let macchiato = Catppuccin(isDark: true,
         rosewater: "f4dbd6", pink: "f5bde6", mauve: "c6a0f6", red: "ed8796", peach: "f5a97f", yellow: "eed49f",
         green: "a6da95", teal: "8bd5ca", sky: "91d7e3", blue: "8aadf4", lavender: "b7bdf8",
         text: "cad3f5", subtext0: "a5adcb", overlay2: "939ab7", overlay1: "8087a2", overlay0: "6e738d",
         surface2: "5b6078", surface0: "363a4f", base: "24273a", mantle: "1e2030", crust: "181926",
         ansi: ["494d64", "ed8796", "a6da95", "eed49f", "8aadf4", "f5bde6", "8bd5ca", "a5adcb",
-               "5b6078", "ec7486", "8ccf7f", "e1c682", "78a1f6", "f2a9dd", "63cbc0", "b8c0e0"])
+               "5b6078", "ec7486", "8ccf7f", "e1c682", "78a1f6", "f2a9dd", "63cbc0", "b8c0e0"],
+        rowSelection: "737995")
     static let mocha = Catppuccin(isDark: true,
         rosewater: "f5e0dc", pink: "f5c2e7", mauve: "cba6f7", red: "f38ba8", peach: "fab387", yellow: "f9e2af",
         green: "a6e3a1", teal: "94e2d5", sky: "89dceb", blue: "89b4fa", lavender: "b4befe",
         text: "cdd6f4", subtext0: "a6adc8", overlay2: "9399b2", overlay1: "7f849c", overlay0: "6c7086",
         surface2: "585b70", surface0: "313244", base: "1e1e2e", mantle: "181825", crust: "11111b",
         ansi: ["45475a", "f38ba8", "a6e3a1", "f9e2af", "89b4fa", "f5c2e7", "94e2d5", "a6adc8",
-               "585b70", "f37799", "89d88b", "ebd391", "74a8fc", "f2aede", "6bd7ca", "bac2de"])
+               "585b70", "f37799", "89d88b", "ebd391", "74a8fc", "f2aede", "6bd7ca", "bac2de"],
+        rowSelection: "6f728d")
 }
 
 /// Dracula Classic. https://github.com/dracula/draculatheme.com/blob/main/content/spec.mdx
 /// Terminal: https://github.com/dracula/ghostty/blob/main/dracula
+/// Where the spec's prose differs from the official editor ports, the ports win: numbers/booleans are
+/// Purple and escapes Pink (dracula/visual-studio-code, dracula/zed, dracula/cursor), and list selection
+/// is Selection with Foreground text (visual-studio-code, dracula/t3code).
 private enum Dracula {
     static let palette = ThemePalette(isDark: true, base: "282a36", mantle: "21222c", crust: "191a21", surface: "343746",
         overlay0: "6272a4", overlay1: "6272a4", overlay2: "6272a4", text: "f8f8f2", secondary: "a9abb6",
         accent: "bd93f9", green: "50fa7b", red: "ff5555", yellow: "f1fa8c", blue: "8be9fd", teal: "8be9fd", orange: "ffb86c",
-        cursor: "f8f8f2", selectionBackground: "44475a", lineHighlight: "6272a4", lineHighlightOpacity: 0.25,
+        listSelection: "44475a", listSelectionText: "f8f8f2", cursor: "f8f8f2", selectionBackground: "44475a", lineHighlight: "6272a4", lineHighlightOpacity: 0.25,
         ansi: ["21222c", "ff5555", "50fa7b", "f1fa8c", "bd93f9", "ff79c6", "8be9fd", "f8f8f2",
                "6272a4", "ff6e6e", "69ff94", "ffffa5", "d6acff", "ff92df", "a4ffff", "ffffff", "ffb86c", "f8f8f2"])
-    static let syntax = ThemeSyntaxPalette(keyword: "ff79c6", string: "f1fa8c", escape: "f1fa8c", comment: "6272a4",
-        number: "ffb86c", function: "50fa7b", key: "8be9fd", punctuation: "f8f8f2", operatorColor: "ff79c6",
+    static let syntax = ThemeSyntaxPalette(keyword: "ff79c6", string: "f1fa8c", escape: "ff79c6", comment: "6272a4",
+        number: "bd93f9", function: "50fa7b", key: "8be9fd", punctuation: "f8f8f2", operatorColor: "ff79c6",
         builtin: "bd93f9", hunk: "6272a4", diffFile: "6272a4", diffPath: "6272a4", italic: [.comment, .builtin])
 }
 
 /// GitHub Light/Dark Default, from Primer primitives via the github-nvim-theme port.
 /// https://github.com/projekt0n/github-nvim-theme/tree/main/lua/github-theme/palette
+/// Row selection: neutral.muted over the sidebar, as in https://github.com/primer/github-vscode-theme
 private enum GitHub {
     static let light = ThemePalette(isDark: false, base: "ffffff", mantle: "f6f8fa", surface: "eaeef2",
         overlay0: "d0d7de", overlay1: "6e7781", overlay2: "57606a", text: "1f2328", secondary: "656d76",
         accent: "0969da", green: "1a7f37", red: "d1242f", yellow: "9a6700", blue: "0969da", teal: "1b7c83", orange: "bc4c00",
+        listSelection: ThemePalette.composite("afb8c1", opacity: 0.2, over: "f6f8fa"), listSelectionText: "1f2328",
         cursor: "0969da", selectionBackground: "0969da", selectionOpacity: 0.15,
         lineHighlight: "eaeef2", lineHighlightOpacity: 0.5,
         ansi: ["24292f", "cf222e", "116329", "4d2d00", "0969da", "8250df", "1b7c83", "6e7781",
@@ -145,6 +159,7 @@ private enum GitHub {
     static let dark = ThemePalette(isDark: true, base: "0d1117", mantle: "010409", surface: "21262d",
         overlay0: "30363d", overlay1: "6e7681", overlay2: "8b949e", text: "e6edf3", secondary: "848d97",
         accent: "2f81f7", green: "3fb950", red: "f85149", yellow: "d29922", blue: "58a6ff", teal: "39c5cf", orange: "db6d28",
+        listSelection: ThemePalette.composite("6e7681", opacity: 0.4, over: "010409"), listSelectionText: "e6edf3",
         cursor: "2f81f7", selectionBackground: "2f81f7", selectionOpacity: 0.30,
         lineHighlight: "6e7681", lineHighlightOpacity: 0.10,
         ansi: ["484f58", "ff7b72", "3fb950", "d29922", "58a6ff", "bc8cff", "39c5cf", "b1bac4",
@@ -156,10 +171,13 @@ private enum GitHub {
 
 /// Gruvbox. https://github.com/morhetz/gruvbox/blob/master/colors/gruvbox.vim
 /// Dark uses the bright accents and light the faded ones, as upstream does.
+/// Row selection: Zed's built-in Gruvbox (`ghost_element.selected`), with Fg text.
+/// https://github.com/zed-industries/zed/blob/main/assets/themes/gruvbox/gruvbox.json
 private enum Gruvbox {
     static let light = ThemePalette(isDark: false, base: "fbf1c7", mantle: "f2e5bc", crust: "ebdbb2", surface: "ebdbb2",
         overlay0: "d5c4a1", overlay1: "928374", overlay2: "7c6f64", text: "3c3836", secondary: "665c54",
         accent: "af3a03", green: "79740e", red: "9d0006", yellow: "b57614", blue: "076678", teal: "427b58", orange: "af3a03",
+        listSelection: "c8b899", listSelectionText: "3c3836",
         cursor: "3c3836", selectionBackground: "bdae93",
         ansi: ["fbf1c7", "cc241d", "98971a", "d79921", "458588", "b16286", "689d6a", "7c6f64",
                "928374", "9d0006", "79740e", "b57614", "076678", "8f3f71", "427b58", "3c3836"])
@@ -169,6 +187,7 @@ private enum Gruvbox {
     static let dark = ThemePalette(isDark: true, base: "282828", mantle: "1d2021", surface: "3c3836",
         overlay0: "504945", overlay1: "928374", overlay2: "a89984", text: "ebdbb2", secondary: "bdae93",
         accent: "fe8019", green: "b8bb26", red: "fb4934", yellow: "fabd2f", blue: "83a598", teal: "8ec07c", orange: "fe8019",
+        listSelection: "5b524c", listSelectionText: "ebdbb2",
         cursor: "ebdbb2", selectionBackground: "665c54",
         ansi: ["282828", "cc241d", "98971a", "d79921", "458588", "b16286", "689d6a", "a89984",
                "928374", "fb4934", "b8bb26", "fabd2f", "83a598", "d3869b", "8ec07c", "ebdbb2"])
@@ -179,6 +198,7 @@ private enum Gruvbox {
 
 /// Nord. Palette and syntax: https://github.com/nordtheme/vim/blob/main/colors/nord.vim
 /// Terminal: https://github.com/nordtheme/alacritty/blob/main/src/nord.yaml
+/// Row selection keeps the accent fill: https://github.com/nordtheme/visual-studio-code does the same.
 private enum Nord {
     static let palette = ThemePalette(isDark: true, base: "2e3440", mantle: "3b4252", surface: "434c5e",
         overlay0: "4c566a", overlay1: "616e88", overlay2: "616e88", text: "d8dee9", secondary: "a5abb6",
@@ -195,11 +215,13 @@ private enum Nord {
 /// (and one-light-syntax); UI levels from one-dark-ui/one-light-ui.
 /// One Dark terminal: https://github.com/joshdick/onedark.vim. One Light has no official terminal
 /// port; its ANSI colors reuse the same hue roles.
+/// Row selection: Zed's built-in One (`ghost_element.selected`); One Dark text is One Dark Pro's list foreground.
+/// https://github.com/zed-industries/zed/blob/main/assets/themes/one/one.json
 private enum One {
     static let light = ThemePalette(isDark: false, base: "fafafa", mantle: "eaeaeb", crust: "dbdbdc", surface: "dbdbdc",
         overlay0: "9d9d9f", overlay1: "9d9d9f", overlay2: "a0a1a7", text: "383a42", secondary: "696c77",
         accent: "526fff", green: "50a14f", red: "e45649", yellow: "cb7701", blue: "4078f2", teal: "0184bc", orange: "b76b01",
-        cursor: "526fff", selectionBackground: "e5e5e6", lineHighlight: "383a42", lineHighlightOpacity: 0.05,
+        listSelection: "cacaca", listSelectionText: "383a42", cursor: "526fff", selectionBackground: "e5e5e6", lineHighlight: "383a42", lineHighlightOpacity: 0.05,
         ansi: ["383a42", "e45649", "50a14f", "cb7701", "4078f2", "a626a4", "0184bc", "a0a1a7",
                "696c77", "ca1243", "50a14f", "b76b01", "4078f2", "a626a4", "0184bc", "dbdbdc"])
     static let lightSyntax = ThemeSyntaxPalette(keyword: "a626a4", string: "50a14f", escape: "0184bc", comment: "a0a1a7",
@@ -208,7 +230,7 @@ private enum One {
     static let dark = ThemePalette(isDark: true, base: "282c34", mantle: "21252b", crust: "181a1f", surface: "353b45",
         overlay0: "3e4451", overlay1: "636d83", overlay2: "5c6370", text: "abb2bf", secondary: "828997",
         accent: "528bff", green: "98c379", red: "e06c75", yellow: "e5c07b", blue: "61afef", teal: "56b6c2", orange: "d19a66",
-        cursor: "528bff", selectionBackground: "3e4451", lineHighlight: "99bbff", lineHighlightOpacity: 0.04,
+        listSelection: "454a56", listSelectionText: "d7dae0", cursor: "528bff", selectionBackground: "3e4451", lineHighlight: "99bbff", lineHighlightOpacity: 0.04,
         ansi: ["282c34", "e06c75", "98c379", "e5c07b", "61afef", "c678dd", "56b6c2", "abb2bf",
                "3e4452", "be5046", "98c379", "d19a66", "61afef", "c678dd", "56b6c2", "5c6370"])
     static let darkSyntax = ThemeSyntaxPalette(keyword: "c678dd", string: "98c379", escape: "56b6c2", comment: "5c6370",
@@ -219,10 +241,12 @@ private enum One {
 /// Rosé Pine and Dawn. Palette: https://github.com/rose-pine/palette/blob/main/palette.json
 /// Syntax: https://github.com/rose-pine/neovim. Terminal: https://github.com/rose-pine/ghostty
 /// (its Dawn text predates the palette's current #464261, which is used here).
+/// Row selection: the official Zed port (`ghost_element.selected`): Highlight High. https://github.com/rose-pine/zed
 private enum RosePine {
     static let main = ThemePalette(isDark: true, base: "191724", mantle: "1f1d2e", surface: "26233a",
         overlay0: "403d52", overlay1: "6e6a86", overlay2: "908caa", text: "e0def4", secondary: "908caa",
         accent: "c4a7e7", green: "9ccfd8", red: "eb6f92", yellow: "f6c177", blue: "c4a7e7", teal: "31748f", orange: "ebbcba",
+        listSelection: "524f67", listSelectionText: "e0def4",
         cursor: "e0def4", selectionBackground: "c4a7e7", selectionOpacity: 0.15, terminalSelectionBackground: "403d52",
         ansi: ["26233a", "eb6f92", "31748f", "f6c177", "9ccfd8", "c4a7e7", "ebbcba", "e0def4",
                "6e6a86", "eb6f92", "31748f", "f6c177", "9ccfd8", "c4a7e7", "ebbcba", "e0def4"])
@@ -233,6 +257,7 @@ private enum RosePine {
     static let dawn = ThemePalette(isDark: false, base: "faf4ed", mantle: "fffaf3", surface: "f2e9e1",
         overlay0: "dfdad9", overlay1: "9893a5", overlay2: "797593", text: "464261", secondary: "797593",
         accent: "286983", green: "56949f", red: "b4637a", yellow: "ea9d34", blue: "907aa9", teal: "286983", orange: "d7827e",
+        listSelection: "cecacd", listSelectionText: "464261",
         cursor: "464261", selectionBackground: "907aa9", selectionOpacity: 0.15, terminalSelectionBackground: "dfdad9",
         ansi: ["f2e9e1", "b4637a", "286983", "ea9d34", "56949f", "907aa9", "d7827e", "464261",
                "9893a5", "b4637a", "286983", "ea9d34", "56949f", "907aa9", "d7827e", "464261"])
@@ -243,6 +268,7 @@ private enum RosePine {
 
 /// Solarized. https://github.com/altercation/solarized (README terminal mapping)
 /// Syntax: https://github.com/altercation/vim-colors-solarized
+/// Row selection: VS Code's built-in Solarized themes, with Base02/Base2 text so the row passes 4.5:1.
 private enum Solarized {
     /// The official 16-color mapping, shared by both modes (bright black is Base03).
     static let ansi = ["073642", "dc322f", "859900", "b58900", "268bd2", "d33682", "2aa198", "eee8d5",
@@ -250,6 +276,7 @@ private enum Solarized {
     static let light = ThemePalette(isDark: false, base: "fdf6e3", mantle: "eee8d5", surface: "eee8d5",
         overlay0: "93a1a1", overlay1: "93a1a1", overlay2: "839496", text: "657b83", secondary: "839496",
         accent: "268bd2", green: "859900", red: "dc322f", yellow: "b58900", blue: "268bd2", teal: "2aa198", orange: "cb4b16",
+        listSelection: "dfca88", listSelectionText: "073642",
         cursor: "657b83", selectionBackground: "eee8d5", ansi: ansi)
     static let lightSyntax = ThemeSyntaxPalette(keyword: "859900", string: "2aa198", escape: "dc322f", comment: "93a1a1",
         number: "2aa198", function: "268bd2", key: "268bd2", punctuation: "657b83", operatorColor: "859900",
@@ -257,6 +284,7 @@ private enum Solarized {
     static let dark = ThemePalette(isDark: true, base: "002b36", mantle: "073642", surface: "073642",
         overlay0: "586e75", overlay1: "586e75", overlay2: "657b83", text: "839496", secondary: "657b83",
         accent: "268bd2", green: "859900", red: "dc322f", yellow: "b58900", blue: "268bd2", teal: "2aa198", orange: "cb4b16",
+        listSelection: "005a6f", listSelectionText: "eee8d5",
         cursor: "839496", selectionBackground: "073642", ansi: ansi)
     static let darkSyntax = ThemeSyntaxPalette(keyword: "859900", string: "2aa198", escape: "dc322f", comment: "586e75",
         number: "2aa198", function: "268bd2", key: "268bd2", punctuation: "839496", operatorColor: "859900",
@@ -264,11 +292,13 @@ private enum Solarized {
 }
 
 /// Tokyo Night (Night) and Day. https://github.com/folke/tokyonight.nvim/tree/main/extras
+/// Row selection: bg_visual, which LazyVim's snacks picker and explorer use for the selected row of a focused list
+/// (SnacksPickerListCursorLine → Visual). https://github.com/folke/snacks.nvim/blob/main/lua/snacks/picker/core/list.lua
 private enum TokyoNight {
     static let day = ThemePalette(isDark: false, base: "e1e2e7", mantle: "d0d5e3", crust: "c1c9df", surface: "c4c8da",
         overlay0: "a8aecb", overlay1: "68709a", overlay2: "848cb5", text: "3760bf", secondary: "6172b0",
         accent: "2e7de9", green: "587539", red: "f52a65", yellow: "8c6c3e", blue: "2e7de9", teal: "118c74", orange: "b15c00",
-        activeBorder: "4094a3", cursor: "3760bf", selectionBackground: "b7c1e3",
+        activeBorder: "4094a3", listSelection: "b7c1e3", listSelectionText: "3760bf", cursor: "3760bf", selectionBackground: "b7c1e3",
         ansi: ["b4b5b9", "f52a65", "587539", "8c6c3e", "2e7de9", "9854f1", "007197", "6172b0",
                "a1a6c5", "ff4774", "5c8524", "a27629", "358aff", "a463ff", "007ea8", "3760bf"])
     static let daySyntax = ThemeSyntaxPalette(keyword: "9854f1", string: "587539", escape: "9854f1", comment: "848cb5",
@@ -277,7 +307,7 @@ private enum TokyoNight {
     static let night = ThemePalette(isDark: true, base: "1a1b26", mantle: "16161e", crust: "0c0e14", surface: "292e42",
         overlay0: "3b4261", overlay1: "737aa2", overlay2: "565f89", text: "c0caf5", secondary: "a9b1d6",
         accent: "7aa2f7", green: "9ece6a", red: "f7768e", yellow: "e0af68", blue: "7aa2f7", teal: "1abc9c", orange: "ff9e64",
-        activeBorder: "27a1b9", cursor: "c0caf5", selectionBackground: "283457",
+        activeBorder: "27a1b9", listSelection: "283457", listSelectionText: "c0caf5", cursor: "c0caf5", selectionBackground: "283457",
         ansi: ["15161e", "f7768e", "9ece6a", "e0af68", "7aa2f7", "bb9af7", "7dcfff", "a9b1d6",
                "414868", "ff899d", "9fe044", "faba4a", "8db0ff", "c7a9ff", "a4daff", "c0caf5"])
     static let nightSyntax = ThemeSyntaxPalette(keyword: "bb9af7", string: "9ece6a", escape: "bb9af7", comment: "565f89",

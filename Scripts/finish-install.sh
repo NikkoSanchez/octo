@@ -5,7 +5,7 @@ directory="$1"
 app="$directory/Octo.app"
 update="$directory/.Octo-update.app"
 old="$directory/.Octo-old.app"
-while pgrep -f "/Octo\.app/Contents/MacOS/Octo( |$)" >/dev/null; do sleep 1; done
+while pgrep -af "/Octo\.app/Contents/MacOS/Octo( |$)" >/dev/null; do sleep 1; done
 # Another install already applied (or replaced) the update.
 [[ -d "$update" ]] || exit 0
 rm -rf "$old"

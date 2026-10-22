@@ -10,10 +10,10 @@ final class ThemeRenderingTests: XCTestCase {
         XCTAssertEqual(result.string, doc.text)
         assertColor(result, "let", "ff79c6")
         assertColor(result, "hello", "f1fa8c")
-        assertColor(result, #"\n"#, "f1fa8c")
+        assertColor(result, #"\n"#, "ff79c6")
         assertColor(result, "self", "bd93f9")
         assertColor(result, "call", "50fa7b")
-        assertColor(result, "42", "ffb86c")
+        assertColor(result, "42", "bd93f9")
         assertColor(result, "// comment", "6272a4")
         assertColor(result, "(", "f8f8f2")
         for token in ["self", "// comment"] {
@@ -27,9 +27,11 @@ final class ThemeRenderingTests: XCTestCase {
         let json = NativeDiffView.render(document([.init(id: 0, kind: .context, text: #"{"name": "Dracula", "ready": true}"#)], path: "sample.json"), theme: .dracula)
         assertColor(json, "name", "8be9fd")
         assertColor(json, "Dracula", "f1fa8c")
-        assertColor(json, "true", "ffb86c")
+        assertColor(json, "true", "bd93f9")
         XCTAssertEqual(AppTheme.dracula.palette?.selectionBackground, "44475a")
         XCTAssertEqual(AppTheme.dracula.palette?.selectionOpacity, 1)
+        XCTAssertEqual(AppTheme.dracula.palette?.listSelection, "44475a")
+        XCTAssertEqual(AppTheme.dracula.palette?.listSelectionText, "f8f8f2")
     }
 
     func document(_ lines: [DiffLine], path: String = "code.swift") -> ReviewDocument {
@@ -101,8 +103,7 @@ final class ThemeRenderingTests: XCTestCase {
             XCTAssertEqual(p.selectionOpacity, theme == .latte ? 0.30 : 0.25)
             XCTAssertEqual(p.selectionBackground, p.overlay2)
             XCTAssertEqual(p.ansi.count, 18)
-            // VS Code port: list selection Surface0 with Text, on-accent Crust, line highlight 7%, diff lines 15%.
-            XCTAssertEqual(p.listSelection, p.surface)
+            // VS Code port: on-accent Crust, line highlight 7%, diff lines 15%. Rows use the Zed port, with Text.
             XCTAssertEqual(p.listSelectionText, p.text)
             XCTAssertEqual(p.onAccent, theme.palette!.crust)
             XCTAssertEqual(p.lineHighlightOpacity, 0.07)
@@ -121,17 +122,50 @@ final class ThemeRenderingTests: XCTestCase {
         assertColor(result, "self", "f38ba8")
         let font = result.attribute(.font, at: (result.string as NSString).range(of: "run").location, effectiveRange: nil) as! NSFont
         XCTAssertTrue(NSFontManager.shared.traits(of: font).contains(.italicFontMask))
-        // Other themes keep their accent row selection and Base on-accent text.
-        XCTAssertEqual(AppTheme.dracula.palette!.listSelection, "bd93f9")
+        // Nord's port fills selected rows with the accent; it keeps the default.
+        XCTAssertEqual(AppTheme.nord.palette!.listSelection, "88c0d0")
+        XCTAssertEqual(AppTheme.nord.palette!.listSelectionText, "2e3440")
         XCTAssertEqual(AppTheme.tokyoNight.palette!.onAccent, "1a1b26")
         XCTAssertNil(AppTheme.dracula.palette!.findCurrent)
+    }
+    func testRowSelectionsFollowOfficialPortsAndStayReadable() {
+        let expected: [AppTheme: (String, String)] = [
+            // Zed ports (Catppuccin at 40% over Mantle), Zed built-ins (One, Gruvbox).
+            .latte: ("c3c7d2", "4c4f69"), .frappe: ("4a4e62", "c6d0f5"), .macchiato: ("404458", "cad3f5"), .mocha: ("3b3c4f", "cdd6f4"),
+            .oneLight: ("cacaca", "383a42"), .oneDark: ("454a56", "d7dae0"),
+            .gruvboxLight: ("c8b899", "3c3836"), .gruvboxDark: ("5b524c", "ebdbb2"),
+            .rosePineDawn: ("cecacd", "464261"), .rosePine: ("524f67", "e0def4"),
+            // LazyVim's focused list row (tokyonight bg_visual).
+            .tokyoNightDay: ("b7c1e3", "3760bf"), .tokyoNight: ("283457", "c0caf5"),
+            // VS Code ports.
+            .githubLight: ("e8ebef", "1f2328"), .githubDark: ("2d3239", "e6edf3"),
+            .solarizedLight: ("dfca88", "073642"), .solarizedDark: ("005a6f", "eee8d5"),
+        ]
+        for (theme, colors) in expected {
+            XCTAssertEqual(theme.palette!.listSelection, colors.0, theme.title)
+            XCTAssertEqual(theme.palette!.listSelectionText, colors.1, theme.title)
+        }
+        func luminance(_ hex: String) -> Double {
+            let value = UInt32(hex, radix: 16)!
+            let channels = [16, 8, 0].map { shift -> Double in
+                let c = Double((value >> shift) & 255) / 255
+                return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        }
+        for theme in AppTheme.allCases where theme != .system {
+            let p = theme.palette!
+            let (a, b) = (luminance(p.listSelection), luminance(p.listSelectionText))
+            // WCAG AA. Tokyo Night Day's own text is only 4.5:1 on its Base, so its row gets the 3:1 UI minimum.
+            XCTAssertGreaterThanOrEqual((max(a, b) + 0.05) / (min(a, b) + 0.05), theme == .tokyoNightDay ? 3 : 4.5, theme.title)
+        }
     }
     func testEveryThemeHasCompletePalettesAndRendersStably() {
         let doc = document([.init(id: 0, kind: .addition, text: #"let x = "🐙\n" // note"#, newLine: 1)])
         for theme in AppTheme.allCases where theme != .system {
             let p = theme.palette!, s = theme.syntax!
             let colors = [p.base, p.mantle, p.crust, p.surface, p.overlay0, p.overlay1, p.overlay2, p.text, p.secondary,
-                          p.accent, p.green, p.red, p.yellow, p.blue, p.teal, p.orange, p.activeBorder, p.cursor, p.cursorText,
+                          p.accent, p.green, p.red, p.yellow, p.blue, p.teal, p.orange, p.activeBorder, p.listSelection, p.listSelectionText, p.cursor, p.cursorText,
                           p.selectionBackground, p.terminalSelectionBackground, p.lineHighlight, s.keyword, s.string, s.escape,
                           s.comment, s.number, s.function, s.key, s.punctuation, s.operatorColor, s.builtin, s.hunk, s.diffFile, s.diffPath] + p.ansi
             XCTAssertTrue(colors.allSatisfy { $0.count == 6 && UInt32($0, radix: 16) != nil }, theme.title)

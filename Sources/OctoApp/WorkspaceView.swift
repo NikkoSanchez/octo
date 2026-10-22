@@ -1140,6 +1140,7 @@ private struct ProjectSidebarContent: View, Equatable {
                 .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading).contentShape(Rectangle())
         }.buttonStyle(HoverButtonStyle(padded: false))
             .background(selected ? theme.rowSelection : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay { SelectedRowBorder(selected: selected) }
             .accessibilityLabel("Terminal").accessibilityValue(tabs == 0 ? "No open tabs" : "\(tabs) open")
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -1325,6 +1326,7 @@ private struct SidebarThreadRow: View, Equatable {
                 .accessibilityLabel("\(thread.isPinned ? "Unpin" : "Pin") \(thread.title)")
                 .padding(.trailing, 4).padding(.top, 3)
         }.background(selected ? theme.rowSelection : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay { SelectedRowBorder(selected: selected) }
             .contentShape(Rectangle())
             .background(ThreadHoverAnchor(thread: thread, projectName: projectName, theme: theme, onHover: { hovering = $0 }))
     }
@@ -1343,6 +1345,19 @@ private struct SidebarThreadRow: View, Equatable {
                 Text(preview ?? "No messages yet")
             }
         }.font(.system(size: 13)).foregroundStyle(Color(nsColor: color)).lineLimit(1).truncationMode(.tail)
+    }
+}
+
+/// The selected row's focus-colored outline. Zed and VS Code pair their quiet selection fills with one
+/// (`border.focused` / `list.focusOutline`) while the list has focus; the sidebar always shows it, since the
+/// row is the main sign of which thread is open.
+private struct SelectedRowBorder: View {
+    let selected: Bool
+    @Environment(\.octoTheme) private var theme
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(theme.activeBorder, lineWidth: 1)
+            .opacity(selected ? 1 : 0).allowsHitTesting(false)
     }
 }
 

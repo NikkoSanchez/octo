@@ -8,8 +8,9 @@ directory="${OCTO_INSTALL_DIR:-$HOME/Applications}"
 app="$directory/Octo.app"
 mkdir -p "$directory"
 # Built straight into the staging bundle, so no copy anyone is running from is replaced.
+# pgrep -a: macOS pgrep skips its own ancestors by default, which hides the Octo this runs inside.
 ./Scripts/build-app.sh release "$directory/.Octo-update.app"
-if pgrep -f "/Octo\.app/Contents/MacOS/Octo( |$)" >/dev/null; then
+if pgrep -af "/Octo\.app/Contents/MacOS/Octo( |$)" >/dev/null; then
   # Its own session, so quitting Octo (and the terminal this runs in) does not end it.
   python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$PWD/Scripts/finish-install.sh" "$directory" </dev/null >/dev/null 2>&1 &

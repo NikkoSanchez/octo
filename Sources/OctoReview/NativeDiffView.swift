@@ -207,7 +207,7 @@ final class ReviewTextView: NSTextView {
         return accepted
     }
     var attachRange: ((NSRange) -> Void)?
-    var reviewDocument: ReviewDocument? { didSet { clearHover() } }
+    var reviewDocument: ReviewDocument? { didSet { clearHover(); hoveredHunk = nil } }
     var sourceDocument: SourceDocument? { didSet { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true } }
     private var hoverTracking: NSTrackingArea?
     private var hoverPoint: NSPoint?
@@ -262,10 +262,12 @@ final class ReviewTextView: NSTextView {
         super.mouseDown(with: event)
         updateHover()
     }
-    override func mouseExited(with event: NSEvent) { hoverPoint = nil; clearHover() }
+    override func mouseExited(with event: NSEvent) { hoverPoint = nil; clearHover(); hoverHunk(nil) }
     private func trackHover(_ event: NSEvent) {
-        hoverPoint = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        hoverPoint = point
         updateHover()
+        hoverHunk(hunkID(at: point))
     }
     @objc private func viewportChanged() { clearHover(); enclosingScrollView?.verticalRulerView?.needsDisplay = true; layoutHunkButtons() }
     @objc private func viewportResized() { layoutHunkButtons() }
@@ -274,53 +276,62 @@ final class ReviewTextView: NSTextView {
 
     var hunkAction: HunkAction? {
         didSet {
-            guard oldValue?.title != hunkAction?.title || oldValue?.enabled != hunkAction?.enabled else { return }
+            guard oldValue?.title != hunkAction?.title || oldValue?.enabled != hunkAction?.enabled || (oldValue == nil) != (hunkAction == nil) else { return }
             layoutHunkButtons()
         }
     }
-    private var hunkButtons: [NSButton] = []
-    /// Places a button at the trailing edge of each visible `@@` row, so it stays in view while
-    /// long lines scroll horizontally. Only rows in the viewport are resolved.
-    func layoutHunkButtons() {
-        var used = 0
-        defer { for button in hunkButtons[used...] { button.isHidden = true } }
-        guard let action = hunkAction, let document = reviewDocument, sourceDocument == nil,
-              let layout = textLayoutManager, let content = layout.textContentManager else { return }
-        let visible = visibleRect, origin = textContainerOrigin
-        guard !visible.isEmpty else { return }
-        // The laid-out rows at the viewport's edges bound the search; past the laid-out text, the document's ends do.
-        func offset(atY y: CGFloat) -> Int? {
-            layout.textLayoutFragment(for: CGPoint(x: 0, y: y - origin.y))
-                .map { content.offset(from: content.documentRange.location, to: $0.rangeInElement.location) }
-        }
-        let top = offset(atY: visible.minY) ?? 0, bottom = offset(atY: visible.maxY) ?? Int.max
-        for segment in document.segments where segment.line.kind == .header && segment.line.text.hasPrefix("@@") {
-            if NSMaxRange(segment.displayRange) <= top { continue }
-            if segment.displayRange.location > bottom { break }
-            guard let location = content.location(content.documentRange.location, offsetBy: segment.displayRange.location),
-                  let fragment = layout.textLayoutFragment(for: location) else { continue }
-            let row = fragment.layoutFragmentFrame.offsetBy(dx: origin.x, dy: origin.y)
-            guard row.maxY > visible.minY, row.minY < visible.maxY else { continue }
-            if used == hunkButtons.count { hunkButtons.append(makeHunkButton()) }
-            let button = hunkButtons[used]; used += 1
-            button.title = action.title; button.isEnabled = action.enabled; button.tag = segment.line.id
-            // Drawn on the theme's code background, which can differ from the window's appearance.
-            button.appearance = theme.isDark.map { NSAppearance(named: $0 ? .darkAqua : .aqua) } ?? nil
-            button.toolTip = "\(action.title): \(segment.line.text)"
-            button.setAccessibilityLabel("\(action.title) \(segment.line.text)")
-            button.sizeToFit()
-            let size = button.frame.size
-            button.frame = NSRect(x: max(visible.minX, visible.maxX - size.width - 12), y: row.minY + (row.height - size.height) / 2,
-                                  width: size.width, height: size.height)
-            button.isHidden = false
-        }
+    /// The hunk under the pointer. Like the gutter +, its action appears only while hovered.
+    var hoveredHunk: Int? { didSet { if hoveredHunk != oldValue { layoutHunkButtons() } } }
+    /// Side by side: the Before pane reports its hovered hunk so the After pane can show the action.
+    var onHoveredHunk: ((Int?) -> Void)?
+    private func hoverHunk(_ id: Int?) {
+        if hunkAction != nil { hoveredHunk = id }
+        onHoveredHunk?(id)
     }
-    private func makeHunkButton() -> NSButton {
+    private lazy var hunkButton: NSButton = {
         let button = NSButton(title: "", target: self, action: #selector(performHunkButton(_:)))
-        button.bezelStyle = .inline; button.controlSize = .small
-        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        button.isBordered = false; button.wantsLayer = true
+        button.layer?.cornerCurve = .continuous
+        button.isHidden = true
         addSubview(button)
         return button
+    }()
+    /// A capsule on the hovered hunk's `@@` row, styled like the panel's Push and Open in capsules.
+    /// When the header has scrolled away it stays at the top of the hunk's visible part.
+    func layoutHunkButtons() {
+        guard let action = hunkAction, let id = hoveredHunk, let document = reviewDocument, sourceDocument == nil,
+              let layout = textLayoutManager, let content = layout.textContentManager,
+              let start = document.segments.firstIndex(where: { $0.line.id == id && $0.line.kind == .header && $0.line.text.hasPrefix("@@") }) else {
+            if !hunkButton.isHidden { hunkButton.isHidden = true }
+            return
+        }
+        let visible = visibleRect, origin = textContainerOrigin
+        func row(_ segment: ReviewDocument.Segment) -> NSRect? {
+            guard let location = content.location(content.documentRange.location, offsetBy: segment.displayRange.location),
+                  let fragment = layout.textLayoutFragment(for: location) else { return nil }
+            return fragment.layoutFragmentFrame.offsetBy(dx: origin.x, dy: origin.y)
+        }
+        let end = document.segments[(start + 1)...].firstIndex { $0.line.kind == .header && $0.line.text.hasPrefix("@@") }
+            .map { $0 - 1 } ?? document.segments.count - 1
+        let header = row(document.segments[start]), last = row(document.segments[end])
+
+        let title = NSAttributedString(string: action.title, attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
+            .foregroundColor: NativeDiffView.color(theme.palette?.text, fallback: .labelColor)
+        ])
+        hunkButton.title = action.title; hunkButton.attributedTitle = title
+        hunkButton.isEnabled = action.enabled; hunkButton.alphaValue = action.enabled ? 1 : 0.45
+        hunkButton.tag = id
+        hunkButton.layer?.backgroundColor = NativeDiffView.color(theme.palette?.surface, fallback: .quaternaryLabelColor).cgColor
+        let text = document.segments[start].line.text
+        hunkButton.toolTip = "\(action.title): \(text)"
+        hunkButton.setAccessibilityLabel("\(action.title) \(text)")
+        let size = NSSize(width: ceil(title.size().width) + 20, height: 22)
+        hunkButton.layer?.cornerRadius = size.height / 2
+        var y = max(header.map { $0.midY - size.height / 2 } ?? visible.minY + 4, visible.minY + 4)
+        if let last { y = min(y, last.maxY - size.height) }
+        hunkButton.frame = NSRect(x: max(visible.minX, visible.maxX - size.width - 12), y: y, width: size.width, height: size.height)
+        hunkButton.isHidden = false
     }
     @objc private func performHunkButton(_ sender: Any?) {
         guard let tag = (sender as? NSButton)?.tag ?? (sender as? NSMenuItem)?.tag else { return }

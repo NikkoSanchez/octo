@@ -68,6 +68,8 @@ public final class SideBySideReviewView: NSView, NSTextViewDelegate {
                 self.attach(self.texts[index].selectedRange(), in: index)
             }
             text.attachRange = { [weak self] range in self?.attach(range, in: index) }
+            // Hunk actions live on the After pane; hovering either pane reveals them.
+            if index == 0 { text.onHoveredHunk = { [weak self] id in self?.texts[1].hoveredHunk = id } }
             label.font = .systemFont(ofSize: 12, weight: .medium)
             label.lineBreakMode = .byTruncatingTail
             addSubview(scroll); addSubview(label)
@@ -179,7 +181,7 @@ public final class SideBySideReviewView: NSView, NSTextViewDelegate {
     }
     func invalidate() {
         selectionGeneration += 1; onSelection = nil; onAskAgent = nil
-        for text in texts { text.delegate = nil; text.onFocus = nil; text.askAgent = nil; text.attachRange = nil; text.hunkAction = nil }
+        for text in texts { text.delegate = nil; text.onFocus = nil; text.askAgent = nil; text.attachRange = nil; text.hunkAction = nil; text.onHoveredHunk = nil }
         NotificationCenter.default.removeObserver(self)
     }
 }

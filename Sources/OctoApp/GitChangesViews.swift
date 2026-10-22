@@ -3,8 +3,8 @@ import SwiftUI
 import OctoCore
 import OctoGit
 
-/// The Changes tab's Git row: branch, Push, Create PR and more actions, then the upstream
-/// state and stashes. Push and pull request publication happen only from these explicit buttons.
+/// The Changes tab's Git row: the branch over its upstream state, then Pull (when behind), Push,
+/// Create PR and more actions. Pulling, pushing and publishing happen only from these explicit buttons.
 struct GitHeader: View {
     @ObservedObject var git: GitWorkflow
     let review: ReviewModel
@@ -19,37 +19,41 @@ struct GitHeader: View {
     private var unstaged: [ChangedFile] { files.filter(\.hasWorking) }
     private var staged: [ChangedFile] { files.filter(\.hasStaged) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                GitBranchIcon(size: 13).foregroundStyle(theme.secondary)
-                Text(branch.isEmpty ? "No branch" : branch).font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1).truncationMode(.middle).help(branch)
+        VStack(alignment: .leading, spacing: 6) {
+            // Title over subtitle, as in the titlebar: the branch, then its upstream state.
+            HStack(spacing: 7) {
+                GitBranchIcon(size: 14).foregroundStyle(theme.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(branch.isEmpty ? "No branch" : branch).font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1).truncationMode(.middle)
+                    Group {
+                        if let notice = git.notice { Text("\(Image(systemName: "checkmark.circle.fill")) \(notice)").foregroundStyle(theme.green) }
+                        else { Text(statusText).foregroundStyle(theme.secondary) }
+                    }.font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+                }.help(branch)
                 Spacer(minLength: 6)
                 ProgressView().controlSize(.small)
                     .opacity(loading || git.activity != nil ? 1 : 0).accessibilityHidden(!loading && git.activity == nil)
                     .help(git.activity ?? "Refreshing")
-                Button(action: push) { Label(pushTitle, systemImage: "arrow.up").labelStyle(.titleAndIcon) }
-                    .buttonStyle(CapsuleButtonStyle()).disabled(status?.canPush != true).help(pushHelp)
-                Button { git.sheet = .pullRequest } label: {
-                    Label(git.pullRequest(for: target).map { "PR #\($0.number)" } ?? "Create PR", systemImage: "arrow.triangle.pull").labelStyle(.titleAndIcon)
+                if let status, status.behind > 0, !status.publishes {
+                    Button(action: pull) { Label("Pull \(status.behind)", systemImage: "arrow.down").labelStyle(.titleAndIcon) }
+                        .buttonStyle(CapsuleButtonStyle()).disabled(git.activity != nil)
+                        .help("Fast-forward to \(status.upstream ?? "the upstream") (\(Self.commits(status.behind)))")
                 }
-                .buttonStyle(CapsuleButtonStyle()).disabled(status?.branch == nil || status?.hasCommits != true || status?.pushRemote == nil)
-                .help(git.pullRequest(for: target) == nil ? "Create a GitHub pull request for this branch" : "View this branch's pull request")
+                // Without a remote there is nowhere to publish, so neither action is offered.
+                if status?.pushRemote != nil {
+                    Button(action: push) { Label(pushTitle, systemImage: "arrow.up").labelStyle(.titleAndIcon) }
+                        .buttonStyle(CapsuleButtonStyle()).disabled(status?.canPush != true).help(pushHelp)
+                    Button { git.sheet = .pullRequest } label: {
+                        Label(git.pullRequest(for: target).map { "PR #\($0.number)" } ?? "Create PR", systemImage: "arrow.triangle.pull").labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(CapsuleButtonStyle()).disabled(status?.branch == nil || status?.hasCommits != true)
+                    .help(git.pullRequest(for: target) == nil ? "Create a GitHub pull request for this branch" : "View this branch's pull request")
+                }
                 moreMenu
                 Button(action: refresh) { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(CapsuleToolbarButtonStyle()).help("Refresh changes (⇧⌘R)").accessibilityLabel("Refresh changes")
             }
-            HStack(spacing: 6) {
-                if let notice = git.notice {
-                    Label(notice, systemImage: "checkmark.circle.fill").foregroundStyle(theme.green)
-                } else {
-                    Text(statusText).foregroundStyle(theme.secondary)
-                }
-                Spacer(minLength: 6)
-                Button { git.sheet = .stashes } label: {
-                    Label(git.stashes.isEmpty ? "Stashes" : "Stashes (\(git.stashes.count))", systemImage: "tray.full")
-                }.buttonStyle(.plain).foregroundStyle(theme.secondary).hoverFeedback().help("Named stashes for this checkout")
-            }.font(.system(size: 11)).lineLimit(1)
             if let problem = git.pushProblem {
                 GitBanner(problem: problem, retry: status?.canPush == true ? push : nil) { git.pushProblem = nil }
             }
@@ -77,6 +81,7 @@ struct GitHeader: View {
             Divider()
             Button("Stash Changes…") { git.sheet = .newStash }.disabled(files.isEmpty)
             Button(git.stashes.isEmpty ? "Stashes…" : "Stashes (\(git.stashes.count))…") { git.sheet = .stashes }
+            Button("Pull") { pull() }.disabled(status?.upstream == nil || status?.upstreamGone == true)
             Button("Fetch") { Task { await git.fetch(in: target, review: review) } }.disabled(status?.remotes.isEmpty != false)
             Divider()
             Button("Discard All Unstaged Changes…", role: .destructive) { git.discardRequest = unstaged }.disabled(unstaged.isEmpty)
@@ -86,6 +91,7 @@ struct GitHeader: View {
             .help("More Git actions").accessibilityLabel("More Git actions")
     }
     private func push() { Task { await git.push(in: target, review: review) } }
+    private func pull() { Task { await git.pull(in: target, review: review) } }
     private var pushTitle: String {
         guard let status else { return "Push" }
         if status.publishes && status.ahead == 0 { return "Publish" }
@@ -205,7 +211,17 @@ struct CommitComposer: View {
         VStack(alignment: .leading, spacing: 7) {
             if last != nil || stagedCount + unstagedCount > 0 {
                 Rectangle().fill(theme.hairline).frame(height: 0.5).padding(.horizontal, -12).padding(.bottom, 3)
-                if let last { committed(last) } else { composer }
+                if let last { committed(last) }
+                else if stagedCount > 0 { composer }
+                else {
+                    // Collapsed until there is something to commit; a typed draft is kept.
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle").foregroundStyle(theme.secondary)
+                        Text("Stage files or hunks to commit them").foregroundStyle(theme.secondary)
+                        Spacer(minLength: 6)
+                        if !message.isEmpty { Text("Draft kept").foregroundStyle(theme.secondary) }
+                    }.font(.system(size: 11.5)).lineLimit(1).frame(minHeight: 20)
+                }
             }
         }
         .padding(.horizontal, 12).padding(.bottom, last != nil || stagedCount + unstagedCount > 0 ? 12 : 0)
@@ -233,7 +249,6 @@ struct CommitComposer: View {
         }
     }
     private var summary: String {
-        guard stagedCount > 0 else { return "Nothing staged" + (unstagedCount > 0 ? " · \(Self.files(unstagedCount)) unstaged" : "") }
         return "\(Self.files(stagedCount)) staged" + (unstagedCount > 0 ? " · \(unstagedCount) unstaged not included" : "")
     }
     static func files(_ count: Int) -> String { count == 1 ? "1 file" : "\(count) files" }

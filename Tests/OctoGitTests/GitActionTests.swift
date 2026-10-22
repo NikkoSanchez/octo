@@ -246,6 +246,53 @@ final class GitActionTests: XCTestCase {
         XCTAssertEqual(branches.branches, ["feature/native-git"])
     }
 
+    func testPullFastForwardsOnlyAndRefusesDivergedOrConflictingUpdates() async throws {
+        let remote = try await makeRepository(bare: true)
+        let repo = try await makeRepository(), other = try await makeRepository()
+        let service = GitService()
+        try repo.write("a.txt", "one\n")
+        try await repo.commitAll("one")
+        try await repo.run(["remote", "add", "origin", remote.root.path])
+        do { try await service.pull(root: repo.root.path); XCTFail("Pulled without an upstream") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Push it first")) }
+        try await service.push(root: repo.root.path)
+
+        // Another clone pushes a commit; this checkout is now behind.
+        try await other.run(["remote", "add", "origin", remote.root.path])
+        try await other.run(["fetch", "--quiet", "origin"])
+        try await other.run(["switch", "--quiet", "-C", "main", "origin/main"])
+        try other.write("a.txt", "one\ntwo\n")
+        try await other.commitAll("two")
+        try await other.run(["push", "--quiet", "origin", "main"])
+        try await service.fetch(root: repo.root.path)
+        var status = try await service.upstreamStatus(root: repo.root.path)
+        XCTAssertEqual(status.behind, 1); XCTAssertEqual(status.ahead, 0)
+
+        // A local edit to the same file blocks the update without touching anything.
+        try repo.write("a.txt", "local edit\n")
+        do { try await service.pull(root: repo.root.path); XCTFail("Pulled over local edits") } catch {}
+        XCTAssertEqual(try repo.read("a.txt"), "local edit\n")
+        try await repo.run(["checkout", "--", "a.txt"])
+
+        try await service.pull(root: repo.root.path)
+        XCTAssertEqual(try repo.read("a.txt"), "one\ntwo\n")
+        status = try await service.upstreamStatus(root: repo.root.path)
+        XCTAssertEqual(status.behind, 0)
+
+        // Diverged: both sides have a new commit. Pull refuses and leaves HEAD where it was.
+        try other.write("a.txt", "one\ntwo\nthree\n")
+        try await other.commitAll("three")
+        try await other.run(["push", "--quiet", "origin", "main"])
+        try repo.write("b.txt", "local\n")
+        try await repo.commitAll("local")
+        let head = try await repo.run(["rev-parse", "HEAD"])
+        do { try await service.pull(root: repo.root.path); XCTFail("Merged a diverged branch") } catch {}
+        let after = try await repo.run(["rev-parse", "HEAD"])
+        XCTAssertEqual(after, head)
+        let merging = FileManager.default.fileExists(atPath: repo.root.appendingPathComponent(".git/MERGE_HEAD").path)
+        XCTAssertFalse(merging, "No merge is left in progress")
+    }
+
     func testParsesTrackingAndStashSubjects() {
         XCTAssertTrue(GitService.parseTrack("ahead 2, behind 1") == (2, 1, false))
         XCTAssertTrue(GitService.parseTrack("behind 3") == (0, 3, false))

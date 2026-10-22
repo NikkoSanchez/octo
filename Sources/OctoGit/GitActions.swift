@@ -165,6 +165,14 @@ extension GitService {
         }
         _ = try await text(["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(branch)"], root: root, timeout: Self.networkTimeout)
     }
+    /// Brings in the upstream's new commits only when that needs no merge or rebase. A diverged
+    /// branch, or local edits the update would overwrite, make Git refuse with nothing changed.
+    public func pull(root: String) async throws {
+        let status = try await upstreamStatus(root: root)
+        guard status.branch != nil else { throw ProcessFailure.exited("Check out a branch before pulling.") }
+        guard status.upstream != nil, !status.upstreamGone else { throw ProcessFailure.exited("This branch doesn't track a remote branch yet. Push it first.") }
+        _ = try await text(["pull", "--ff-only", "--no-rebase", "--quiet"], root: root, timeout: Self.networkTimeout)
+    }
     public func fetch(root: String) async throws {
         _ = try await text(["fetch", "--quiet"], root: root, timeout: Self.networkTimeout)
     }

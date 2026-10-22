@@ -105,8 +105,8 @@ private final class ReportingKeyWindow: NSWindow {
         }
         let afterControls = Array(stops.drop { $0 == "ComposerControlKeys" })
         XCTAssertGreaterThanOrEqual(stops.count - afterControls.count, 2, "The composer's controls come first: \(stops)")
-        XCTAssertEqual(afterControls, ["SwiftUIOutlineListView", "ReviewTextView", "CommitMessageTextView", "ScreenshotTextView"],
-                       "Then changed files, diff, the commit message, and back")
+        // Nothing is staged in the fixture, so the commit message editor is collapsed and not a stop.
+        XCTAssertEqual(afterControls, ["SwiftUIOutlineListView", "ReviewTextView", "ScreenshotTextView"], "Then changed files, diff, and back")
         for stop in stops.dropLast() {
             XCTAssertNotEqual(stop, "NSTextView", "The closed find bar's field editor must not take focus")
         }

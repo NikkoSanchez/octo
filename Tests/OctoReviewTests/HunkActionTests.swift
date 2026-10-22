@@ -23,7 +23,7 @@ import OctoCore
     }
     private func buttons(_ text: NSView) -> [NSButton] { text.subviews.compactMap { $0 as? NSButton }.filter { !$0.isHidden && $0.title.hasSuffix("Hunk") } }
 
-    func testEachHunkHeaderGetsAButtonThatReportsItsHeader() {
+    func testOnlyTheHoveredHunkShowsItsActionAndReportsItsHeader() {
         let scroll = NativeDiffView.makeScrollView(), text = scroll.documentView as! ReviewTextView
         let window = host(scroll); defer { window.close() }
         let document = ReviewDocument(snapshot: snapshot())
@@ -31,24 +31,30 @@ import OctoCore
         text.textStorage?.setAttributedString(NativeDiffView.render(document, theme: .system))
         var performed: [Int] = []
         text.hunkAction = HunkAction(title: "Stage Hunk") { performed.append($0) }
-        text.layoutHunkButtons()
+        XCTAssertTrue(buttons(text).isEmpty, "Hidden until a hunk is hovered, like the gutter +")
 
-        let shown = buttons(text)
-        XCTAssertEqual(shown.count, 2, "Only @@ rows get the action; Git's missing-newline note does not")
-        XCTAssertEqual(shown.map(\.tag), [0, 3])
+        text.hoveredHunk = 3
+        var shown = buttons(text)
+        XCTAssertEqual(shown.map(\.tag), [3])
         XCTAssertTrue(shown.allSatisfy { $0.frame.maxX <= text.visibleRect.maxX && $0.frame.minX > text.visibleRect.midX }, "Trailing edge of the visible row")
-        guard shown.count == 2 else { return }
-        XCTAssertLessThan(shown[0].frame.minY, shown[1].frame.minY)
-        shown[1].performClick(nil)
+        shown.first?.performClick(nil)
         XCTAssertEqual(performed, [3])
 
+        text.hoveredHunk = 5
+        XCTAssertTrue(buttons(text).isEmpty, "Git's missing-newline note is not a hunk")
+        text.hoveredHunk = 0
+        shown = buttons(text)
+        XCTAssertEqual(shown.map(\.tag), [0])
         text.hunkAction = HunkAction(title: "Unstage Hunk") { _ in }
-        XCTAssertEqual(buttons(text).map(\.title), ["Unstage Hunk", "Unstage Hunk"])
+        XCTAssertEqual(buttons(text).map(\.title), ["Unstage Hunk"])
         text.hunkAction = nil
         XCTAssertTrue(buttons(text).isEmpty, "Ineligible files show no hunk actions")
+        text.hunkAction = HunkAction(title: "Stage Hunk") { _ in }
+        text.reviewDocument = document
+        XCTAssertTrue(buttons(text).isEmpty, "A replaced diff forgets the hovered hunk")
     }
 
-    func testSideBySideShowsHunkActionsOnTheAfterPaneOnly() {
+    func testSideBySideShowsTheActionOnTheAfterPaneWhenEitherPaneIsHovered() {
         var performed: [Int] = []
         let view = SideBySideReviewView(frame: NSRect(x: 0, y: 0, width: 900, height: 400))
         let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
@@ -56,11 +62,13 @@ import OctoCore
         view.texts[1].hunkAction = HunkAction(title: "Stage Hunk") { performed.append($0) }
         view.update(snapshot: snapshot(), theme: .system, focusRequest: 0)
         view.layoutSubtreeIfNeeded()
-        view.texts[1].layoutHunkButtons()
+        view.texts[0].onHoveredHunk?(0)
         XCTAssertTrue(buttons(view.texts[0]).isEmpty)
         let after = buttons(view.texts[1])
-        XCTAssertEqual(after.map(\.tag), [0, 3])
-        after[0].performClick(nil)
+        XCTAssertEqual(after.map(\.tag), [0])
+        after.first?.performClick(nil)
         XCTAssertEqual(performed, [0])
+        view.texts[0].onHoveredHunk?(nil)
+        XCTAssertTrue(buttons(view.texts[1]).isEmpty)
     }
 }

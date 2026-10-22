@@ -28,10 +28,11 @@ import OctoGit
         XCTAssertEqual(review.files.filter(\.hasWorking).count, 2)
 
         let a = try XCTUnwrap(review.files.first { $0.path == "a.txt" })
-        // Two requests made together run in order.
-        async let first: Void = git.stage([a], in: target, review: review)
-        async let second: Void = git.commit(message: "Add a", in: target, review: review)
-        _ = await (first, second)
+        // Two requests made back to back, as from two clicks, run in the order made. (`async let`
+        // would not do: it does not fix which child starts first.)
+        let first = Task { await git.stage([a], in: target, review: review) }
+        let second = Task { await git.commit(message: "Add a", in: target, review: review) }
+        await first.value; await second.value
         XCTAssertNil(git.problem)
         XCTAssertEqual(git.lastCommit?.subject, "Add a")
         XCTAssertEqual(review.files.map(\.path), ["b.txt"], "Only the staged file was committed")
@@ -104,6 +105,12 @@ import OctoGit
         XCTAssertTrue(offline.hint?.contains("network") == true)
         XCTAssertTrue(GitWorkflow.pushProblem(ProcessFailure.timedOut, destination: "origin", commits: 0).hint?.contains("five minutes") == true)
         XCTAssertEqual(offline.detail, "fatal: unable to access 'https://x/': Could not resolve host: x")
+    }
+
+    func testPullHintsNameTheNextStep() {
+        XCTAssertTrue(GitWorkflow.pullHint("fatal: Not possible to fast-forward, aborting.").contains("Merge or rebase in the terminal"))
+        XCTAssertTrue(GitWorkflow.pullHint("error: Your local changes to the following files would be overwritten by merge").contains("Commit or stash"))
+        XCTAssertTrue(GitWorkflow.pullHint("fatal: unable to access 'https://x/'").contains("network"))
     }
 
     func testDiscardConfirmationNamesWhatIsLost() {

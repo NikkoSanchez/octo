@@ -180,6 +180,33 @@ struct GitProblem: Equatable {
             announce("Pushed to \(status?.upstream ?? destination).")
         }
     }
+    /// Fast-forward only: Pull never starts a merge or rebase that would need conflict resolution.
+    func pull(in target: Target, review: ReviewModel) async {
+        let source = status?.upstream ?? "the remote"
+        if await perform("Pulling…", failure: "Couldn't pull from \(source). Nothing was changed.", in: target, review: review, {
+            try await self.git.pull(root: target.root)
+        }) { announce("Pulled from \(source).") }
+        else if var problem, self.target == target {
+            problem.hint = Self.pullHint(problem.detail ?? "")
+            self.problem = problem
+        }
+    }
+    static func pullHint(_ detail: String) -> String {
+        let lower = detail.lowercased()
+        if lower.contains("not possible to fast-forward") || lower.contains("diverg") {
+            return "This branch and its upstream both have new commits. Merge or rebase in the terminal."
+        }
+        if lower.contains("would be overwritten") || lower.contains("untracked working tree files") {
+            return "Local changes touch the same files. Commit or stash them, then pull again."
+        }
+        if lower.contains("terminal prompts disabled") || lower.contains("authentication failed") || lower.contains("permission denied") {
+            return "Git needs credentials it can use without a terminal, such as a credential helper or an SSH agent."
+        }
+        if lower.contains("could not resolve host") || lower.contains("unable to access") || lower.contains("could not read from remote") {
+            return "Check your network connection and access to the remote, then try again."
+        }
+        return "Git's output is below."
+    }
     func fetch(in target: Target, review: ReviewModel) async {
         if await perform("Fetching…", failure: "Couldn't fetch", in: target, review: review, {
             try await self.git.fetch(root: target.root)

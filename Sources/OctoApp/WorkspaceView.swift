@@ -409,10 +409,10 @@ struct WorkspaceView: View {
                 .onChange(of: review.branch) { _, _ in Task { await git.load(gitTarget(project)) } }
         }
     }
-    /// Staged and Unstaged headings, each group's rows (a file can be in both), or one empty-state row.
+    /// Staged and Unstaged headings and each group's rows; a partly staged file has a row in each.
     private var changesListHeight: CGFloat {
         let staged = review.files.filter(\.hasStaged).count, unstaged = review.files.filter(\.hasWorking).count
-        return 2 * 30 + CGFloat(max(1, staged) + max(1, unstaged)) * 44 + 10
+        return 2 * 30 + CGFloat(staged + unstaged) * 44 + 10
     }
     /// The selected file's actions in the diff header: discard (unstaged only) and stage or unstage.
     @ViewBuilder private func fileActions(_ snapshot: ReviewSnapshot, project: WorkspaceProject) -> some View {
@@ -462,22 +462,27 @@ struct WorkspaceView: View {
                         if let snapshot = review.snapshot {
                             Rectangle().fill(theme.hairline).frame(height: 0.5)
                             HStack(spacing: 8) {
-                                Text(snapshot.path).font(.system(size: 12.5, weight: .semibold)).lineLimit(1).truncationMode(.head).help(snapshot.path)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(snapshot.path).font(.system(size: 12.5, weight: .semibold)).lineLimit(1).truncationMode(.head).help(snapshot.path)
+                                    if !review.browsingFiles {
+                                        Text(snapshot.scope == .staged ? "Staged · HEAD → Index" : "Unstaged · Index → Working tree")
+                                            .font(.system(size: 11)).foregroundStyle(theme.secondary).lineLimit(1)
+                                    }
+                                }
                                 Spacer(minLength: 8)
+                                if !review.browsingFiles {
+                                    let split = review.diffLayout == .sideBySide
+                                    Button { review.diffLayout = split ? .stacked : .sideBySide } label: { Image(systemName: "rectangle.split.2x1") }
+                                        .buttonStyle(CapsuleToolbarButtonStyle(active: split))
+                                        .help(split ? "Show stacked diff" : "Show side-by-side diff").accessibilityLabel("Side-by-side diff")
+                                        .accessibilityAddTraits(split ? .isSelected : [])
+                                }
                                 fileActions(snapshot, project: project)
                                 let target = OpenTarget.preferred(openTarget)
                                 Button { store.open(target, snapshot: snapshot, selection: review.selection) } label: {
                                     Text("Open in \(target.title)")
                                 }.buttonStyle(CapsuleButtonStyle()).help(target.isTerminal ? "Open this checkout in \(target.title) (⇧⌘E)" : "Open \(snapshot.path) in \(target.title) (⇧⌘E)")
                             }.padding(.leading, 16).padding(.trailing, 12).padding(.top, 9).padding(.bottom, 6)
-                            if !review.browsingFiles {
-                                HStack(spacing: 8) {
-                                    Text(snapshot.scope == .staged ? "HEAD → Index · Staged" : "Index → Working tree · Unstaged")
-                                        .font(.system(size: 11)).foregroundStyle(theme.secondary).lineLimit(1)
-                                    Spacer(minLength: 8)
-                                    CapsulePicker(label: "Diff layout", selection: $review.diffLayout, options: [(.stacked, "Stacked"), (.sideBySide, "Side by Side")]).help("Diff layout")
-                                }.padding(.leading, 16).padding(.trailing, 12).padding(.bottom, 6)
-                            }
                             if review.browsingFiles, let editor = review.editor {
                                 InlineFilePane(session: editor, windowID: editorWindowID, theme: store.theme, focusRequest: reviewFocus,
                                     revealLine: review.revealLine, revealRequest: review.revealRequest,
@@ -2419,12 +2424,12 @@ private struct ReviewFileLists: View, Equatable {
                 if let file = review.files.first(where: { $0.path == path }) { selectChange(file, scope) }
             })) {
                 Section {
-                    rows(staged, scope: .staged, empty: "Stage a file or hunk to include it in the next commit.")
+                    rows(staged, scope: .staged)
                 } header: {
                     ChangesGroupHeader(title: "Staged", count: staged.count, actionTitle: "Unstage All") { stage(staged, .staged) }
                 }
                 Section {
-                    rows(unstaged, scope: .working, empty: "No unstaged changes.")
+                    rows(unstaged, scope: .working)
                 } header: {
                     ChangesGroupHeader(title: "Unstaged", count: unstaged.count, actionTitle: "Stage All") { stage(unstaged, .working) }
                 }
@@ -2432,12 +2437,8 @@ private struct ReviewFileLists: View, Equatable {
                 .keyboardFocusRing()
         }
     }
-    @ViewBuilder private func rows(_ files: [ChangedFile], scope: DiffScope, empty: String) -> some View {
-        if files.isEmpty {
-            Text(empty).font(.system(size: 11.5)).foregroundStyle(theme.secondary)
-                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-                .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 8))
-        }
+    /// An empty group is just its heading and zero count; the commit area explains staging.
+    @ViewBuilder private func rows(_ files: [ChangedFile], scope: DiffScope) -> some View {
         // IDs include the scope: a partly staged file's two rows must not share an identity.
         ForEach(files.map { (id: Self.tag(scope, $0.path), file: $0) }, id: \.id) { row in
             let file = row.file

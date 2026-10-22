@@ -438,6 +438,16 @@ struct WorkspaceView: View {
             Task { await git.applyHunk(snapshot, hunk: id, in: target, review: review) }
         }
     }
+    /// Per file in the continuous diff: only ordinary modifications in that section's scope.
+    private func changesHunkAction(_ project: WorkspaceProject) -> HunkAction {
+        let files = review.files, target = gitTarget(project), git = git, review = review
+        return HunkAction(title: { snapshot in
+            guard snapshot.notice == nil, let file = files.first(where: { $0.path == snapshot.path }), file.supportsHunkStaging(snapshot.scope) else { return nil }
+            return snapshot.scope == .staged ? "Unstage Hunk" : "Stage Hunk"
+        }, perform: { snapshot, id in
+            Task { await git.applyHunk(snapshot, hunk: id, in: target, review: review) }
+        })
+    }
     private func reviewContent(_ project: WorkspaceProject, tabs: PanelTabs) -> some View {
         VStack(spacing: 0) {
             if let error = review.error { Text(error).font(.system(size: 13)).foregroundStyle(theme.red).padding() }
@@ -491,6 +501,14 @@ struct WorkspaceView: View {
                                     }, onAskAgent: { if review.browsingFiles && review.editor === editor && !review.loadingSnapshot { attachToDraft($0) } },
                                     onEdit: { store.updatePanelTabs(project.id) { $0.pin(editor.context.path) } })
                                     .id(editor.id)
+                            } else if !review.browsingFiles && review.diffLayout == .stacked {
+                                // Every change in one continuous native document; the header above follows the top file.
+                                NativeDiffView(files: review.changeSnapshots, theme: store.theme, focusRequest: reviewFocus,
+                                               revealFile: review.revealFile, revealFileRequest: review.revealFileRequest,
+                                               hunkAction: changesHunkAction(project), onVisibleFile: { review.showVisibleFile($0) },
+                                               onSelection: { if !review.loadingSnapshot && !review.browsingFiles && review.diffLayout == .stacked { review.selection = $0 } },
+                                               onAskAgent: { if !review.loadingSnapshot { attachToDraft($0) } })
+                                    .keyboardFocusRing()
                             } else if let notice = snapshot.notice { Text(notice).font(.system(size: 13)).foregroundStyle(theme.secondary).padding(); Spacer() }
                             else if !review.browsingFiles && review.diffLayout == .sideBySide {
                                 SideBySideDiffView(snapshot: snapshot, theme: store.theme, focusRequest: reviewFocus, hunkAction: hunkAction(snapshot, project: project),

@@ -107,6 +107,43 @@ import OctoGit
         XCTAssertEqual(offline.detail, "fatal: unable to access 'https://x/': Could not resolve host: x")
     }
 
+    func testChangesShowEveryFileWithNothingSelectedAndAClickScrolls() async throws {
+        let root = try await repository()
+        for name in ["a.txt", "b.txt"] { try "base\n".write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        let executable = try XCTUnwrap(Executables.find("git"))
+        for arguments in [["add", "--all"], ["commit", "--quiet", "-m", "base"]] { _ = try await ProcessRunner.run(executable, arguments: arguments, directory: root) }
+        try "staged\n".write(to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        _ = try await ProcessRunner.run(executable, arguments: ["add", "b.txt"], directory: root)
+        try "staged\nmore\n".write(to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try "changed\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        let review = ReviewModel(), id = UUID()
+        await review.refresh(projectID: id, root: root.path)
+
+        // Staged first, then Unstaged; a partly staged file appears in both.
+        XCTAssertEqual(review.changeSnapshots.map { "\($0.scope.rawValue):\($0.path)" }, ["staged:b.txt", "working:a.txt", "working:b.txt"])
+        XCTAssertNil(review.selectedPath, "Nothing is selected by default")
+        XCTAssertEqual(review.snapshot?.path, "b.txt", "The header shows the file at the top")
+
+        let a = try XCTUnwrap(review.files.first { $0.path == "a.txt" })
+        let request = review.revealFileRequest
+        await review.select(a, scope: .working, projectID: id, root: root.path)
+        XCTAssertEqual(review.selectedPath, "a.txt")
+        XCTAssertEqual(review.revealFile, 1)
+        XCTAssertEqual(review.revealFileRequest, request + 1)
+        XCTAssertEqual(review.snapshot?.id, review.changeSnapshots[1].id, "Chosen from the loaded diffs, without another read")
+
+        // Scrolling moves the current file, and a chosen row follows it.
+        review.showVisibleFile(2)
+        XCTAssertEqual(review.snapshot?.path, "b.txt"); XCTAssertEqual(review.snapshot?.scope, .working)
+        XCTAssertEqual(review.selectedPath, "b.txt"); XCTAssertEqual(review.scope, .working)
+
+        // A refresh with the same changes keeps the current file and the documents' identity.
+        let ids = review.changeSnapshots.map(\.id)
+        await review.refresh(projectID: id, root: root.path)
+        XCTAssertEqual(review.changeSnapshots.map(\.id), ids)
+        XCTAssertEqual(review.snapshot?.path, "b.txt"); XCTAssertEqual(review.snapshot?.scope, .working)
+    }
+
     func testPullHintsNameTheNextStep() {
         XCTAssertTrue(GitWorkflow.pullHint("fatal: Not possible to fast-forward, aborting.").contains("Merge or rebase in the terminal"))
         XCTAssertTrue(GitWorkflow.pullHint("error: Your local changes to the following files would be overwritten by merge").contains("Commit or stash"))

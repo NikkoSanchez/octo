@@ -62,34 +62,106 @@ public struct CodeAttachment: Identifiable, Codable, Equatable, Sendable {
 }
 
 /// Maps UTF-16 text selection back to source lines; display gutters never enter prompts.
+/// A multi-file document (every change in Changes) keeps each line's file, so a capture or a
+/// hunk action always resolves to that file's own snapshot.
 public struct ReviewDocument: Sendable {
     public struct Segment: Sendable {
         public var displayRange: NSRange
         public var contentRange: NSRange
         public var line: DiffLine
+        /// Index into `files`.
+        public var file: Int = 0
+    }
+    /// One file's part of the document. Multi-file documents give it a title row, which is not a
+    /// segment and so can never be attached.
+    public struct FileSection: Sendable {
+        public var snapshot: ReviewSnapshot
+        public var headerRange: NSRange?
+        public var range: NSRange
     }
     public var text: String
     public var segments: [Segment]
+    /// The single file's snapshot; for a multi-file document, an identity covering every file.
     public var snapshot: ReviewSnapshot
+    public var files: [FileSection]
     public var side: DiffSide?
+    public var isMultiFile: Bool { files.count != 1 || files.first?.headerRange != nil }
     public init(source: SourceDocument) {
         text = source.text; segments = source.segments; snapshot = source.snapshot
+        files = [FileSection(snapshot: source.snapshot, range: NSRange(location: 0, length: (source.text as NSString).length))]
+    }
+    /// Every file in order, each under a title row (path and scope) and separated by a blank row.
+    /// Files without text lines show their notice, such as a binary change, as a note row.
+    public init(files snapshots: [ReviewSnapshot]) {
+        var text = "", segments: [Segment] = [], files: [FileSection] = []
+        for (index, file) in snapshots.enumerated() {
+            let start = (text as NSString).length
+            if index > 0 { text += "\n" }
+            let headerStart = (text as NSString).length
+            let title = file.path + "  ·  " + (file.scope == .staged ? "Staged" : "Unstaged")
+            text += title + "\n"
+            let header = NSRange(location: headerStart, length: (title as NSString).length + 1)
+            var lines = file.lines
+            if lines.isEmpty, let notice = file.notice { lines = [DiffLine(id: -1, kind: .header, text: notice)] }
+            for line in lines {
+                let lineStart = (text as NSString).length
+                let prefix = Self.prefix(line)
+                text += prefix
+                let content = NSRange(location: (text as NSString).length, length: (line.text as NSString).length)
+                segments.append(Segment(displayRange: NSRange(location: lineStart, length: NSMaxRange(content) + 1 - lineStart), contentRange: content, line: line, file: index))
+                text += line.text + "\n"
+            }
+            files.append(FileSection(snapshot: file, headerRange: header, range: NSRange(location: start, length: (text as NSString).length - start)))
+        }
+        let first = snapshots.first
+        self.text = text; self.segments = segments; self.files = files
+        self.snapshot = ReviewSnapshot(projectID: first?.projectID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!, workingDirectory: first?.workingDirectory ?? "",
+                                       path: "", scope: first?.scope ?? .working, baseRevision: snapshots.map(\.id).joined(separator: ":"), lines: [])
+    }
+    private static func prefix(_ line: DiffLine) -> String {
+        let old = line.oldLine.map(String.init) ?? ""
+        let new = line.newLine.map(String.init) ?? ""
+        let marker = line.kind == .addition ? "+" : line.kind == .deletion ? "−" : " "
+        return String(format: "%5@ %5@ %@  ", old, new, marker)
+    }
+    /// The file whose section contains a display offset, including its title row.
+    public func file(atUTF16Offset offset: Int) -> Int? {
+        var lower = 0, upper = files.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if NSMaxRange(files[middle].range) <= offset { lower = middle + 1 } else { upper = middle }
+        }
+        return lower < files.count && NSLocationInRange(offset, files[lower].range) ? lower : nil
+    }
+    /// The segment index of the `@@` header starting the hunk at a display offset, within the same
+    /// file. Title rows, notes and the blank row between files belong to no hunk.
+    public func hunkHeader(atUTF16Offset offset: Int) -> Int? {
+        guard let file = file(atUTF16Offset: offset), let header = files[file].headerRange.map(NSMaxRange) ?? Optional(files[file].range.location),
+              offset >= header else { return nil }
+        var lower = 0, upper = segments.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if segments[middle].displayRange.location <= offset { lower = middle + 1 } else { upper = middle }
+        }
+        var index = lower - 1
+        while index >= 0, segments[index].file == file {
+            if segments[index].line.kind == .header && segments[index].line.text.hasPrefix("@@") { return index }
+            index -= 1
+        }
+        return nil
     }
     public init(snapshot: ReviewSnapshot) {
         self.snapshot = snapshot
         var text = "", segments: [Segment] = []
         for line in snapshot.lines {
             let start = (text as NSString).length
-            let old = line.oldLine.map(String.init) ?? ""
-            let new = line.newLine.map(String.init) ?? ""
-            let marker = line.kind == .addition ? "+" : line.kind == .deletion ? "−" : " "
-            let prefix = String(format: "%5@ %5@ %@  ", old, new, marker)
-            text += prefix
+            text += Self.prefix(line)
             let range = NSRange(location: (text as NSString).length, length: (line.text as NSString).length)
             segments.append(Segment(displayRange: NSRange(location: start, length: NSMaxRange(range) + 1 - start), contentRange: range, line: line))
             text += line.text + "\n"
         }
         self.text = text; self.segments = segments
+        files = [FileSection(snapshot: snapshot, range: NSRange(location: 0, length: (text as NSString).length))]
     }
     /// Each change block is paired in source order. Missing counterparts occupy a
     /// display row but have no source segment, so padding can never be attached.
@@ -121,6 +193,7 @@ public struct ReviewDocument: Sendable {
     }
     private init(snapshot: ReviewSnapshot, rows: [DiffLine?], side: DiffSide) {
         self.snapshot = snapshot; self.side = side
+        files = []
         var text = "", segments: [Segment] = [], offset = 0
         for row in rows {
             guard let line = row else { text += "\n"; offset += 1; continue }
@@ -133,6 +206,7 @@ public struct ReviewDocument: Sendable {
             text += prefix + line.text + "\n"; offset += display.length
         }
         self.text = text; self.segments = segments
+        files = [FileSection(snapshot: snapshot, range: NSRange(location: 0, length: offset))]
     }
     /// The gutter action uses an existing selection only when hovering one of its source lines.
     /// Otherwise it captures the whole hovered line, including empty source lines.
@@ -154,19 +228,23 @@ public struct ReviewDocument: Sendable {
         }
         return source
     }
+    /// A selection that crosses into another file captures only the file where it starts.
     public func attachment(for range: NSRange) -> CodeAttachment? {
         guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= (text as NSString).length else { return nil }
-        var chunks: [String] = [], old: [Int] = [], new: [Int] = []
+        var chunks: [String] = [], old: [Int] = [], new: [Int] = [], file: Int?
         for segment in segments where segment.line.kind != .header {
+            if let file, segment.file != file { continue }
             let overlap = NSIntersectionRange(range, segment.contentRange)
             let selectedEmptyLine = segment.contentRange.length == 0
                 && NSLocationInRange(segment.contentRange.location, range)
             guard overlap.length > 0 || selectedEmptyLine else { continue }
+            file = segment.file
             chunks.append(selectedEmptyLine ? "" : (text as NSString).substring(with: overlap))
             if let n = segment.line.oldLine { old.append(n) }
             if let n = segment.line.newLine { new.append(n) }
         }
         guard !chunks.isEmpty else { return nil }
+        let snapshot = file.flatMap { files.indices.contains($0) ? files[$0].snapshot : nil } ?? self.snapshot
         return CodeAttachment(projectID: snapshot.projectID, workingDirectory: snapshot.workingDirectory, path: snapshot.path,
             snapshotID: snapshot.id, baseRevision: snapshot.baseRevision, scope: snapshot.scope,
             oldLines: old.min().flatMap { low in old.max().map { low...$0 } },

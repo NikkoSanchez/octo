@@ -293,6 +293,35 @@ final class GitActionTests: XCTestCase {
         XCTAssertFalse(merging, "No merge is left in progress")
     }
 
+    func testAllChangesLoadInOrderWithALineLimit() async throws {
+        let repo = try await makeRepository()
+        for name in ["a", "b", "c"] { try repo.write("\(name).txt", "base\n") }
+        try await repo.commitAll("base")
+        try repo.write("a.txt", (1...6).map { "a\($0)" }.joined(separator: "\n") + "\n")
+        try await repo.run(["add", "a.txt"])
+        try repo.write("b.txt", "changed\n")
+        try repo.write("c.txt", "changed\n")
+        try repo.write("new.txt", "untracked\n")
+        let service = GitService(), root = repo.root.path
+        let files = try await service.changes(root: root)
+        let entries = files.filter(\.hasStaged).map { (file: $0, scope: DiffScope.staged) } + files.filter(\.hasWorking).map { (file: $0, scope: DiffScope.working) }
+        let all = await service.snapshots(entries, projectID: UUID(), root: root)
+        XCTAssertEqual(all.map(\.path), ["a.txt", "b.txt", "c.txt", "new.txt"])
+        XCTAssertEqual(all.map(\.scope), [.staged, .working, .working, .working])
+        XCTAssertTrue(all.allSatisfy { !$0.lines.isEmpty && $0.notice == nil })
+
+        // Past the limit, later files carry the deferred notice instead of their lines.
+        let limited = await service.snapshots(entries, projectID: UUID(), root: root, lineLimit: 5)
+        XCTAssertFalse(limited[0].lines.isEmpty, "The file that crosses the limit is shown whole")
+        XCTAssertEqual(limited.dropFirst().map(\.notice), Array(repeating: GitService.deferredNotice, count: 3))
+        // An unreadable file reports its error without hiding the rest.
+        let broken = entries + [(file: ChangedFile(path: "../outside", indexStatus: "?", worktreeStatus: "?"), scope: DiffScope.working)]
+        let withError = await service.snapshots(broken, projectID: UUID(), root: root)
+        XCTAssertEqual(withError.count, 5)
+        XCTAssertNotNil(withError.last?.notice)
+        XCTAssertFalse(withError[1].lines.isEmpty)
+    }
+
     func testParsesTrackingAndStashSubjects() {
         XCTAssertTrue(GitService.parseTrack("ahead 2, behind 1") == (2, 1, false))
         XCTAssertTrue(GitService.parseTrack("behind 3") == (0, 3, false))

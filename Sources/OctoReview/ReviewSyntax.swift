@@ -10,15 +10,21 @@ enum ReviewSyntax {
     private static let pythonToken = try! NSRegularExpression(pattern: token.pattern.replacingOccurrences(of: #"//.*|/\*|"#, with: ""))
     private static let escapes = try! NSRegularExpression(pattern: #"\\."#)
 
+    /// Each file's lines use its own language; a multi-file document switches per section.
     static func apply(to result: NSMutableAttributedString, document: ReviewDocument, theme: AppTheme) {
-        let ext = (document.snapshot.path as NSString).pathExtension.lowercased()
-        let python = ["py", "pyi"].contains(ext)
-        let json = ["json", "jsonc"].contains(ext)
-        guard python || json || ["swift", "js", "jsx", "ts", "tsx", "c", "h", "cc", "cpp", "hpp", "m", "mm", "rs", "go", "java", "kt", "kts", "cs"].contains(ext) else { return }
+        var file = -1, python = false, json = false, supported = false
         var old = State(), new = State()
         let colors = theme.syntax
         let italic = NSFontManager.shared.convert(NSFont.monospacedSystemFont(ofSize: 14, weight: .regular), toHaveTrait: .italicFontMask)
         for segment in document.segments {
+            if segment.file != file {
+                file = segment.file; old = State(); new = State()
+                let path = document.files.indices.contains(file) ? document.files[file].snapshot.path : document.snapshot.path
+                let ext = (path as NSString).pathExtension.lowercased()
+                python = ["py", "pyi"].contains(ext); json = ["json", "jsonc"].contains(ext)
+                supported = python || json || ["swift", "js", "jsx", "ts", "tsx", "c", "h", "cc", "cpp", "hpp", "m", "mm", "rs", "go", "java", "kt", "kts", "cs"].contains(ext)
+            }
+            guard supported else { continue }
             if segment.line.kind == .header {
                 if segment.line.text.hasPrefix("@@") { old = State(); new = State() }
                 continue

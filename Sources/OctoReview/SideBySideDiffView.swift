@@ -69,7 +69,7 @@ public final class SideBySideReviewView: NSView, NSTextViewDelegate {
             }
             text.attachRange = { [weak self] range in self?.attach(range, in: index) }
             // Hunk actions live on the After pane; hovering either pane reveals them.
-            if index == 0 { text.onHoveredHunk = { [weak self] id in self?.texts[1].hoveredHunk = id } }
+            if index == 0 { text.onHoveredHunk = { [weak self] id in self?.texts[1].hoverHunk(lineID: id) } }
             label.font = .systemFont(ofSize: 12, weight: .medium)
             label.lineBreakMode = .byTruncatingTail
             addSubview(scroll); addSubview(label)

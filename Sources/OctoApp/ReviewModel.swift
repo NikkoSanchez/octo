@@ -29,6 +29,13 @@ import OctoGit
     @Published var revealLine: Int?
     @Published var revealRequest = 0
     @Published private(set) var loadingSnapshot = false
+    /// Every change, Staged then Unstaged, for the continuous diff. `snapshot` is the current file:
+    /// the one chosen in the list, or the one scrolled to the top.
+    @Published private(set) var changeSnapshots: [ReviewSnapshot] = []
+    /// Asks the continuous diff to scroll a file to the top; a list click changes the request.
+    @Published private(set) var revealFile: Int?
+    @Published private(set) var revealFileRequest = 0
+    private var currentFile: (path: String, scope: DiffScope)?
     private var filePath: String?
     private var changePath: String?
     private let git = GitService()
@@ -61,6 +68,7 @@ import OctoGit
         if context != nextContext {
             // `filePath` belongs to the panel's selected file tab, which applies to every checkout.
             context = nextContext; editor = nil; changePath = nil; files = []; tree = []; snapshot = nil; selection = nil; selectedPath = nil; branch = ""; branches = []; diffStat = nil; stagedStat = nil; workingStat = nil; expandedFolders = []; revealLine = nil
+            changeSnapshots = []; currentFile = nil; revealFile = nil
         }
         do {
             let result = try await git.changes(root: root), branch = await git.branch(root: root)
@@ -80,13 +88,7 @@ import OctoGit
                 else { snapshot = nil; editor = nil; selection = nil; selectedPath = nil }
                 if generation == token { loading = false }; return
             }
-            // Keep the selection's group when it can; otherwise start at the top of the Staged and Unstaged lists.
-            if !result.contains(where: { $0.path == selectedPath }) {
-                selectedPath = (result.first { scope == .staged ? $0.hasStaged : $0.hasWorking }
-                    ?? result.first(where: \.hasStaged) ?? result.first)?.path
-            }
-            if let file = result.first(where: { $0.path == selectedPath }) { await select(file, projectID: projectID, root: root) }
-            else { snapshot = nil; selection = nil }
+            await loadChanges(result, projectID: projectID, root: root)
         } catch { if generation == token { self.error = error.localizedDescription; files = []; snapshot = nil } }
         if generation == token { loading = false }
     }
@@ -104,12 +106,14 @@ import OctoGit
     func switchBrowser(projectID: UUID, root: String) async {
         selection = nil
         if browsingFiles {
-            if let path = filePath ?? selectedPath { await selectPath(path, projectID: projectID, root: root) }
+            // Without a file of its own, Files opens the change being read.
+            if let path = filePath ?? selectedPath ?? snapshot.flatMap({ $0.scope == .file ? nil : $0.path }) { await selectPath(path, projectID: projectID, root: root) }
             else { snapshotGeneration = UUID(); snapshot = nil; selectedPath = nil; loadingSnapshot = false }
         } else {
-            let path = changePath ?? selectedPath
-            if let file = files.first(where: { $0.path == path }) ?? files.first { await select(file, projectID: projectID, root: root) }
-            else { snapshotGeneration = UUID(); snapshot = nil; selectedPath = nil; loadingSnapshot = false }
+            // `selectedPath` held the Files tab's file; Changes restores only its own choice.
+            selectedPath = changePath
+            await loadChanges(files, projectID: projectID, root: root)
+            if let path = selectedPath, let file = files.first(where: { $0.path == path }) { await select(file, projectID: projectID, root: root) }
         }
     }
     /// Mirrors the panel's selected tab before a refresh, so the refresh restores that tab's file.
@@ -172,12 +176,43 @@ import OctoGit
         guard other == .staged ? file.hasStaged : file.hasWorking else { return }
         await select(file, scope: other, projectID: projectID, root: root)
     }
+    /// Loads every staged and unstaged diff. Nothing is selected by default; a chosen row survives
+    /// while its file and group still have changes. The current file stays current where it can.
+    private func loadChanges(_ files: [ChangedFile], projectID: UUID, root: String) async {
+        let token = generation, expected = projectID.uuidString + root
+        let entries = files.filter(\.hasStaged).map { (file: $0, scope: DiffScope.staged) } + files.filter(\.hasWorking).map { (file: $0, scope: DiffScope.working) }
+        let loaded = await git.snapshots(entries, projectID: projectID, root: root)
+        guard generation == token, context == expected, !browsingFiles else { return }
+        if changeSnapshots.map(\.id) != loaded.map(\.id) { changeSnapshots = loaded }
+        if let path = selectedPath, !loaded.contains(where: { $0.path == path && $0.scope == scope }) { selectedPath = nil; changePath = nil }
+        let current = currentFile.flatMap { key in loaded.first { $0.path == key.path && $0.scope == key.scope } } ?? loaded.first
+        currentFile = current.map { ($0.path, $0.scope) }
+        if snapshot?.id != current?.id || snapshot?.scope == .file { snapshot = current }
+        error = nil
+    }
+    /// The continuous diff scrolled another file to the top. A chosen row follows it.
+    func showVisibleFile(_ index: Int) {
+        guard !browsingFiles, changeSnapshots.indices.contains(index) else { return }
+        let file = changeSnapshots[index]
+        currentFile = (file.path, file.scope)
+        if snapshot?.id != file.id { snapshot = file }
+        if selectedPath != nil, selectedPath != file.path || scope != file.scope { selectedPath = file.path; changePath = file.path; scope = file.scope }
+    }
+    /// Choosing a row scrolls the continuous diff to that file. Side by side shows it alone.
     func select(_ file: ChangedFile, projectID: UUID, root: String) async {
         guard !browsingFiles else { return }
-        let token = UUID(); snapshotGeneration = token; selectedPath = file.path; changePath = file.path; selection = nil; loadingSnapshot = true
-        defer { if snapshotGeneration == token { loadingSnapshot = false } }
         if scope == .staged && !file.hasStaged { scope = .working }
         else if scope == .working && !file.hasWorking && file.hasStaged { scope = .staged }
+        if let index = changeSnapshots.firstIndex(where: { $0.path == file.path && $0.scope == scope }) {
+            snapshotGeneration = UUID(); loadingSnapshot = false
+            selectedPath = file.path; changePath = file.path; selection = nil
+            currentFile = (file.path, scope); snapshot = changeSnapshots[index]
+            revealFile = index; revealFileRequest += 1
+            // A file past the continuous diff's line limit is read on its own for side by side.
+            guard changeSnapshots[index].notice == GitService.deferredNotice else { return }
+        }
+        let token = UUID(); snapshotGeneration = token; selectedPath = file.path; changePath = file.path; selection = nil; loadingSnapshot = true
+        defer { if snapshotGeneration == token { loadingSnapshot = false } }
         do {
             let value = try await git.snapshot(file: file, projectID: projectID, root: root, scope: scope)
             guard snapshotGeneration == token else { return }; snapshot = value; error = nil

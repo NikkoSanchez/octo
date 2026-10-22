@@ -148,7 +148,48 @@ public actor GitService {
         return ReviewSnapshot(projectID: projectID, workingDirectory: root, path: path, scope: .file, baseRevision: base, lines: lines, notice: notice)
     }
     public func snapshot(file: ChangedFile, projectID: UUID, root: String, scope: DiffScope) async throws -> ReviewSnapshot {
+        try await snapshot(file: file, projectID: projectID, root: root, scope: scope, base: nil)
+    }
+    /// Shown for files past `snapshots`' line limit; selecting such a file loads its diff alone.
+    public static let deferredNotice = "Not shown here: Changes lists up to 20,000 lines at once. Choose side by side or open the file to review it."
+    /// Every change for the all-files diff, in the given order (Staged, then Unstaged). A few diffs
+    /// run at a time. Once `lineLimit` lines are loaded, later files carry `deferredNotice` instead,
+    /// and a file that can't be read carries its error, so one bad file never hides the rest.
+    public func snapshots(_ entries: [(file: ChangedFile, scope: DiffScope)], projectID: UUID, root: String, lineLimit: Int = 20_000) async -> [ReviewSnapshot] {
+        guard !entries.isEmpty else { return [] }
         let base = (try? await text(["rev-parse", "HEAD"], root: root)) ?? "unborn"
+        var results = [ReviewSnapshot?](repeating: nil, count: entries.count)
+        await withTaskGroup(of: (Int, ReviewSnapshot).self) { group in
+            var next = 0
+            func start() {
+                let index = next, entry = entries[index]; next += 1
+                group.addTask {
+                    do { return (index, try await self.snapshot(file: entry.file, projectID: projectID, root: root, scope: entry.scope, base: base)) }
+                    catch {
+                        return (index, ReviewSnapshot(projectID: projectID, workingDirectory: root, path: entry.file.path, scope: entry.scope,
+                                                      baseRevision: base, lines: [], notice: error.localizedDescription))
+                    }
+                }
+            }
+            for _ in 0..<min(6, entries.count) { start() }
+            while let (index, snapshot) = await group.next() {
+                results[index] = snapshot
+                if next < entries.count { start() }
+            }
+        }
+        var total = 0
+        return results.compactMap { $0 }.map { snapshot in
+            guard total <= lineLimit else {
+                return snapshot.lines.isEmpty ? snapshot : ReviewSnapshot(projectID: projectID, workingDirectory: root, path: snapshot.path, scope: snapshot.scope,
+                                                                         baseRevision: base, lines: [], notice: Self.deferredNotice)
+            }
+            total += snapshot.lines.count
+            return snapshot
+        }
+    }
+    func snapshot(file: ChangedFile, projectID: UUID, root: String, scope: DiffScope, base knownBase: String?) async throws -> ReviewSnapshot {
+        let base: String
+        if let knownBase { base = knownBase } else { base = (try? await text(["rev-parse", "HEAD"], root: root)) ?? "unborn" }
         var lines: [DiffLine] = [], notice: String?
         if file.isUntracked {
             let preview = try readPreview(path: file.path, root: root)

@@ -2,7 +2,12 @@ packages:
   - apps/*
   - packages/*
 
-onlyBuiltDependencies:
-  - electron
-  - esbuild
-  - node-pty
+saveExact: true
+
+# Dependencies allowed to run install scripts; anything else with one fails the install.
+allowBuilds:
+  electron: true
+  esbuild: true
+  node-pty: true
+  # Windows installer tooling, never needed on macOS.
+  electron-winstaller: false

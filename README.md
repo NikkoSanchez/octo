@@ -13,7 +13,7 @@ A macOS workspace for coding agents: projects and nested chat threads on the lef
 
 ## Run
 
-Requires macOS, Node 24 or newer, and pnpm through Corepack (`corepack enable`).
+Requires macOS, Node 24 or newer, and [pnpm](https://pnpm.io/installation) (for example `brew install pnpm`). Any recent pnpm switches to the version pinned in `package.json`.
 
 ```sh
 gh repo clone NikkoSanchez/octo

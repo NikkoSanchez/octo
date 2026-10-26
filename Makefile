@@ -1,12 +1,12 @@
 .PHONY: setup test build smoke app run release install
 setup:
-	corepack pnpm install
+	pnpm install
 test:
-	corepack pnpm test
+	pnpm test
 build:
-	corepack pnpm build
+	pnpm build
 smoke:
-	corepack pnpm smoke
+	pnpm smoke
 # Octo Dev (build/Octo Dev.app): the development copy, with its own chats.
 app:
 	mkdir -p build && node apps/desktop/scripts/package.mjs dev "$(CURDIR)/build/Octo Dev.app"

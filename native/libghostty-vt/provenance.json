@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/pingdotgg/t3code",
+  "revision": "c79ef8c454e1268ff79da5a9dcb74572e86f7861",
+  "libghosttyRevision": "9f62873bf195e4d8a762d768a1405a5f2f7b1697",
+  "assets": {
+    "vendor/ghostty-write-pty.wasm": "75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903",
+    "vendor/ghostty-vt.wasm": "51b016a6aa3c29ead71c7c8acf8c01d43b064bae19957a9c9f9e2bf469267629",
+    "fonts/LICENSE": "84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847",
+    "fonts/SymbolsNerdFontMono-Regular.woff2": "a8e2fc5ae3c2525812151b95da80c5beab0befa84aca84fc33aaed94317502df"
+  },
+  "localChanges": [
+    "Surface/keyCodes imports use Octo support helpers; the shifted-key table is copied from T3 shared/keybindings. No changes to the VT core, renderer, runtime or WASM.",
+    "Added terminal-links and observeResize from the same T3 revision.",
+    "ABI/key tests use Vitest and the local canonical native header path."
+  ]
+}

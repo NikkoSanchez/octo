@@ -1,0 +1,43 @@
+.workspace { position: relative; width: 100%; height: 100%; overflow: hidden; color: var(--foreground); background: var(--background); }
+
+/* The detail area: everything right of the sidebar card. */
+.detail { position: absolute; top: 0; bottom: 0; min-width: 0; overflow: hidden; background: var(--background); }
+/* clip, not hidden: a hidden box still scrolls, so scrollIntoView inside a pane would shift every pane. */
+.content { position: absolute; left: 0; right: 0; bottom: 0; overflow: clip; }
+.surface { position: absolute; inset: 0; }
+
+.titlebar {
+  position: relative; z-index: 2; display: flex; align-items: center; gap: 10px; flex: none;
+  height: 48px; padding: 8px 10px 8px 16px; -webkit-app-region: drag;
+}
+.titlebar button { -webkit-app-region: no-drag; }
+.titlebarLeading { display: flex; align-items: center; gap: 6px; padding-right: 10px; }
+.title { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; }
+.title strong, .title span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title strong { font-size: 13.5px; font-weight: 600; }
+.title span { color: var(--secondary); font-size: 11.5px; }
+.spacer { flex: 1; min-width: 8px; }
+
+/* The thread's surfaces in one glass capsule: terminal, project actions and the review panel. */
+.toolbarCapsule {
+  display: flex; flex: none; padding: 2px; border-radius: 999px; -webkit-app-region: no-drag;
+  background: var(--glass); backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: inset 0 0 0 1px var(--control-border);
+}
+:global(html[data-reduce-transparency="true"]) .toolbarCapsule { background: var(--field); backdrop-filter: none; }
+
+.columns { position: absolute; inset: 0; }
+.chatColumn { position: absolute; top: 0; bottom: 0; left: 0; display: flex; flex-direction: column; min-width: 0; }
+.reviewFrame { position: absolute; top: 0; right: 0; bottom: 0; padding-right: 8px; padding-bottom: 8px; min-width: 0; }
+.reviewCard { height: 100%; }
+
+.floatingActions { position: absolute; right: 16px; z-index: 2; }
+
+.sidebarFrame { position: absolute; top: 0; bottom: 0; left: 0; z-index: 3; padding: 8px 0 8px 8px; transition: transform 0.2s ease; }
+@media (prefers-reduced-motion: reduce) { .sidebarFrame { transition: none; } }
+.scrim { position: absolute; inset: 0; z-index: 2; border: none; background: rgba(0, 0, 0, 0.2); }
+
+.storageWarning {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; padding: 8px 14px; border-radius: 10px;
+  color: var(--yellow); background: var(--panel); box-shadow: 0 2px 8px var(--card-shadow), inset 0 0 0 1px var(--control-border);
+}

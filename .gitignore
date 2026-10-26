@@ -1,0 +1,26 @@
+node_modules/
+dist/
+out/
+release/
+.vite/
+coverage/
+test-results/
+playwright-report/
+.DS_Store
+*.log
+
+# Local credentials, signing material, and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.claude/settings.local.json
+
+# Local workspace exports
+workspace.json
+workspace-*.json
+.octo-workspace-*
+build/

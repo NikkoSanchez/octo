@@ -1,0 +1,35 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  cursor: default;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+:root { --background: #ffffff; --panel: #f5f5f7; --foreground: #1d1d1f; --secondary: #6e6e73; --accent: #007aff; --hairline: #d1d1d6; --surface: #e8e8ed; --field: #e8e8ed; }
+button, input, select, textarea { font: inherit; }
+button { cursor: default; }
+input, select { background: var(--background); color: var(--foreground); border: 1px solid var(--control-border); border-radius: 5px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Fields drawn inside their own capsule or bar show focus through that container instead. */
+input[data-plain]:focus-visible, dialog:focus-visible { outline: none; }
+button:disabled { cursor: default; }
+::selection { background: var(--selection); }
+pre, code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Thumbs are drawn only while the user scrolls: lib/scrollbars.ts marks the scroller with data-scrolling and fades it after a pause. */
+@property --scrollbar-thumb { syntax: "<color>"; inherits: false; initial-value: transparent; }
+[data-scrolling] { --scrollbar-thumb: var(--border); }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { --scrollbar-thumb: inherit; background: var(--scrollbar-thumb); border: 2px solid transparent; background-clip: padding-box; border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { background-color: var(--border); }
+::-webkit-scrollbar-corner { background: transparent; }

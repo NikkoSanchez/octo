@@ -1,0 +1,22 @@
+{
+  "name": "octo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.8.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "postinstall": "node apps/desktop/node_modules/electron/install.js",
+    "dev": "pnpm --filter @octo/desktop dev",
+    "test": "vitest run",
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm typecheck && pnpm --filter @octo/desktop build",
+    "smoke": "pnpm --filter @octo/desktop smoke"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,6 @@
+.popover {
+  position: fixed; z-index: 50; max-height: calc(100vh - 16px); overflow: auto;
+  color: var(--foreground); background: var(--panel); border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22), 0 0 0 0.5px var(--rim-outer), inset 0 0 0 1px var(--rim-inner);
+  font-size: 13px;
+}

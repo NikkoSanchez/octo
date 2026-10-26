@@ -1,0 +1,41 @@
+{
+  "name": "@octo/desktop",
+  "productName": "Octo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Octo: a workspace for coding agents.",
+  "author": "Nikkolas Sanchez",
+  "license": "MIT",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.json",
+    "smoke": "electron-vite build && playwright test",
+    "app": "node scripts/package.mjs dev",
+    "release": "node scripts/package.mjs release"
+  },
+  "dependencies": {
+    "node-pty": "1.2.0-beta.15"
+  },
+  "devDependencies": {
+    "@octo/agents": "workspace:*",
+    "@octo/core": "workspace:*",
+    "@octo/git": "workspace:*",
+    "@pierre/diffs": "1.6.1",
+    "@playwright/test": "1.64.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0",
+    "electron-vite": "6.0.0",
+    "immer": "11.2.9",
+    "lucide-react": "1.61.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "vite": "8.3.5",
+    "zustand": "5.0.16"
+  }
+}
